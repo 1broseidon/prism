@@ -7,6 +7,7 @@ all: check build
 build:
 	go build -o bin/prism ./cmd/prism
 	go build -o bin/prism-bridge ./cmd/prism-bridge
+	go build -o bin/prism-auth ./cmd/prism-auth
 
 # Run tests with race detector
 test:
