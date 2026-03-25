@@ -1,3 +1,4 @@
+// Package config handles loading and validation of Prism gateway configuration.
 package config
 
 import (
@@ -133,12 +134,15 @@ type Config struct {
 // Duration is a time.Duration that marshals/unmarshals as a JSON string.
 type Duration time.Duration
 
+// Duration returns the underlying time.Duration value.
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
+// MarshalJSON encodes the duration as a JSON string (e.g. "5m30s").
 func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(time.Duration(d).String())
 }
 
+// UnmarshalJSON decodes a JSON string (e.g. "5m30s") or number (nanoseconds) into a Duration.
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -164,7 +168,7 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // Load reads a JSON config file, applies defaults, and validates.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // Config path is from CLI flag
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
@@ -212,63 +216,80 @@ func validate(cfg *Config) error {
 		return errors.New("at least one server is required")
 	}
 
-	seenIDs := make(map[string]int, len(cfg.Servers))
-	seenNamespaces := make(map[string]int, len(cfg.Servers))
+	if err := validateServers(cfg.Servers); err != nil {
+		return err
+	}
 
-	for i, s := range cfg.Servers {
-		if s.ID == "" {
-			return fmt.Errorf("server[%d]: id is required", i)
-		}
-		if s.URL == "" {
-			return fmt.Errorf("server[%d]: url is required", i)
-		}
-		if !strings.HasPrefix(s.URL, "http://") && !strings.HasPrefix(s.URL, "https://") {
-			return fmt.Errorf("server[%d]: url must start with http:// or https://", i)
-		}
-		if prev, dup := seenIDs[s.ID]; dup {
-			return fmt.Errorf("server[%d]: duplicate id %q (first at server[%d])", i, s.ID, prev)
-		}
-		seenIDs[s.ID] = i
+	return validateRateLimit(cfg.RateLimit)
+}
 
-		ns := s.Namespace
-		if ns == "" {
-			ns = s.ID
-		}
-		if prev, dup := seenNamespaces[ns]; dup {
-			return fmt.Errorf("server[%d]: duplicate namespace %q (first at server[%d])", i, ns, prev)
-		}
-		seenNamespaces[ns] = i
+func validateServers(servers []ServerConfig) error {
+	seenIDs := make(map[string]int, len(servers))
+	seenNamespaces := make(map[string]int, len(servers))
 
-		if s.Credentials != nil {
-			if err := validateCredential(i, s.Credentials); err != nil {
-				return err
-			}
-		}
-
-		if s.CircuitBreaker != nil {
-			if s.CircuitBreaker.Threshold <= 0 {
-				return fmt.Errorf("server[%d].circuit_breaker.threshold must be > 0", i)
-			}
-		}
-		if s.RateLimit != nil {
-			if s.RateLimit.RequestsPerSecond <= 0 {
-				return fmt.Errorf("server[%d].rate_limit.requests_per_second must be > 0", i)
-			}
-			if s.RateLimit.Burst <= 0 {
-				return fmt.Errorf("server[%d].rate_limit.burst must be > 0", i)
-			}
+	for i, s := range servers {
+		if err := validateServer(i, &s, seenIDs, seenNamespaces); err != nil {
+			return err
 		}
 	}
 
-	if cfg.RateLimit != nil {
-		if cfg.RateLimit.RequestsPerSecond <= 0 {
-			return errors.New("rate_limit.requests_per_second must be > 0")
+	return nil
+}
+
+func validateServer(i int, s *ServerConfig, seenIDs, seenNamespaces map[string]int) error {
+	if s.ID == "" {
+		return fmt.Errorf("server[%d]: id is required", i)
+	}
+	if s.URL == "" {
+		return fmt.Errorf("server[%d]: url is required", i)
+	}
+	if !strings.HasPrefix(s.URL, "http://") && !strings.HasPrefix(s.URL, "https://") {
+		return fmt.Errorf("server[%d]: url must start with http:// or https://", i)
+	}
+	if prev, dup := seenIDs[s.ID]; dup {
+		return fmt.Errorf("server[%d]: duplicate id %q (first at server[%d])", i, s.ID, prev)
+	}
+	seenIDs[s.ID] = i
+
+	ns := s.Namespace
+	if ns == "" {
+		ns = s.ID
+	}
+	if prev, dup := seenNamespaces[ns]; dup {
+		return fmt.Errorf("server[%d]: duplicate namespace %q (first at server[%d])", i, ns, prev)
+	}
+	seenNamespaces[ns] = i
+
+	if s.Credentials != nil {
+		if err := validateCredential(i, s.Credentials); err != nil {
+			return err
 		}
-		if cfg.RateLimit.Burst <= 0 {
-			return errors.New("rate_limit.burst must be > 0")
+	}
+	if s.CircuitBreaker != nil && s.CircuitBreaker.Threshold <= 0 {
+		return fmt.Errorf("server[%d].circuit_breaker.threshold must be > 0", i)
+	}
+	if s.RateLimit != nil {
+		if s.RateLimit.RequestsPerSecond <= 0 {
+			return fmt.Errorf("server[%d].rate_limit.requests_per_second must be > 0", i)
+		}
+		if s.RateLimit.Burst <= 0 {
+			return fmt.Errorf("server[%d].rate_limit.burst must be > 0", i)
 		}
 	}
 
+	return nil
+}
+
+func validateRateLimit(rl *RateLimitConfig) error {
+	if rl == nil {
+		return nil
+	}
+	if rl.RequestsPerSecond <= 0 {
+		return errors.New("rate_limit.requests_per_second must be > 0")
+	}
+	if rl.Burst <= 0 {
+		return errors.New("rate_limit.burst must be > 0")
+	}
 	return nil
 }
 

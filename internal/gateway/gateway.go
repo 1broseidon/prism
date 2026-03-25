@@ -13,19 +13,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prism-gateway/prism/internal/audit"
 	"github.com/prism-gateway/prism/internal/auth"
 	"github.com/prism-gateway/prism/internal/config"
 	"github.com/prism-gateway/prism/internal/credentials"
 	"github.com/prism-gateway/prism/internal/middleware"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const namespaceSeparator = "__"
 
 // Backend represents a connected backend MCP server.
 type Backend struct {
-	Config  config.ServerConfig
+	Config  *config.ServerConfig
 	Client  *mcp.Client
 	Session *mcp.ClientSession
 	CB      *middleware.CircuitBreaker
@@ -33,11 +33,11 @@ type Backend struct {
 
 // Gateway aggregates multiple MCP backends behind a single server.
 type Gateway struct {
-	mu       sync.RWMutex
-	backends map[string]*Backend // keyed by server ID
-	server   *mcp.Server
-	logger   *slog.Logger
-	auditor  *audit.Logger
+	mu        sync.RWMutex
+	backends  map[string]*Backend // keyed by server ID
+	server    *mcp.Server
+	logger    *slog.Logger
+	auditor   *audit.Logger
 	credStore *credentials.Store
 }
 
@@ -133,14 +133,14 @@ func (g *Gateway) Server() *mcp.Server {
 // Handler returns an http.Handler that serves the Streamable HTTP MCP transport.
 func (g *Gateway) Handler() http.Handler {
 	return mcp.NewStreamableHTTPHandler(
-		func(r *http.Request) *mcp.Server { return g.server },
+		func(_ *http.Request) *mcp.Server { return g.server },
 		nil,
 	)
 }
 
 // ConnectBackend establishes a connection to a backend MCP server
 // and registers its tools on the gateway server.
-func (g *Gateway) ConnectBackend(ctx context.Context, cfg config.ServerConfig) error {
+func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) error {
 	client := mcp.NewClient(
 		&mcp.Implementation{
 			Name:    "prism-client",
@@ -338,7 +338,7 @@ func (g *Gateway) DisconnectBackend(id string) error {
 	g.removeBackendTools(b)
 
 	if b.Session != nil {
-		b.Session.Close()
+		_ = b.Session.Close()
 	}
 	g.logger.Info("disconnected backend", "id", id)
 	return nil
@@ -362,7 +362,7 @@ func (g *Gateway) Close() {
 
 	for id, b := range backends {
 		if b.Session != nil {
-			b.Session.Close()
+			_ = b.Session.Close()
 		}
 		g.logger.Info("disconnected backend", "id", id)
 	}

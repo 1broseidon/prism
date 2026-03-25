@@ -8,6 +8,7 @@ import (
 // CBState represents the circuit breaker state.
 type CBState int
 
+// Circuit breaker states.
 const (
 	CBClosed   CBState = iota // Normal operation
 	CBOpen                    // Rejecting calls
@@ -63,11 +64,11 @@ func (cb *CircuitBreaker) Allow() bool {
 		}
 		return false
 	case CBHalfOpen:
-		max := cb.cfg.MaxHalfOpen
-		if max <= 0 {
-			max = 1
+		limit := cb.cfg.MaxHalfOpen
+		if limit <= 0 {
+			limit = 1
 		}
-		if cb.halfOpenCount < max {
+		if cb.halfOpenCount < limit {
 			cb.halfOpenCount++
 			return true
 		}
@@ -81,11 +82,14 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
-	if cb.state == CBHalfOpen {
+	switch cb.state {
+	case CBHalfOpen:
 		cb.state = CBClosed
 		cb.failures = 0
-	} else if cb.state == CBClosed {
+	case CBClosed:
 		cb.failures = 0
+	case CBOpen:
+		// no action
 	}
 }
 

@@ -23,7 +23,7 @@ func TestExtractBearerToken(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := httptest.NewRequest("GET", "/", nil)
+			r := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 			if tt.header != "" {
 				r.Header.Set("Authorization", tt.header)
 			}
@@ -67,14 +67,14 @@ func TestPolicyFromContext(t *testing.T) {
 }
 
 func TestRequireScope(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
 	// No policy in context → 403
 	wrapped := RequireScope("admin:*")(handler)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
 	wrapped.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", rec.Code)
@@ -84,7 +84,7 @@ func TestRequireScope(t *testing.T) {
 	policy := NewPolicy("admin:* github:*")
 	ctx := context.WithValue(context.Background(), policyKey, policy)
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+	req = httptest.NewRequestWithContext(ctx, "GET", "/", nil)
 	wrapped.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
@@ -94,7 +94,7 @@ func TestRequireScope(t *testing.T) {
 	policy = NewPolicy("github:*")
 	ctx = context.WithValue(context.Background(), policyKey, policy)
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+	req = httptest.NewRequestWithContext(ctx, "GET", "/", nil)
 	wrapped.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", rec.Code)

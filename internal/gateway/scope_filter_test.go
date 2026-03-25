@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/prism-gateway/prism/internal/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/prism-gateway/prism/internal/auth"
 )
 
 // policyCtx is a context.Context that satisfies auth.PolicyFromContext by

@@ -104,5 +104,5 @@ func (l *Logger) LogCall(ctx context.Context, namespace, tool, backend string, a
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.out.Write(data) //nolint:errcheck
+	_, _ = l.out.Write(data)
 }

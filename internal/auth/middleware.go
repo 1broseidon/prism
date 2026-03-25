@@ -77,10 +77,9 @@ func RequireScope(scopes ...string) func(http.Handler) http.Handler {
 					}
 				}
 				if !found {
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(
-						`Bearer error="insufficient_scope", scope="%s"`,
-						scope,
-					))
+					w.Header().Set("WWW-Authenticate",
+						`Bearer error="insufficient_scope", scope=`+fmt.Sprintf("%q", scope),
+					)
 					http.Error(w, "Forbidden: insufficient scope", http.StatusForbidden)
 					return
 				}
@@ -97,18 +96,17 @@ func writeWWWAuthenticate(w http.ResponseWriter, resourceURI string, status int,
 	parts := []string{}
 
 	if resourceURI != "" {
-		parts = append(parts, fmt.Sprintf(`resource_metadata="%s/.well-known/oauth-protected-resource"`, resourceURI))
+		parts = append(parts, fmt.Sprintf("resource_metadata=%q", resourceURI+"/.well-known/oauth-protected-resource"))
 	}
 
 	if status == http.StatusForbidden && scope != "" {
-		parts = append(parts, `error="insufficient_scope"`)
-		parts = append(parts, fmt.Sprintf(`scope="%s"`, scope))
+		parts = append(parts, `error="insufficient_scope"`, fmt.Sprintf("scope=%q", scope))
 	} else if status == http.StatusUnauthorized {
 		parts = append(parts, `error="invalid_token"`)
 	}
 
 	if description != "" {
-		parts = append(parts, fmt.Sprintf(`error_description="%s"`, description))
+		parts = append(parts, fmt.Sprintf("error_description=%q", description))
 	}
 
 	if len(parts) > 0 {

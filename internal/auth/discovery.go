@@ -36,6 +36,6 @@ func DiscoveryHandler(meta *ProtectedResourceMetadata) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
-		json.NewEncoder(w).Encode(meta) //nolint:errcheck
+		_ = json.NewEncoder(w).Encode(meta)
 	})
 }

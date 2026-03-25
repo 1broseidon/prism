@@ -36,15 +36,15 @@ func (a *API) Handler() http.Handler {
 	return mux
 }
 
-func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (a *API) handleBackends(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleBackends(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, a.statusFn())
 }
 
-func (a *API) handleInfo(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":       "prism",
 		"version":    "0.1.0",
@@ -57,5 +57,5 @@ func (a *API) handleInfo(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v) //nolint:errcheck
+	_ = json.NewEncoder(w).Encode(v)
 }

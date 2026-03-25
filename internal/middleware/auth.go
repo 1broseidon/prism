@@ -1,3 +1,4 @@
+// Package middleware provides HTTP middleware for auth, rate limiting, and circuit breaking.
 package middleware
 
 import (

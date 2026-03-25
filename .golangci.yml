@@ -1,0 +1,101 @@
+version: "2"
+
+# golangci-lint v2 configuration for Prism
+# Target: Go Report Card A+ (gofmt, go vet, gocyclo, golint, ineffassign, misspell)
+
+run:
+  go: "1.25"
+  timeout: 5m
+
+linters:
+  enable:
+    # Go Report Card linters
+    - govet          # go vet
+    - gocyclo        # cyclomatic complexity
+    - ineffassign    # unused assignments
+    - misspell       # spelling in comments/strings
+
+    # Best practices
+    - errcheck       # unchecked errors
+    - staticcheck    # advanced static analysis
+    - unused         # unused code
+    - gocritic       # opinionated but useful
+    - revive         # golint successor
+    - bodyclose      # unclosed HTTP response bodies
+    - gosec          # security issues
+    - prealloc       # slice preallocation hints
+    - unconvert      # unnecessary type conversions
+    - unparam        # unused function parameters
+    - whitespace     # unnecessary whitespace
+    - noctx          # HTTP requests without context
+    - errorlint      # error wrapping best practices
+
+  settings:
+    gocyclo:
+      min-complexity: 15
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+          arguments:
+            - allowRegex: "^_"
+        - name: unreachable-code
+
+    misspell:
+      locale: US
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # sacrifices readability for minor memory savings
+
+  exclusions:
+    rules:
+      # Test files can be more relaxed
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - unparam
+          - gocritic
+          - revive
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
+
+  settings:
+    gofmt:
+      simplify: true
+
+output:
+  sort-order:
+    - linter
+    - file

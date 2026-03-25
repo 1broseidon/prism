@@ -18,7 +18,7 @@ import (
 // Credential resolves an HTTP header name and value at call time.
 // Implementations are free to cache, rotate, or shell out as needed.
 type Credential interface {
-	Resolve(ctx context.Context) (header string, value string, err error)
+	Resolve(ctx context.Context) (header, value string, err error)
 }
 
 // ─── Credential types ────────────────────────────────────────────────────────
@@ -30,7 +30,8 @@ type Static struct {
 	Value  string
 }
 
-func (s *Static) Resolve(_ context.Context) (string, string, error) {
+// Resolve returns the static header and value.
+func (s *Static) Resolve(_ context.Context) (header, value string, err error) {
 	h := s.Header
 	if h == "" {
 		h = "Authorization"
@@ -46,7 +47,8 @@ type Env struct {
 	EnvVar string
 }
 
-func (e *Env) Resolve(_ context.Context) (string, string, error) {
+// Resolve reads the credential from the environment variable.
+func (e *Env) Resolve(_ context.Context) (header, value string, err error) {
 	h := e.Header
 	if h == "" {
 		h = "Authorization"
@@ -65,12 +67,13 @@ type File struct {
 	Path   string
 }
 
-func (f *File) Resolve(_ context.Context) (string, string, error) {
+// Resolve reads the credential from the configured file path.
+func (f *File) Resolve(_ context.Context) (header, value string, err error) {
 	h := f.Header
 	if h == "" {
 		h = "Authorization"
 	}
-	data, err := os.ReadFile(f.Path)
+	data, err := os.ReadFile(f.Path) //nolint:gosec // Path is from trusted config, not user input
 	if err != nil {
 		return "", "", fmt.Errorf("read credential file %q: %w", f.Path, err)
 	}
@@ -89,7 +92,8 @@ type Command struct {
 	expires time.Time
 }
 
-func (c *Command) Resolve(ctx context.Context) (string, string, error) {
+// Resolve executes the command (or returns a cached result) and returns the credential.
+func (c *Command) Resolve(ctx context.Context) (header, value string, err error) {
 	h := c.Header
 	if h == "" {
 		h = "Authorization"
@@ -103,7 +107,7 @@ func (c *Command) Resolve(ctx context.Context) (string, string, error) {
 	}
 
 	// Execute the command via the shell so that pipes, env vars, etc. work.
-	out, err := exec.CommandContext(ctx, "sh", "-c", c.Cmd).Output()
+	out, err := exec.CommandContext(ctx, "sh", "-c", c.Cmd).Output() //nolint:gosec // Command is from trusted config
 	if err != nil {
 		return "", "", fmt.Errorf("credential command %q failed: %w", c.Cmd, err)
 	}
@@ -148,7 +152,7 @@ func (s *Store) Register(backendID string, cred Credential) {
 // Resolve returns the header name and value for the given backend.
 // If no credential is registered for backendID, it returns empty strings
 // and no error — callers should skip injection in that case.
-func (s *Store) Resolve(ctx context.Context, backendID string) (header string, value string, err error) {
+func (s *Store) Resolve(ctx context.Context, backendID string) (header, value string, err error) {
 	s.mu.RLock()
 	cred, ok := s.creds[backendID]
 	s.mu.RUnlock()

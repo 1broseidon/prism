@@ -55,20 +55,20 @@ type TokenValidatorConfig struct {
 
 // TokenValidator validates OAuth 2.1 JWT access tokens.
 type TokenValidator struct {
-	cfg       TokenValidatorConfig
-	keySet    *jwksKeySet
-	parser    *jwt.Parser
+	cfg    TokenValidatorConfig
+	keySet *jwksKeySet
+	parser *jwt.Parser
 }
 
 // NewTokenValidator creates a token validator.
-func NewTokenValidator(cfg TokenValidatorConfig) *TokenValidator {
+func NewTokenValidator(cfg *TokenValidatorConfig) *TokenValidator {
 	jwksURL := cfg.JWKSURL
 	if jwksURL == "" {
 		jwksURL = strings.TrimRight(cfg.IssuerURL, "/") + "/.well-known/jwks.json"
 	}
 
 	return &TokenValidator{
-		cfg:    cfg,
+		cfg:    *cfg,
 		keySet: newJWKSKeySet(jwksURL),
 		parser: jwt.NewParser(
 			jwt.WithIssuer(cfg.IssuerURL),
@@ -99,23 +99,37 @@ func (v *TokenValidator) Validate(ctx context.Context, tokenString string) (*Cla
 		return nil, nil, errors.New("invalid claims format")
 	}
 
+	claims := extractClaims(mapClaims)
+
+	if err := v.checkTokenAge(mapClaims); err != nil {
+		return nil, nil, err
+	}
+
+	if err := v.checkRequiredScopes(claims.Scope); err != nil {
+		return nil, nil, err
+	}
+
+	return claims, NewPolicy(claims.Scope), nil
+}
+
+// extractClaims pulls known fields from JWT map claims into a typed struct.
+func extractClaims(mc jwt.MapClaims) *Claims {
 	claims := &Claims{}
 
-	if sub, ok := mapClaims["sub"].(string); ok {
+	if sub, ok := mc["sub"].(string); ok {
 		claims.Subject = sub
 	}
-	if iss, ok := mapClaims["iss"].(string); ok {
+	if iss, ok := mc["iss"].(string); ok {
 		claims.Issuer = iss
 	}
-	if scope, ok := mapClaims["scope"].(string); ok {
+	if scope, ok := mc["scope"].(string); ok {
 		claims.Scope = scope
 	}
-	if clientID, ok := mapClaims["client_id"].(string); ok {
+	if clientID, ok := mc["client_id"].(string); ok {
 		claims.ClientID = clientID
 	}
 
-	// Handle audience (can be string or array)
-	switch aud := mapClaims["aud"].(type) {
+	switch aud := mc["aud"].(type) {
 	case string:
 		claims.Audience = aud
 	case []any:
@@ -127,31 +141,40 @@ func (v *TokenValidator) Validate(ctx context.Context, tokenString string) (*Cla
 		}
 	}
 
-	// Max token age check
-	if v.cfg.MaxTokenAge > 0 {
-		if iat, ok := mapClaims["iat"].(float64); ok {
-			issuedAt := time.Unix(int64(iat), 0)
-			if time.Since(issuedAt) > v.cfg.MaxTokenAge {
-				return nil, nil, fmt.Errorf("token too old: issued at %s, max age %s", issuedAt, v.cfg.MaxTokenAge)
-			}
+	return claims
+}
+
+// checkTokenAge rejects tokens older than MaxTokenAge.
+func (v *TokenValidator) checkTokenAge(mc jwt.MapClaims) error {
+	if v.cfg.MaxTokenAge <= 0 {
+		return nil
+	}
+	iat, ok := mc["iat"].(float64)
+	if !ok {
+		return nil
+	}
+	issuedAt := time.Unix(int64(iat), 0)
+	if time.Since(issuedAt) > v.cfg.MaxTokenAge {
+		return fmt.Errorf("token too old: issued at %s, max age %s", issuedAt, v.cfg.MaxTokenAge)
+	}
+	return nil
+}
+
+// checkRequiredScopes ensures all required scopes are present.
+func (v *TokenValidator) checkRequiredScopes(scopeStr string) error {
+	if len(v.cfg.RequiredScopes) == 0 {
+		return nil
+	}
+	granted := make(map[string]struct{})
+	for _, s := range strings.Fields(scopeStr) {
+		granted[s] = struct{}{}
+	}
+	for _, required := range v.cfg.RequiredScopes {
+		if _, ok := granted[required]; !ok {
+			return fmt.Errorf("missing required scope %q", required)
 		}
 	}
-
-	// Required scopes check
-	if len(v.cfg.RequiredScopes) > 0 {
-		grantedScopes := make(map[string]struct{})
-		for _, s := range strings.Fields(claims.Scope) {
-			grantedScopes[s] = struct{}{}
-		}
-		for _, required := range v.cfg.RequiredScopes {
-			if _, ok := grantedScopes[required]; !ok {
-				return nil, nil, fmt.Errorf("missing required scope %q", required)
-			}
-		}
-	}
-
-	policy := NewPolicy(claims.Scope)
-	return claims, policy, nil
+	return nil
 }
 
 // ExtractBearerToken extracts a Bearer token from an HTTP Authorization header.
@@ -226,7 +249,7 @@ type jwkKey struct {
 }
 
 func (ks *jwksKeySet) refresh(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ks.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ks.url, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -235,7 +258,7 @@ func (ks *jwksKeySet) refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("JWKS endpoint returned %d", resp.StatusCode)

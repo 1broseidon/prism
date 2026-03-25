@@ -6,10 +6,10 @@ import (
 
 func TestParseNamespacedTool(t *testing.T) {
 	tests := []struct {
-		input     string
-		wantNS    string
-		wantTool  string
-		wantOK    bool
+		input    string
+		wantNS   string
+		wantTool string
+		wantOK   bool
 	}{
 		{"github__create_issue", "github", "create_issue", true},
 		{"fs__read_file", "fs", "read_file", true},

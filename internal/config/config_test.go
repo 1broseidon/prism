@@ -38,7 +38,7 @@ func TestLoadValid(t *testing.T) {
 	}`
 
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,7 +66,7 @@ func TestLoadDuplicateID(t *testing.T) {
 		]
 	}`
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, []byte(cfg), 0644)
+	os.WriteFile(path, []byte(cfg), 0o600)
 
 	_, err := Load(path)
 	if err == nil {
@@ -82,7 +82,7 @@ func TestLoadDuplicateNamespace(t *testing.T) {
 		]
 	}`
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, []byte(cfg), 0644)
+	os.WriteFile(path, []byte(cfg), 0o600)
 
 	_, err := Load(path)
 	if err == nil {
@@ -93,7 +93,7 @@ func TestLoadDuplicateNamespace(t *testing.T) {
 func TestLoadNoServers(t *testing.T) {
 	cfg := `{"servers": []}`
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, []byte(cfg), 0644)
+	os.WriteFile(path, []byte(cfg), 0o600)
 
 	_, err := Load(path)
 	if err == nil {
@@ -104,7 +104,7 @@ func TestLoadNoServers(t *testing.T) {
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -230,7 +230,7 @@ func TestLoadDefaults(t *testing.T) {
 		]
 	}`
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, []byte(cfg), 0644)
+	os.WriteFile(path, []byte(cfg), 0o600)
 
 	c, err := Load(path)
 	if err != nil {
