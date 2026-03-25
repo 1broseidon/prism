@@ -3,9 +3,10 @@
 # Default: run all checks then build
 all: check build
 
-# Build the binary
+# Build all binaries
 build:
 	go build -o bin/prism ./cmd/prism
+	go build -o bin/prism-bridge ./cmd/prism-bridge
 
 # Run tests with race detector
 test:

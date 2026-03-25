@@ -1,0 +1,14 @@
+{
+  "name": "check-dns",
+  "description": "Resolve a hostname to its IP addresses",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "hostname": {
+        "type": "string",
+        "description": "The hostname to resolve"
+      }
+    },
+    "required": ["hostname"]
+  }
+}
