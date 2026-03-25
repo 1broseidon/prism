@@ -3,6 +3,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -168,7 +173,8 @@ func setupEmbeddedAuth(cfg *config.Loaded, logger *slog.Logger) (srv *authserver
 		DefaultScopes:   ea.DefaultScopes,
 	}
 
-	km, err := authserver.NewKeyManager("")
+	keyPath := ensureSigningKey(logger)
+	km, err := authserver.NewKeyManager(keyPath)
 	if err != nil {
 		logger.Error("failed to initialize embedded auth signing key", "error", err)
 		os.Exit(1)
@@ -428,4 +434,48 @@ func buildAuditLogger(cfg *config.Loaded, logger *slog.Logger) *audit.Logger {
 
 	logger.Info("audit logging enabled", "output", output)
 	return audit.New(io.MultiWriter(f, os.Stderr))
+}
+
+// ensureSigningKey returns the path to a persistent RSA signing key.
+// On first run, generates a key at ~/.prism/signing-key.pem.
+// On subsequent runs, reuses it — tokens survive restarts.
+func ensureSigningKey(logger *slog.Logger) string {
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		logger.Warn("cannot determine home dir — using ephemeral signing key", "error", homeErr)
+		return ""
+	}
+
+	dir := filepath.Join(home, ".prism")
+	keyPath := filepath.Join(dir, "signing-key.pem")
+
+	// Already exists — reuse it.
+	if _, statErr := os.Stat(keyPath); statErr == nil {
+		return keyPath
+	}
+
+	// Create dir and generate key.
+	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
+		logger.Warn("cannot create ~/.prism — using ephemeral signing key", "error", mkErr)
+		return ""
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		logger.Warn("cannot generate signing key — using ephemeral key", "error", err)
+		return ""
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		logger.Warn("cannot write signing key — using ephemeral key", "error", err)
+		return ""
+	}
+
+	logger.Info("generated persistent signing key", "path", keyPath)
+	return keyPath
 }
