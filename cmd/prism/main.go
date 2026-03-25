@@ -25,6 +25,21 @@ import (
 )
 
 func main() {
+	// Dispatch subcommands: serve (default), service.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "service":
+			runService(os.Args[2:])
+			return
+		case "serve":
+			os.Args = append(os.Args[:1], os.Args[2:]...) // strip "serve" for flag.Parse
+		}
+	}
+
+	runServe()
+}
+
+func runServe() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	flag.Parse()
 
@@ -35,6 +50,12 @@ func main() {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	// Write PID file for service management.
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644); err != nil { //nolint:gosec // pid file is not sensitive
+		logger.Warn("failed to write pid file", "error", err)
+	}
+	defer func() { _ = os.Remove(pidFile) }()
 
 	logger.Info("loaded config",
 		"listen", cfg.Listen,
@@ -49,8 +70,6 @@ func main() {
 	defer gw.Close()
 
 	// Always start the embedded auth server — agents connect via OAuth DCR.
-	// If policy.agents is configured, those clients are pre-registered.
-	// Otherwise, agents self-register via DCR at runtime.
 	if cfg.EmbeddedAuth == nil {
 		cfg.EmbeddedAuth = &config.EmbeddedAuthConfig{
 			TokenTTLSeconds: 3600,
@@ -215,8 +234,13 @@ func startServers(cfg *config.Loaded, mainSrv, adminSrv *http.Server, logger *sl
 			errCh <- fmt.Errorf("listen %s: %w", cfg.Listen, err)
 			return
 		}
-		logger.Info("MCP gateway listening", "addr", ln.Addr().String())
-		errCh <- mainSrv.Serve(ln)
+		if cfg.TLS != nil {
+			logger.Info("MCP gateway listening (TLS)", "addr", ln.Addr().String())
+			errCh <- mainSrv.ServeTLS(ln, cfg.TLS.Cert, cfg.TLS.Key)
+		} else {
+			logger.Info("MCP gateway listening", "addr", ln.Addr().String())
+			errCh <- mainSrv.Serve(ln)
+		}
 	}()
 
 	go func() {
@@ -239,10 +263,14 @@ func printStartupBanner(cfg *config.Loaded, gw *gateway.Gateway, logger *slog.Lo
 	}
 
 	// Build listen URL for display.
+	scheme := "http"
+	if cfg.TLS != nil {
+		scheme = "https"
+	}
 	host := "localhost"
 	port := strings.TrimPrefix(cfg.Listen, ":")
-	url := fmt.Sprintf("http://%s:%s/mcp", host, port)
-	tokenURL := fmt.Sprintf("http://%s:%s/token", host, port)
+	url := fmt.Sprintf("%s://%s:%s/mcp", scheme, host, port)
+	tokenURL := fmt.Sprintf("%s://%s:%s/token", scheme, host, port)
 
 	logger.Info("prism ready",
 		"backends", len(cfg.Servers),

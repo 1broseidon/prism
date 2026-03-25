@@ -38,8 +38,20 @@ type Config struct {
 	// RateLimit sets global rate limiting. Per-server overrides are also supported.
 	RateLimit *RateLimitConfig `json:"rate_limit,omitempty"`
 
+	// TLS enables HTTPS on the gateway listener.
+	// When set, the gateway serves TLS directly — no reverse proxy needed.
+	TLS *TLSConfig `json:"tls,omitempty"`
+
 	// ShutdownTimeout is the graceful shutdown duration. Default: "10s".
 	ShutdownTimeout Duration `json:"shutdown_timeout,omitempty"`
+}
+
+// TLSConfig enables direct TLS termination on the gateway.
+type TLSConfig struct {
+	// Cert is the path to the PEM-encoded certificate (or chain).
+	Cert string `json:"cert"`
+	// Key is the path to the PEM-encoded private key.
+	Key string `json:"key"`
 }
 
 // McpServerConfig defines a backend MCP server.
@@ -255,6 +267,7 @@ type Loaded struct {
 	Admin           string
 	Servers         []ServerConfig
 	EmbeddedAuth    *EmbeddedAuthConfig
+	TLS             *TLSConfig
 	Audit           *AuditConfig
 	RateLimit       *RateLimitConfig
 	ShutdownTimeout Duration
@@ -298,6 +311,12 @@ func validate(cfg *Config) error {
 	if cfg.Policy != nil {
 		if err := validatePolicy(cfg.Policy); err != nil {
 			return err
+		}
+	}
+
+	if cfg.TLS != nil {
+		if cfg.TLS.Cert == "" || cfg.TLS.Key == "" {
+			return errors.New("tls: both cert and key are required")
 		}
 	}
 
@@ -398,6 +417,7 @@ func expand(cfg *Config) (*Loaded, error) {
 	loaded := &Loaded{
 		Listen:          cfg.Listen,
 		Admin:           cfg.Admin,
+		TLS:             cfg.TLS,
 		Audit:           cfg.Audit,
 		RateLimit:       cfg.RateLimit,
 		ShutdownTimeout: cfg.ShutdownTimeout,
