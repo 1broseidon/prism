@@ -37,66 +37,17 @@ Prism solves this by sitting between agents and MCP servers, acting as both an M
 
 ## Quick Start
 
-### Build
-
 ```bash
 git clone https://github.com/prism-gateway/prism.git
 cd prism
 go build -o prism ./cmd/prism
-```
-
-### Minimal Config (API Key Auth)
-
-Create `config.json`:
-
-```json
-{
-  "listen_addr": ":8080",
-  "admin_addr": ":9090",
-  "servers": [
-    {
-      "id": "github",
-      "url": "http://localhost:3001/mcp",
-      "namespace": "github",
-      "credentials": {
-        "type": "env",
-        "header": "Authorization",
-        "env_var": "GITHUB_TOKEN"
-      }
-    }
-  ],
-  "auth": {
-    "header": "X-API-Key",
-    "valid_keys": ["your-secret-key"]
-  },
-  "audit": {
-    "enabled": true,
-    "output": "stderr"
-  }
-}
-```
-
-### Run
-
-```bash
 export GITHUB_TOKEN="Bearer ghp_your_token"
 ./prism -config config.json
 ```
 
 Prism is now listening on `:8080`. Connect any MCP client to `http://localhost:8080/mcp`.
 
-### Verify
-
-```bash
-# Health check
-curl http://localhost:9090/health
-
-# Backend status
-curl http://localhost:9090/backends
-
-# Gateway info
-curl http://localhost:9090/info
-```
+**→ [Full getting started guide](docs/getting-started.md)** — walks through setting up MCP servers behind the gateway, configuring Prism, and connecting agent harnesses (Claude Desktop, Claude Code, Cursor, Windsurf, OpenAI Agents SDK, custom Go/Python agents).
 
 ## Configuration Reference
 
