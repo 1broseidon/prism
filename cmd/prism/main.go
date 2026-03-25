@@ -86,7 +86,36 @@ func runServe() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw)
+	auditor := buildAuditLogger(cfg, logger)
+	gw.SetAuditLogger(auditor)
+
+	// Build admin API with agent/audit adapters.
+	agentsFn := func() []any {
+		agents := authSrv.ListAgents()
+		result := make([]any, len(agents))
+		for i, a := range agents {
+			result[i] = a
+		}
+		return result
+	}
+	updateFn := func(id string, scopes []string) bool {
+		return authSrv.UpdateAgentScopes(id, scopes)
+	}
+	auditSub := admin.NewAuditSub(
+		func() chan any {
+			entryCh := auditor.Subscribe()
+			anyCh := make(chan any, 64)
+			go func() {
+				for e := range entryCh {
+					anyCh <- e
+				}
+				close(anyCh)
+			}()
+			return anyCh
+		},
+		func(_ chan any) {},
+	)
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, updateFn, auditSub)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -98,10 +127,10 @@ func runServe() {
 	waitForShutdown(cfg, *configPath, mainServer, adminServer, gw, logger, errCh)
 }
 
-// setupGateway creates the gateway, wires the audit logger, and connects backends.
+// setupGateway creates the gateway and connects backends.
+// Audit logger is wired separately in main() so it can be shared with the admin API.
 func setupGateway(ctx context.Context, cfg *config.Loaded, logger *slog.Logger) *gateway.Gateway {
 	gw := gateway.New(logger)
-	gw.SetAuditLogger(buildAuditLogger(cfg, logger))
 
 	for i := range cfg.Servers {
 		if err := gw.ConnectBackend(ctx, &cfg.Servers[i]); err != nil {

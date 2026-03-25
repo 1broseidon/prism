@@ -182,6 +182,50 @@ func (s *Server) IsEphemeralKey() bool {
 	return s.cfg.SigningKey.Path == ""
 }
 
+// AgentInfo is a summary of an agent for the admin API.
+type AgentInfo struct {
+	ClientID    string   `json:"client_id"`
+	Description string   `json:"description,omitempty"`
+	Scopes      []string `json:"scopes"`
+	Dynamic     bool     `json:"dynamic"`
+}
+
+// ListAgents returns info about all registered agents (static + DCR).
+func (s *Server) ListAgents() []AgentInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	agents := make([]AgentInfo, 0, len(s.clients))
+	for _, c := range s.clients {
+		isDynamic := false
+		s.oauth.mu.Lock()
+		_, isDynamic = s.oauth.dynamics[c.ClientID]
+		s.oauth.mu.Unlock()
+
+		agents = append(agents, AgentInfo{
+			ClientID:    c.ClientID,
+			Description: c.Description,
+			Scopes:      c.AllowedScopes,
+			Dynamic:     isDynamic,
+		})
+	}
+	return agents
+}
+
+// UpdateAgentScopes replaces the allowed scopes for an agent.
+// Returns false if the agent doesn't exist.
+func (s *Server) UpdateAgentScopes(clientID string, scopes []string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	client, ok := s.clients[clientID]
+	if !ok {
+		return false
+	}
+	client.AllowedScopes = scopes
+	return true
+}
+
 // --- Token endpoint ---
 
 // TokenResponse is the successful token endpoint JSON response (RFC 6749 §5.1).

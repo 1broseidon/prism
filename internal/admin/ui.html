@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism Admin</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    background: #000; color: #e0e0e0; font-size: 13px; line-height: 1.5;
+  }
+  header {
+    padding: 16px 24px; border-bottom: 1px solid #222;
+    display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+  header .status { font-size: 12px; color: #4a4; }
+  header .info { font-size: 12px; color: #666; margin-left: auto; }
+  .grid {
+    display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr;
+    gap: 1px; background: #222; min-height: calc(100vh - 53px);
+  }
+  .panel { background: #000; padding: 16px 24px; overflow: auto; }
+  .panel.events { grid-column: 1 / -1; max-height: 45vh; }
+  .panel h2 {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.1em; color: #666; margin-bottom: 12px;
+  }
+  .panel h2 .count { color: #888; font-weight: 400; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; color: #555; font-weight: 500;
+       padding: 4px 8px; border-bottom: 1px solid #1a1a1a; text-transform: uppercase; }
+  td { padding: 6px 8px; border-bottom: 1px solid #111; vertical-align: top; }
+  .tag {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 11px; margin: 1px 2px;
+  }
+  .tag.scope { background: #1a2a1a; color: #6a6; }
+  .tag.group { background: #1a1a2a; color: #66a; }
+  .tag.dynamic { background: #2a2a1a; color: #aa6; }
+  .tag.static { background: #1a1a1a; color: #666; }
+  .tag.denied { background: #2a1a1a; color: #a66; }
+  .tag.allowed { background: #1a2a1a; color: #6a6; }
+  .event-row { font-size: 12px; }
+  .event-row td { padding: 3px 8px; }
+  .event-row .ts { color: #555; white-space: nowrap; }
+  .event-row .agent { color: #6af; }
+  .event-row .tool { color: #fff; }
+  .event-row .latency { color: #555; }
+  .empty { color: #444; font-style: italic; padding: 24px 0; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  button {
+    background: #1a1a1a; color: #aaa; border: 1px solid #333;
+    padding: 4px 12px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 12px;
+  }
+  button:hover { background: #222; color: #fff; }
+  input[type="text"] {
+    background: #111; color: #e0e0e0; border: 1px solid #333;
+    padding: 4px 8px; border-radius: 3px; font-family: inherit; font-size: 12px; width: 200px;
+  }
+  .backend-transport { color: #555; }
+</style>
+</head>
+<body>
+<header>
+  <h1>prism</h1>
+  <span class="status" id="status">connecting...</span>
+  <span class="info" id="info"></span>
+</header>
+<div class="grid">
+  <div class="panel" id="agents-panel">
+    <h2>Agents <span class="count" id="agent-count"></span></h2>
+    <table>
+      <thead><tr><th>Agent</th><th>Type</th><th>Scopes</th></tr></thead>
+      <tbody id="agents-body"></tbody>
+    </table>
+    <div class="empty" id="agents-empty">No agents registered yet. Agents self-register via OAuth DCR.</div>
+  </div>
+  <div class="panel" id="backends-panel">
+    <h2>Backends <span class="count" id="backend-count"></span></h2>
+    <table>
+      <thead><tr><th>ID</th><th>Namespace</th><th>Transport</th></tr></thead>
+      <tbody id="backends-body"></tbody>
+    </table>
+  </div>
+  <div class="panel events">
+    <h2>Events <span class="count" id="event-count"></span></h2>
+    <table>
+      <thead><tr><th>Time</th><th>Agent</th><th>Tool</th><th>Status</th><th>Latency</th></tr></thead>
+      <tbody id="events-body"></tbody>
+    </table>
+    <div class="empty" id="events-empty">Waiting for tool calls...</div>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const MAX_EVENTS = 200;
+let eventCount = 0;
+
+async function fetchJSON(path) {
+  const r = await fetch(path);
+  return r.json();
+}
+
+async function refreshInfo() {
+  try {
+    const info = await fetchJSON('/info');
+    $('#status').textContent = 'running';
+    $('#info').textContent = `v${info.version} \u00b7 uptime ${info.uptime} \u00b7 ${info.goroutines} goroutines`;
+  } catch {
+    $('#status').textContent = 'disconnected';
+    $('#status').style.color = '#a44';
+  }
+}
+
+async function refreshAgents() {
+  try {
+    const agents = await fetchJSON('/agents');
+    const body = $('#agents-body');
+    body.innerHTML = '';
+    $('#agents-empty').style.display = agents.length ? 'none' : 'block';
+    $('#agent-count').textContent = `(${agents.length})`;
+    agents.forEach(a => {
+      const tr = document.createElement('tr');
+      const scopes = (a.scopes || []).map(s =>
+        `<span class="tag scope">${esc(s)}</span>`
+      ).join('');
+      const type = a.dynamic
+        ? '<span class="tag dynamic">dcr</span>'
+        : '<span class="tag static">static</span>';
+      tr.innerHTML = `<td>${esc(a.client_id)}</td><td>${type}</td><td>${scopes}</td>`;
+      body.appendChild(tr);
+    });
+  } catch {}
+}
+
+async function refreshBackends() {
+  try {
+    const backends = await fetchJSON('/backends');
+    const body = $('#backends-body');
+    body.innerHTML = '';
+    $('#backend-count').textContent = `(${backends.length})`;
+    backends.forEach(b => {
+      const tr = document.createElement('tr');
+      const transport = b.url
+        ? `<span class="backend-transport">${esc(b.url)}</span>`
+        : '<span class="backend-transport">stdio</span>';
+      tr.innerHTML = `<td>${esc(b.id)}</td><td>${esc(b.namespace)}</td><td>${transport}</td>`;
+      body.appendChild(tr);
+    });
+  } catch {}
+}
+
+function connectEvents() {
+  const es = new EventSource('/events');
+  es.onmessage = e => {
+    try {
+      const entry = JSON.parse(e.data);
+      addEvent(entry);
+    } catch {}
+  };
+  es.onerror = () => {
+    setTimeout(() => connectEvents(), 3000);
+  };
+}
+
+function addEvent(e) {
+  $('#events-empty').style.display = 'none';
+  eventCount++;
+  $('#event-count').textContent = `(${eventCount})`;
+
+  const body = $('#events-body');
+  const tr = document.createElement('tr');
+  tr.className = 'event-row';
+
+  const ts = e.ts ? e.ts.split('T')[1].replace('Z','') : '';
+  const status = e.allowed
+    ? '<span class="tag allowed">allowed</span>'
+    : '<span class="tag denied">denied</span>';
+  const latency = e.allowed ? `${e.latency_ms}ms` : '-';
+
+  tr.innerHTML = `
+    <td class="ts">${esc(ts)}</td>
+    <td class="agent">${esc(e.client_id || 'anonymous')}</td>
+    <td class="tool">${esc(e.namespace)}__${esc(e.tool)}</td>
+    <td>${status}</td>
+    <td class="latency">${latency}</td>
+  `;
+  body.insertBefore(tr, body.firstChild);
+
+  // Cap at MAX_EVENTS rows.
+  while (body.children.length > MAX_EVENTS) {
+    body.removeChild(body.lastChild);
+  }
+
+  // Refresh agents on new events (agent might be new).
+  refreshAgents();
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// Init.
+refreshInfo();
+refreshAgents();
+refreshBackends();
+connectEvents();
+setInterval(refreshInfo, 5000);
+setInterval(refreshBackends, 10000);
+</script>
+</body>
+</html>

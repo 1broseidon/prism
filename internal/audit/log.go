@@ -42,10 +42,12 @@ type Entry struct {
 }
 
 // Logger writes structured JSON audit log entries, one per line.
+// It also supports fan-out to subscribers (e.g. SSE handlers).
 // All methods are safe for concurrent use.
 type Logger struct {
-	mu  sync.Mutex
-	out io.Writer
+	mu          sync.Mutex
+	out         io.Writer
+	subscribers map[chan Entry]struct{}
 }
 
 // New returns an audit Logger that writes to w.
@@ -54,13 +56,31 @@ func New(w io.Writer) *Logger {
 	if w == nil {
 		w = os.Stderr
 	}
-	return &Logger{out: w}
+	return &Logger{out: w, subscribers: make(map[chan Entry]struct{})}
 }
 
 // Noop returns a Logger that discards all entries.
 // Use this when audit logging is disabled so call-sites need no nil checks.
 func Noop() *Logger {
-	return &Logger{out: io.Discard}
+	return &Logger{out: io.Discard, subscribers: make(map[chan Entry]struct{})}
+}
+
+// Subscribe returns a channel that receives a copy of every audit entry.
+// The caller must eventually call Unsubscribe to avoid leaking the channel.
+func (l *Logger) Subscribe() chan Entry {
+	ch := make(chan Entry, 64)
+	l.mu.Lock()
+	l.subscribers[ch] = struct{}{}
+	l.mu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes a subscriber channel and closes it.
+func (l *Logger) Unsubscribe(ch chan Entry) {
+	l.mu.Lock()
+	delete(l.subscribers, ch)
+	l.mu.Unlock()
+	close(ch)
 }
 
 // LogCall records the outcome of a single tool call.
@@ -103,6 +123,14 @@ func (l *Logger) LogCall(ctx context.Context, namespace, tool, backend string, a
 	data = append(data, '\n')
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	_, _ = l.out.Write(data)
+	// Fan out to SSE subscribers (non-blocking).
+	for ch := range l.subscribers {
+		select {
+		case ch <- entry:
+		default:
+			// Subscriber is slow — drop the entry rather than blocking.
+		}
+	}
+	l.mu.Unlock()
 }

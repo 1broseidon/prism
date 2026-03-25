@@ -13,29 +13,61 @@ type StatusProvider interface {
 	Status() []any
 }
 
+// AgentProvider lists and manages agents.
+type AgentProvider interface {
+	ListAgents() []any
+	UpdateAgentScopes(clientID string, scopes []string) bool
+}
+
+// AuditSubscriber provides live audit event streams.
+type AuditSubscriber interface {
+	Subscribe() chan any
+	Unsubscribe(ch chan any)
+}
+
 // API exposes admin endpoints.
 type API struct {
 	statusFn   func() any
+	agentsFn   func() []any
+	updateFn   func(string, []string) bool
+	auditor    *AuditSub
 	backendMgr BackendManager
 	startedAt  time.Time
 }
 
-// NewAPI creates an admin API. statusFn returns the current backend status.
-// backendMgr enables runtime backend add/remove (may be nil).
-func NewAPI(statusFn func() any, backendMgr BackendManager) *API {
+// AuditSub wraps the audit logger's subscribe/unsubscribe for type erasure.
+type AuditSub struct {
+	subFn   func() chan any
+	unsubFn func(chan any)
+}
+
+// NewAPI creates an admin API.
+func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, updateFn func(string, []string) bool, auditor *AuditSub) *API {
 	return &API{
 		statusFn:   statusFn,
+		agentsFn:   agentsFn,
+		updateFn:   updateFn,
+		auditor:    auditor,
 		backendMgr: backendMgr,
 		startedAt:  time.Now(),
 	}
 }
 
+// NewAuditSub creates an audit subscriber adapter.
+func NewAuditSub(subFn func() chan any, unsubFn func(chan any)) *AuditSub {
+	return &AuditSub{subFn: subFn, unsubFn: unsubFn}
+}
+
 // Handler returns the admin HTTP handler.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", a.handleDashboard)
 	mux.HandleFunc("GET /health", a.handleHealth)
 	mux.HandleFunc("GET /backends", a.handleBackends)
 	mux.HandleFunc("GET /info", a.handleInfo)
+	mux.HandleFunc("GET /agents", a.handleAgents)
+	mux.HandleFunc("PUT /agents/", a.handleUpdateAgent)
+	mux.HandleFunc("GET /events", a.handleEvents)
 	mux.HandleFunc("POST /backends/", a.handleAddBackend)
 	mux.HandleFunc("DELETE /backends/", a.handleRemoveBackend)
 	return mux
