@@ -1,7 +1,7 @@
 // Package auth implements OAuth 2.1 token validation and scope-based
-// access control for the MCPGate gateway.
+// access control for the Prism gateway.
 //
-// MCPGate acts as an OAuth 2.1 Resource Server (RFC 9728). It does NOT
+// Prism acts as an OAuth 2.1 Resource Server (RFC 9728). It does NOT
 // implement an Authorization Server — it validates tokens issued by an
 // external provider (Keycloak, Auth0, Entra ID, etc.).
 //

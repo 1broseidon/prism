@@ -1,4 +1,4 @@
-# MCPGate
+# Prism
 
 A lightweight MCP (Model Context Protocol) gateway that aggregates multiple backend MCP servers behind a single endpoint.
 
@@ -20,8 +20,8 @@ Connect N MCP servers, expose them as one. Clients see a unified tool/resource/p
 ## Quick Start
 
 ```bash
-go build -o mcpgate ./cmd/mcpgate
-./mcpgate -config config.json
+go build -o prism ./cmd/prism
+./prism -config config.json
 ```
 
 ## Config
@@ -59,12 +59,12 @@ go build -o mcpgate ./cmd/mcpgate
 
 ## Architecture
 
-MCPGate acts as both:
+Prism acts as both:
 - An **MCP server** (Streamable HTTP) facing clients
 - Multiple **MCP clients** connecting to backend servers
 
 ```
-Client → [MCPGate Server] → [Client A] → Backend MCP Server A
+Client → [Prism Server] → [Client A] → Backend MCP Server A
                            → [Client B] → Backend MCP Server B
                            → [Client C] → Backend MCP Server C
 ```

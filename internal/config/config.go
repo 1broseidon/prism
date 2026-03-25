@@ -13,10 +13,10 @@ import (
 
 // ServerConfig defines a backend MCP server to connect to.
 type ServerConfig struct {
-	ID        string            `json:"id"`
-	URL       string            `json:"url"`
-	Namespace string            `json:"namespace"`
-	Auth      *ServerAuthConfig `json:"auth,omitempty"`
+	ID          string            `json:"id"`
+	URL         string            `json:"url"`
+	Namespace   string            `json:"namespace"`
+	Credentials *CredentialConfig `json:"credentials,omitempty"`
 
 	// Per-server operational settings
 	RateLimit      *RateLimitConfig      `json:"rate_limit,omitempty"`
@@ -24,10 +24,30 @@ type ServerConfig struct {
 	Timeout        Duration              `json:"timeout,omitempty"`
 }
 
-// ServerAuthConfig holds credentials to inject when connecting to a backend.
-type ServerAuthConfig struct {
-	Header string `json:"header"`
-	Value  string `json:"value"`
+// CredentialConfig describes how Prism obtains the backend credential at call time.
+// The agent never sees the raw value — Prism injects it into each outbound request.
+//
+// Supported types:
+//   - "static"  — fixed header/value (API keys, long-lived Bearer tokens)
+//   - "env"     — resolved from an environment variable at call time
+//   - "file"    — read from a file path (mounted secrets, k8s service account tokens)
+//   - "command" — execute a shell command and use stdout (AWS STS, Vault CLI, gcloud, etc.)
+type CredentialConfig struct {
+	// Type is one of: static, env, file, command.
+	Type string `json:"type"`
+	// Header is the HTTP header to set. Defaults to "Authorization".
+	Header string `json:"header,omitempty"`
+	// Value is the literal credential value. Required for type "static".
+	Value string `json:"value,omitempty"`
+	// EnvVar is the environment variable name. Required for type "env".
+	EnvVar string `json:"env_var,omitempty"`
+	// Path is the file to read. Required for type "file".
+	Path string `json:"path,omitempty"`
+	// Command is the shell command to execute. Required for type "command".
+	Command string `json:"command,omitempty"`
+	// TTL is how long to cache the result of a "command" credential.
+	// Defaults to 5m if unset.
+	TTL Duration `json:"ttl,omitempty"`
 }
 
 // AuthConfig holds client-facing authentication settings.
@@ -42,7 +62,7 @@ type AuthConfig struct {
 }
 
 // OAuthConfig configures OAuth 2.1 token validation.
-// MCPGate acts as a Resource Server (RFC 9728) — it validates tokens
+// Prism acts as a Resource Server (RFC 9728) — it validates tokens
 // issued by an external Authorization Server.
 type OAuthConfig struct {
 	// IssuerURL is the expected token issuer.
@@ -219,6 +239,12 @@ func validate(cfg *Config) error {
 		}
 		seenNamespaces[ns] = i
 
+		if s.Credentials != nil {
+			if err := validateCredential(i, s.Credentials); err != nil {
+				return err
+			}
+		}
+
 		if s.CircuitBreaker != nil {
 			if s.CircuitBreaker.Threshold <= 0 {
 				return fmt.Errorf("server[%d].circuit_breaker.threshold must be > 0", i)
@@ -243,5 +269,32 @@ func validate(cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+func validateCredential(idx int, c *CredentialConfig) error {
+	prefix := fmt.Sprintf("server[%d].credentials", idx)
+	switch c.Type {
+	case "static":
+		if c.Value == "" {
+			return fmt.Errorf("%s: type %q requires a non-empty value", prefix, c.Type)
+		}
+	case "env":
+		if c.EnvVar == "" {
+			return fmt.Errorf("%s: type %q requires env_var", prefix, c.Type)
+		}
+	case "file":
+		if c.Path == "" {
+			return fmt.Errorf("%s: type %q requires path", prefix, c.Type)
+		}
+	case "command":
+		if c.Command == "" {
+			return fmt.Errorf("%s: type %q requires command", prefix, c.Type)
+		}
+	case "":
+		return fmt.Errorf("%s: type is required", prefix)
+	default:
+		return fmt.Errorf("%s: unknown type %q (must be static, env, file, or command)", prefix, c.Type)
+	}
 	return nil
 }

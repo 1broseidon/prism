@@ -1,4 +1,4 @@
-// Package audit provides structured JSON audit logging for MCPGate.
+// Package audit provides structured JSON audit logging for Prism.
 //
 // Every tool call — allowed or denied — produces a single-line JSON entry
 // so security teams can ingest the log into any SIEM without additional parsing.
@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mcpgate/mcpgate/internal/auth"
+	"github.com/prism-gateway/prism/internal/auth"
 )
 
 // Entry is a single structured audit log record.
@@ -36,6 +36,9 @@ type Entry struct {
 	Backend string `json:"backend"`
 	// Error holds the error message if the call failed, empty otherwise.
 	Error string `json:"error"`
+	// CredInjected is true if Prism injected a backend credential for this call.
+	// The credential value itself is never logged.
+	CredInjected bool `json:"cred_injected"`
 }
 
 // Logger writes structured JSON audit log entries, one per line.
@@ -66,20 +69,22 @@ func Noop() *Logger {
 //   - namespace and tool are the backend namespace and unqualified tool name.
 //   - backend is the backend server ID.
 //   - allowed indicates whether the call passed scope policy.
+//   - credInjected is true if Prism injected a backend credential (value is never logged).
 //   - latencyMS is the backend round-trip time; pass 0 for denied calls.
 //   - callErr is any error returned by the backend (nil on success or denial).
-func (l *Logger) LogCall(ctx context.Context, namespace, tool, backend string, allowed bool, latencyMS int64, callErr error) {
+func (l *Logger) LogCall(ctx context.Context, namespace, tool, backend string, allowed, credInjected bool, latencyMS int64, callErr error) {
 	if l == nil {
 		return
 	}
 
 	entry := Entry{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Namespace: namespace,
-		Tool:      tool,
-		Backend:   backend,
-		Allowed:   allowed,
-		LatencyMS: latencyMS,
+		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		Namespace:    namespace,
+		Tool:         tool,
+		Backend:      backend,
+		Allowed:      allowed,
+		CredInjected: credInjected,
+		LatencyMS:    latencyMS,
 	}
 
 	if claims := auth.ClaimsFromContext(ctx); claims != nil {

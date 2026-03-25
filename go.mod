@@ -1,4 +1,4 @@
-module github.com/mcpgate/mcpgate
+module github.com/prism-gateway/prism
 
 go 1.25.0
 

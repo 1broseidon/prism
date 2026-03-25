@@ -1,12 +1,12 @@
 {
   "listen_addr": ":8080",
   "admin_addr": ":9090",
-  "resource_uri": "https://mcpgate.example.com",
+  "resource_uri": "https://prism.example.com",
 
   "auth": {
     "oauth": {
       "issuer_url": "https://auth.example.com/realms/mcp",
-      "audience": "https://mcpgate.example.com",
+      "audience": "https://prism.example.com",
       "required_scopes": ["mcp:connect"],
       "scopes_supported": [
         "mcp:connect",
@@ -26,9 +26,10 @@
       "id": "github",
       "url": "http://localhost:3001/mcp",
       "namespace": "github",
-      "auth": {
+      "credentials": {
+        "type": "env",
         "header": "Authorization",
-        "value": "Bearer $GITHUB_MCP_TOKEN"
+        "env_var": "GITHUB_TOKEN"
       },
       "circuit_breaker": {
         "threshold": 5,
@@ -40,6 +41,17 @@
       "id": "filesystem",
       "url": "http://localhost:3002/mcp",
       "namespace": "fs"
+    },
+    {
+      "id": "vault-infra",
+      "url": "http://localhost:3003/mcp",
+      "namespace": "infra",
+      "credentials": {
+        "type": "command",
+        "header": "Authorization",
+        "command": "vault kv get -field=token secret/mcp/infra",
+        "ttl": "5m"
+      }
     }
   ],
 

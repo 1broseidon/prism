@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/mcpgate/mcpgate/internal/auth"
+	"github.com/prism-gateway/prism/internal/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

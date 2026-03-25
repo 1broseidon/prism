@@ -3,17 +3,49 @@
   "admin_addr": ":9090",
   "servers": [
     {
-      "id": "example",
+      "id": "github",
       "url": "http://localhost:3001/mcp",
-      "namespace": "ex",
-      "auth": {
+      "namespace": "github",
+      "credentials": {
+        "type": "env",
         "header": "Authorization",
-        "value": "Bearer your-token-here"
+        "env_var": "GITHUB_TOKEN"
       },
       "circuit_breaker": {
         "threshold": 5,
         "timeout": "30s",
         "max_half_open": 2
+      }
+    },
+    {
+      "id": "stripe",
+      "url": "http://localhost:3002/mcp",
+      "namespace": "stripe",
+      "credentials": {
+        "type": "static",
+        "header": "X-API-Key",
+        "value": "sk_live_your-stripe-key"
+      }
+    },
+    {
+      "id": "vault-backed",
+      "url": "http://localhost:3003/mcp",
+      "namespace": "infra",
+      "credentials": {
+        "type": "command",
+        "header": "Authorization",
+        "command": "vault kv get -field=token secret/mcp/infra",
+        "ttl": "5m"
+      }
+    },
+    {
+      "id": "k8s",
+      "url": "http://localhost:3004/mcp",
+      "namespace": "k8s",
+      "credentials": {
+        "type": "file",
+        "header": "Authorization",
+        "path": "/var/run/secrets/kubernetes.io/serviceaccount/token"
       }
     }
   ],

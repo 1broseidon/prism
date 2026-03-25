@@ -1,4 +1,4 @@
-// Package admin provides the MCPGate admin API.
+// Package admin provides the Prism admin API.
 package admin
 
 import (
@@ -46,7 +46,7 @@ func (a *API) handleBackends(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":       "mcpgate",
+		"name":       "prism",
 		"version":    "0.1.0",
 		"go_version": runtime.Version(),
 		"uptime":     time.Since(a.startedAt).String(),

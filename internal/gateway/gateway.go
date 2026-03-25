@@ -13,10 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mcpgate/mcpgate/internal/audit"
-	"github.com/mcpgate/mcpgate/internal/auth"
-	"github.com/mcpgate/mcpgate/internal/config"
-	"github.com/mcpgate/mcpgate/internal/middleware"
+	"github.com/prism-gateway/prism/internal/audit"
+	"github.com/prism-gateway/prism/internal/auth"
+	"github.com/prism-gateway/prism/internal/config"
+	"github.com/prism-gateway/prism/internal/credentials"
+	"github.com/prism-gateway/prism/internal/middleware"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -37,6 +38,7 @@ type Gateway struct {
 	server   *mcp.Server
 	logger   *slog.Logger
 	auditor  *audit.Logger
+	credStore *credentials.Store
 }
 
 // New creates a new Gateway.
@@ -45,14 +47,15 @@ func New(logger *slog.Logger) *Gateway {
 		logger = slog.Default()
 	}
 	g := &Gateway{
-		backends: make(map[string]*Backend),
-		logger:   logger,
-		auditor:  audit.Noop(), // replaced via SetAuditLogger if audit is configured
+		backends:  make(map[string]*Backend),
+		logger:    logger,
+		auditor:   audit.Noop(), // replaced via SetAuditLogger if audit is configured
+		credStore: credentials.NewStore(),
 	}
 
 	g.server = mcp.NewServer(
 		&mcp.Implementation{
-			Name:    "mcpgate",
+			Name:    "prism",
 			Version: "0.1.0",
 		},
 		nil,
@@ -140,14 +143,34 @@ func (g *Gateway) Handler() http.Handler {
 func (g *Gateway) ConnectBackend(ctx context.Context, cfg config.ServerConfig) error {
 	client := mcp.NewClient(
 		&mcp.Implementation{
-			Name:    "mcpgate-client",
+			Name:    "prism-client",
 			Version: "0.1.0",
 		},
 		nil,
 	)
 
+	// Register credential for this backend if configured.
+	if cfg.Credentials != nil {
+		cred := buildCredential(cfg.Credentials)
+		g.credStore.Register(cfg.ID, cred)
+		g.logger.Info("registered credential for backend",
+			"id", cfg.ID,
+			"type", cfg.Credentials.Type,
+		)
+	}
+
+	// Build an HTTP client that injects the backend credential on every request.
+	httpClient := &http.Client{
+		Transport: &credentials.InjectingTransport{
+			Base:      http.DefaultTransport,
+			Store:     g.credStore,
+			BackendID: cfg.ID,
+		},
+	}
+
 	transport := &mcp.StreamableClientTransport{
-		Endpoint: cfg.URL,
+		Endpoint:   cfg.URL,
+		HTTPClient: httpClient,
 	}
 
 	session, err := client.Connect(ctx, transport, nil)
@@ -234,6 +257,11 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}, nil
 	}
 
+	// credInjected tracks whether a backend credential is registered for this backend.
+	// The actual injection happens in the HTTP transport; we record the fact (not the value).
+	credHeader, _, _ := g.credStore.Resolve(ctx, backendID)
+	credInjected := credHeader != ""
+
 	// Scope enforcement: check if the caller has permission for this tool.
 	if policy := auth.PolicyFromContext(ctx); policy != nil {
 		if !policy.CanAccessTool(b.Config.Namespace, toolName) {
@@ -243,7 +271,7 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 				"namespace", b.Config.Namespace,
 			)
 			// Audit: log the denial before returning.
-			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, 0, nil)
+			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, credInjected, 0, nil)
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -273,7 +301,7 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 	latencyMS := time.Since(start).Milliseconds()
 
 	// Audit: log the outcome after the call (success or backend error).
-	g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, true, latencyMS, err)
+	g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, true, credInjected, latencyMS, err)
 
 	if err != nil {
 		if b.CB != nil {
@@ -377,6 +405,23 @@ func (g *Gateway) Status() []BackendStatus {
 		statuses = append(statuses, s)
 	}
 	return statuses
+}
+
+// buildCredential converts a CredentialConfig into the matching Credential implementation.
+func buildCredential(c *config.CredentialConfig) credentials.Credential {
+	switch c.Type {
+	case "static":
+		return &credentials.Static{Header: c.Header, Value: c.Value}
+	case "env":
+		return &credentials.Env{Header: c.Header, EnvVar: c.EnvVar}
+	case "file":
+		return &credentials.File{Header: c.Header, Path: c.Path}
+	case "command":
+		return &credentials.Command{Header: c.Header, Cmd: c.Command, TTL: c.TTL.Duration()}
+	default:
+		// Should never happen — config validation rejects unknown types.
+		return &credentials.Static{}
+	}
 }
 
 // parseNamespacedTool splits "namespace__tool_name" into its parts.
