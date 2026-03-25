@@ -1,0 +1,4 @@
+mcpgate
+*.exe
+config.json
+.env

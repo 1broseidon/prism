@@ -1,0 +1,29 @@
+{
+  "listen_addr": ":8080",
+  "admin_addr": ":9090",
+  "servers": [
+    {
+      "id": "example",
+      "url": "http://localhost:3001/mcp",
+      "namespace": "ex",
+      "auth": {
+        "header": "Authorization",
+        "value": "Bearer your-token-here"
+      },
+      "circuit_breaker": {
+        "threshold": 5,
+        "timeout": "30s",
+        "max_half_open": 2
+      }
+    }
+  ],
+  "auth": {
+    "header": "X-API-Key",
+    "valid_keys": ["your-secret-key"]
+  },
+  "rate_limit": {
+    "requests_per_second": 100,
+    "burst": 200
+  },
+  "shutdown_timeout": "10s"
+}

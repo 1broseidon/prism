@@ -1,0 +1,197 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+)
+
+// ServerConfig defines a backend MCP server to connect to.
+type ServerConfig struct {
+	ID        string            `json:"id"`
+	URL       string            `json:"url"`
+	Namespace string            `json:"namespace"`
+	Auth      *ServerAuthConfig `json:"auth,omitempty"`
+
+	// Per-server operational settings
+	RateLimit      *RateLimitConfig      `json:"rate_limit,omitempty"`
+	CircuitBreaker *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
+	Timeout        Duration              `json:"timeout,omitempty"`
+}
+
+// ServerAuthConfig holds credentials to inject when connecting to a backend.
+type ServerAuthConfig struct {
+	Header string `json:"header"`
+	Value  string `json:"value"`
+}
+
+// AuthConfig holds client-facing authentication settings.
+type AuthConfig struct {
+	Header    string   `json:"header"`
+	ValidKeys []string `json:"valid_keys"`
+}
+
+// RateLimitConfig holds rate-limiting parameters.
+type RateLimitConfig struct {
+	RequestsPerSecond float64 `json:"requests_per_second"`
+	Burst             int     `json:"burst"`
+}
+
+// CircuitBreakerConfig holds circuit-breaker parameters.
+type CircuitBreakerConfig struct {
+	Threshold   int      `json:"threshold"`
+	Timeout     Duration `json:"timeout"`
+	MaxHalfOpen int      `json:"max_half_open"`
+}
+
+// Config is the top-level gateway configuration.
+type Config struct {
+	ListenAddr      string               `json:"listen_addr"`
+	AdminAddr       string               `json:"admin_addr"`
+	Servers         []ServerConfig       `json:"servers"`
+	Auth            *AuthConfig          `json:"auth,omitempty"`
+	RateLimit       *RateLimitConfig     `json:"rate_limit,omitempty"`
+	CircuitBreaker  *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
+	ShutdownTimeout Duration             `json:"shutdown_timeout,omitempty"`
+}
+
+// Duration is a time.Duration that marshals/unmarshals as a JSON string.
+type Duration time.Duration
+
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		// Try as number (nanoseconds)
+		var n int64
+		if err2 := json.Unmarshal(b, &n); err2 != nil {
+			return err
+		}
+		*d = Duration(time.Duration(n))
+		return nil
+	}
+	if s == "" {
+		*d = 0
+		return nil
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// Load reads a JSON config file, applies defaults, and validates.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+
+	var cfg Config
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, errors.New("config must contain a single JSON object")
+	}
+
+	applyDefaults(&cfg)
+	return &cfg, validate(&cfg)
+}
+
+func applyDefaults(cfg *Config) {
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = ":8080"
+	}
+	if cfg.AdminAddr == "" {
+		cfg.AdminAddr = ":9090"
+	}
+	if cfg.ShutdownTimeout == 0 {
+		cfg.ShutdownTimeout = Duration(10 * time.Second)
+	}
+	for i := range cfg.Servers {
+		if cfg.Servers[i].Namespace == "" {
+			cfg.Servers[i].Namespace = cfg.Servers[i].ID
+		}
+		if cfg.Servers[i].Timeout == 0 {
+			cfg.Servers[i].Timeout = Duration(30 * time.Second)
+		}
+	}
+}
+
+func validate(cfg *Config) error {
+	if cfg.ListenAddr == "" {
+		return errors.New("listen_addr is required")
+	}
+	if len(cfg.Servers) == 0 {
+		return errors.New("at least one server is required")
+	}
+
+	seenIDs := make(map[string]int, len(cfg.Servers))
+	seenNamespaces := make(map[string]int, len(cfg.Servers))
+
+	for i, s := range cfg.Servers {
+		if s.ID == "" {
+			return fmt.Errorf("server[%d]: id is required", i)
+		}
+		if s.URL == "" {
+			return fmt.Errorf("server[%d]: url is required", i)
+		}
+		if !strings.HasPrefix(s.URL, "http://") && !strings.HasPrefix(s.URL, "https://") {
+			return fmt.Errorf("server[%d]: url must start with http:// or https://", i)
+		}
+		if prev, dup := seenIDs[s.ID]; dup {
+			return fmt.Errorf("server[%d]: duplicate id %q (first at server[%d])", i, s.ID, prev)
+		}
+		seenIDs[s.ID] = i
+
+		ns := s.Namespace
+		if ns == "" {
+			ns = s.ID
+		}
+		if prev, dup := seenNamespaces[ns]; dup {
+			return fmt.Errorf("server[%d]: duplicate namespace %q (first at server[%d])", i, ns, prev)
+		}
+		seenNamespaces[ns] = i
+
+		if s.CircuitBreaker != nil {
+			if s.CircuitBreaker.Threshold <= 0 {
+				return fmt.Errorf("server[%d].circuit_breaker.threshold must be > 0", i)
+			}
+		}
+		if s.RateLimit != nil {
+			if s.RateLimit.RequestsPerSecond <= 0 {
+				return fmt.Errorf("server[%d].rate_limit.requests_per_second must be > 0", i)
+			}
+			if s.RateLimit.Burst <= 0 {
+				return fmt.Errorf("server[%d].rate_limit.burst must be > 0", i)
+			}
+		}
+	}
+
+	if cfg.RateLimit != nil {
+		if cfg.RateLimit.RequestsPerSecond <= 0 {
+			return errors.New("rate_limit.requests_per_second must be > 0")
+		}
+		if cfg.RateLimit.Burst <= 0 {
+			return errors.New("rate_limit.burst must be > 0")
+		}
+	}
+
+	return nil
+}
