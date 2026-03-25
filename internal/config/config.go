@@ -31,9 +31,43 @@ type ServerAuthConfig struct {
 }
 
 // AuthConfig holds client-facing authentication settings.
+// Supports both simple API key auth and full OAuth 2.1.
 type AuthConfig struct {
-	Header    string   `json:"header"`
-	ValidKeys []string `json:"valid_keys"`
+	// Simple API key auth (for development / internal use)
+	Header    string   `json:"header,omitempty"`
+	ValidKeys []string `json:"valid_keys,omitempty"`
+
+	// OAuth 2.1 Resource Server auth (for production / agentic use)
+	OAuth *OAuthConfig `json:"oauth,omitempty"`
+}
+
+// OAuthConfig configures OAuth 2.1 token validation.
+// MCPGate acts as a Resource Server (RFC 9728) — it validates tokens
+// issued by an external Authorization Server.
+type OAuthConfig struct {
+	// IssuerURL is the expected token issuer.
+	IssuerURL string `json:"issuer_url"`
+
+	// JWKSURL overrides automatic JWKS discovery. Optional.
+	JWKSURL string `json:"jwks_url,omitempty"`
+
+	// Audience is the gateway's resource identifier (per RFC 8707).
+	// Tokens not issued for this audience are rejected.
+	Audience string `json:"audience"`
+
+	// ResourceURI is the canonical URI of this gateway for Protected Resource Metadata.
+	// Defaults to "https://localhost" + ListenAddr if not set.
+	ResourceURI string `json:"resource_uri,omitempty"`
+
+	// RequiredScopes are scopes that MUST be present on every token.
+	RequiredScopes []string `json:"required_scopes,omitempty"`
+
+	// ScopesSupported lists all scopes this gateway recognizes.
+	// Published in the Protected Resource Metadata document.
+	ScopesSupported []string `json:"scopes_supported,omitempty"`
+
+	// MaxTokenAge limits how old a token can be from issuance. Optional.
+	MaxTokenAge Duration `json:"max_token_age,omitempty"`
 }
 
 // RateLimitConfig holds rate-limiting parameters.
@@ -58,6 +92,10 @@ type Config struct {
 	RateLimit       *RateLimitConfig     `json:"rate_limit,omitempty"`
 	CircuitBreaker  *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
 	ShutdownTimeout Duration             `json:"shutdown_timeout,omitempty"`
+
+	// ResourceURI is the canonical URI of this gateway (per RFC 8707).
+	// Used for token audience validation and Protected Resource Metadata.
+	ResourceURI string `json:"resource_uri,omitempty"`
 }
 
 // Duration is a time.Duration that marshals/unmarshals as a JSON string.

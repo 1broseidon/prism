@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/mcpgate/mcpgate/internal/auth"
 	"github.com/mcpgate/mcpgate/internal/config"
 	"github.com/mcpgate/mcpgate/internal/middleware"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -152,6 +153,7 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 }
 
 // routeToolCall forwards a tool call to the correct backend.
+// If OAuth is enabled, it enforces scope-based access control per tool.
 func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	g.mu.RLock()
 	b, ok := g.backends[backendID]
@@ -164,6 +166,26 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 				&mcp.TextContent{Text: fmt.Sprintf("backend %q not found", backendID)},
 			},
 		}, nil
+	}
+
+	// Scope enforcement: check if the caller has permission for this tool
+	if policy := auth.PolicyFromContext(ctx); policy != nil {
+		if !policy.CanAccessTool(b.Config.Namespace, toolName) {
+			g.logger.Warn("tool call denied by scope policy",
+				"backend", backendID,
+				"tool", toolName,
+				"namespace", b.Config.Namespace,
+			)
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: fmt.Sprintf(
+						"access denied: scope %q:%q not granted",
+						b.Config.Namespace, toolName,
+					)},
+				},
+			}, nil
+		}
 	}
 
 	if b.CB != nil && !b.CB.Allow() {
