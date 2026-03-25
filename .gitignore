@@ -2,3 +2,4 @@ mcpgate
 *.exe
 config.json
 .env
+bin/
