@@ -5,9 +5,13 @@ An MCP gateway that governs how AI agents access backend services.
 Agents authenticate once to Prism with an OAuth token. Prism resolves per-backend credentials, enforces scope-based access control, and produces a structured audit trail. The agent never sees raw API keys.
 
 ```
-Agent ──→ Prism (OAuth) ──→ GitHub MCP    (injected $GITHUB_TOKEN)
-                         ──→ Postgres MCP  (injected vault secret)
-                         ──→ K8s MCP       (injected service account)
+                         ┌─────────────┐
+Agent ──→ Prism (OAuth) ─┤ Bridge      ├→ stdio MCP server
+                         ├─────────────┤
+                         │ Bridge      ├→ stdio MCP server
+                         ├─────────────┤
+                         │ Native HTTP ├→ HTTP MCP server
+                         └─────────────┘
 ```
 
 ## Why
@@ -21,6 +25,15 @@ MCP servers are multiplying. Each one needs credentials, access control, and obs
 
 Prism solves this by sitting between agents and MCP servers, acting as both an MCP server (facing agents) and an MCP client (facing backends).
 
+## Two Binaries
+
+| Binary | Purpose |
+|---|---|
+| **`prism`** | The gateway. OAuth, credential injection, scope enforcement, audit logging, namespace aggregation. |
+| **`prism-bridge`** | Transport adapter. Wraps stdio MCP servers or single functions as Streamable HTTP endpoints. |
+
+Most MCP servers speak stdio (npx, uvx, local binaries). Prism speaks HTTP. The bridge normalizes any MCP server into an HTTP endpoint that Prism can connect to — each in its own isolated container or pod.
+
 ## Features
 
 | Feature | Description |
@@ -30,24 +43,22 @@ Prism solves this by sitting between agents and MCP servers, acting as both an M
 | **Scope-filtered discovery** | `tools/list` only returns tools the agent is authorized to use. No information leakage. |
 | **Structured audit log** | Every tool call — allowed or denied — produces a single-line JSON entry for SIEM ingestion. |
 | **Namespace aggregation** | N backends appear as one MCP server. Tools are prefixed: `github__create_issue`, `fs__read_file`. |
+| **stdio → HTTP bridge** | Wrap any stdio MCP server as an HTTP endpoint. Each in its own container for isolation. |
+| **Tools as functions** | Write a bash/Python/Node script, deploy it as an MCP tool. No SDK, no boilerplate. |
 | **Circuit breaking** | Per-backend failure isolation. A down backend doesn't take out the gateway. |
 | **Rate limiting** | Global and per-backend token bucket rate limiting. |
 | **Admin API** | Health checks, backend status, uptime — on a separate port. |
-| **Single binary** | One 12MB binary, one JSON config file, no runtime dependencies. |
+| **Single binary** | 12MB binaries, JSON config, no runtime dependencies. |
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/prism-gateway/prism.git
 cd prism
-go build -o prism ./cmd/prism
-export GITHUB_TOKEN="Bearer ghp_your_token"
-./prism -config config.json
+make build    # builds bin/prism and bin/prism-bridge
 ```
 
-Prism is now listening on `:8080`. Connect any MCP client to `http://localhost:8080/mcp`.
-
-**→ [Full getting started guide](docs/getting-started.md)** — walks through setting up MCP servers behind the gateway, configuring Prism, and connecting agent harnesses (Claude Desktop, Claude Code, Cursor, Windsurf, OpenAI Agents SDK, custom Go/Python agents).
+**→ [Full getting started guide](docs/getting-started.md)** — walks through setting up MCP servers (stdio + HTTP), configuring Prism, writing tools as functions, and connecting agent harnesses (Claude Desktop, Claude Code, Cursor, Windsurf, OpenAI Agents SDK, custom Go/Python agents).
 
 ## Configuration Reference
 
@@ -253,16 +264,25 @@ Agent ──Bearer──→  │  Auth ─→ Scope Filter ─→ Router      �
                     │              │                        │
                     └──────────────┼────────────────────────┘
                                    │
-                    ┌──────────────┼──────────────┐
-                    │              │               │
-                    ▼              ▼               ▼
-              GitHub MCP    Postgres MCP     K8s MCP
-              (+token)      (+vault cred)   (+sa token)
+              ┌────────────────────┼────────────────────┐
+              │                    │                     │
+              ▼                    ▼                     ▼
+     ┌──────────────┐    ┌──────────────┐     ┌──────────────┐
+     │ Bridge       │    │ Bridge       │     │ Native HTTP  │
+     │ (container)  │    │ (container)  │     │              │
+     │ stdio→HTTP   │    │ func→HTTP    │     │              │
+     │  ↓           │    │  ↓           │     │              │
+     │ npx github   │    │ python       │     │ custom-api   │
+     └──────────────┘    └──────────────┘     └──────────────┘
 ```
 
 Prism is both:
 - An **MCP server** facing agents (Streamable HTTP transport)
 - Multiple **MCP clients** connecting to backends
+
+Backends are either:
+- **Native HTTP** MCP servers (connect directly)
+- **Bridged** stdio MCP servers or functions (via `prism-bridge` in isolated containers)
 
 Tools from all backends are aggregated under namespace prefixes. `tools/list` returns the union (filtered by scope). `tools/call` routes to the correct backend by prefix.
 
@@ -288,7 +308,7 @@ See [docs/deployment.md](docs/deployment.md) for detailed deployment instruction
 ### Commands
 
 ```bash
-make build        # Build binary
+make build        # Build both binaries (bin/prism, bin/prism-bridge)
 make test         # Run all tests
 make lint         # Run golangci-lint
 make fmt-check    # Check formatting
@@ -299,7 +319,9 @@ make check        # All of the above
 ### Project Structure
 
 ```
-cmd/prism/              Entry point
+cmd/
+  prism/                Gateway entry point
+  prism-bridge/         Bridge entry point (serve + tool modes)
 internal/
   admin/                Admin API (health, backends, info)
   audit/                Structured JSON audit logger
@@ -308,6 +330,8 @@ internal/
   credentials/          Credential store, 4 resolver types, injecting transport
   gateway/              MCP server, backend connections, tool routing
   middleware/           Auth, rate limiting, circuit breaking
+examples/
+  tools/                Example tool scripts + manifests
 integration_test.go     End-to-end tests (real MCP sessions, no Docker)
 ```
 

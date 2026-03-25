@@ -3,25 +3,29 @@
 ## Quick Reference
 
 ```bash
-# Build
-go build -o prism ./cmd/prism
+# Build both binaries
+make build
+# → bin/prism         (gateway)
+# → bin/prism-bridge  (stdio→HTTP adapter)
 
-# Validate config before deploying
-./prism -config config.json  # fails fast on invalid config
+# Run the gateway
+./bin/prism -config /etc/prism/config.json
 
-# Run
-./prism -config /etc/prism/config.json
+# Run a bridge (one per stdio backend)
+./bin/prism-bridge serve --port 3001 -- npx @modelcontextprotocol/server-github
+./bin/prism-bridge tool --manifest tool.json --port 3002 -- python3 my-tool.py
 ```
 
-Prism is a single static binary. No runtime dependencies. Runs on any Linux/macOS/Windows amd64 or arm64 system.
+Both are static binaries. No runtime dependencies. Run on any Linux/macOS/Windows amd64 or arm64 system.
 
 ## Systemd
 
 ### Install
 
 ```bash
-# Build and install binary
+# Build and install binaries
 go build -o /usr/local/bin/prism ./cmd/prism
+go build -o /usr/local/bin/prism-bridge ./cmd/prism-bridge
 
 # Create config directory
 sudo mkdir -p /etc/prism
@@ -136,8 +140,11 @@ docker run -d \
 
 ### Docker Compose
 
+Full stack with gateway + bridged backends:
+
 ```yaml
 services:
+  # The gateway — agents connect here
   prism:
     build: .
     ports:
@@ -146,15 +153,48 @@ services:
     volumes:
       - ./config.json:/etc/prism/config.json:ro
       - ./audit:/var/log/prism
-    environment:
-      - GITHUB_TOKEN=Bearer ghp_xxxxxxxxxxxx
+    depends_on:
+      bridge-github:
+        condition: service_healthy
+      bridge-dns:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
       interval: 10s
       timeout: 3s
       retries: 3
+
+  # Bridge: stdio MCP server → HTTP
+  bridge-github:
+    build:
+      context: .
+      dockerfile: cmd/prism-bridge/Dockerfile
+    command: ["serve", "--port", "3001", "--", "npx", "@modelcontextprotocol/server-github"]
+    environment:
+      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Bridge: single function → MCP tool
+  bridge-dns:
+    build:
+      context: .
+      dockerfile: cmd/prism-bridge/Dockerfile
+    command: ["tool", "--manifest", "/tools/check-dns.json", "--port", "3002", "--", "bash", "/tools/check-dns.sh"]
+    volumes:
+      - ./examples/tools:/tools:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 ```
+
+Each bridge runs in its own container — isolated resources, isolated filesystem, isolated network. A buggy backend can't affect the gateway or other backends.
 
 ## Kubernetes
 
@@ -298,6 +338,61 @@ spec:
       port: 9090
       targetPort: admin
 ```
+
+### Bridge Deployment (per stdio backend)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bridge-github
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bridge-github
+  template:
+    metadata:
+      labels:
+        app: bridge-github
+    spec:
+      containers:
+        - name: bridge
+          image: ghcr.io/prism-gateway/bridge
+          args: ["serve", "--port", "3001", "--", "npx", "@modelcontextprotocol/server-github"]
+          ports:
+            - containerPort: 3001
+          env:
+            - name: GITHUB_PERSONAL_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bridge-github
+spec:
+  selector:
+    app: bridge-github
+  ports:
+    - port: 3001
+      targetPort: 3001
+```
+
+Then reference in Prism's config as `"url": "http://bridge-github:3001/mcp"`.
 
 ## Reverse Proxy
 

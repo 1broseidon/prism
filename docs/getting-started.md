@@ -1,133 +1,142 @@
 # Getting Started with Prism
 
-This guide walks through setting up Prism end-to-end: MCP servers behind the gateway, Prism in the middle, and agent harnesses connecting to it.
+This guide walks through setting up Prism end-to-end: backends behind the gateway, Prism in the middle, and agent harnesses connecting to it.
 
 ```
-┌──────────────┐      ┌───────────┐      ┌──────────────────┐
-│ Agent        │      │           │      │ MCP Servers       │
-│              │      │           │ ───→ │ github (port 3001)│
-│ Claude Code  │ ───→ │  Prism    │ ───→ │ filesystem (3002) │
-│ Cursor       │      │  (:8080)  │ ───→ │ postgres (3003)   │
-│ Custom agent │      │           │      │                   │
-└──────────────┘      └───────────┘      └──────────────────┘
+┌──────────────┐      ┌───────────┐      ┌─────────────────────────┐
+│ Agent        │      │           │      │ Backends                │
+│              │      │           │ ───→ │ bridge → github (stdio) │
+│ Claude Code  │ ───→ │  Prism    │ ───→ │ bridge → check-dns (sh)│
+│ Cursor       │      │  (:8080)  │ ───→ │ custom-api (native HTTP)│
+│ Custom agent │      │           │      │                         │
+└──────────────┘      └───────────┘      └─────────────────────────┘
 ```
 
-## Step 1: Set Up MCP Servers
-
-Prism connects to any MCP server that speaks Streamable HTTP. Here are common ways to run them.
-
-### Using npx (quickest)
-
-Many MCP servers are published as npm packages:
+## Build
 
 ```bash
-# GitHub MCP server
-npx @modelcontextprotocol/server-github --port 3001
-
-# Filesystem MCP server
-npx @modelcontextprotocol/server-filesystem --port 3002 /path/to/allowed/dir
-
-# PostgreSQL MCP server
-npx @modelcontextprotocol/server-postgres --port 3003 \
-  "postgresql://user:pass@localhost:5432/mydb"
+git clone https://github.com/prism-gateway/prism.git
+cd prism
+make build
+# → bin/prism         (the gateway)
+# → bin/prism-bridge  (the transport adapter)
 ```
 
-### Using Docker
+## Step 1: Set Up Backends
+
+Prism connects to backends over HTTP. There are three ways to set up a backend:
+
+### Option A: Bridge a stdio MCP server (most common)
+
+Most MCP servers speak stdio — they read/write JSON-RPC on stdin/stdout. The bridge wraps them as HTTP endpoints, each in its own isolated process (or container in production).
 
 ```bash
-# GitHub MCP server
-docker run -p 3001:3001 \
-  -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxx \
-  ghcr.io/modelcontextprotocol/server-github
+# Wrap any stdio MCP server
+prism-bridge serve --port 3001 -- npx @modelcontextprotocol/server-github
+prism-bridge serve --port 3002 -- npx @modelcontextprotocol/server-filesystem /data
+prism-bridge serve --port 3003 -- uvx mcp-server-postgres --connection-string "..."
 
-# Filesystem server
-docker run -p 3002:3002 \
-  -v /data:/data:ro \
-  ghcr.io/modelcontextprotocol/server-filesystem /data
+# Or with Docker for isolation
+docker run -p 3001:3001 prism-bridge serve --port 3001 -- npx @modelcontextprotocol/server-github
 ```
 
-### Writing Your Own (Go)
+The bridge spawns the stdio server, discovers its tools, and re-exposes them as Streamable HTTP on `/mcp`. Prism connects to `http://localhost:3001/mcp` as if it were a native HTTP server.
 
-A minimal MCP server using the Go SDK:
+**Why not connect directly?** Prism is a gateway — it speaks HTTP. Running stdio servers behind the bridge means:
+- Each server is isolated (own process, own container, own resource limits)
+- No network endpoint for the raw server (agents can't bypass Prism by curling it)
+- Uniform transport — Prism doesn't need to manage subprocesses
 
-```go
-package main
+### Option B: Write a tool as a function (simplest)
 
-import (
-    "context"
-    "fmt"
-    "log"
-    "net/http"
+Don't want to build a full MCP server? Write a script. Any script that reads JSON from stdin and writes text to stdout is a tool:
 
-    "github.com/modelcontextprotocol/go-sdk/mcp"
-)
+```bash
+#!/bin/bash
+# check-dns.sh — reads {"hostname": "example.com"} from stdin
+input=$(cat)
+hostname=$(echo "$input" | grep -o '"hostname":"[^"]*"' | cut -d'"' -f4)
+getent hosts "$hostname" | awk '{print $1}' | sort -u
+```
 
-func main() {
-    server := mcp.NewServer(&mcp.Implementation{
-        Name:    "my-server",
-        Version: "0.1.0",
-    }, nil)
+```python
+#!/usr/bin/env python3
+# word-count.py — reads {"text": "..."} from stdin
+import json, sys
+data = json.load(sys.stdin)
+text = data["text"]
+print(f"Lines: {text.count(chr(10)) + 1}\nWords: {len(text.split())}\nCharacters: {len(text)}")
+```
 
-    server.AddTool(&mcp.Tool{
-        Name:        "greet",
-        Description: "Say hello",
-        InputSchema: mcp.ToolInputSchema{
-            Type: "object",
-            Properties: map[string]*mcp.Property{
-                "name": {Type: "string", Description: "Name to greet"},
-            },
-            Required: []string{"name"},
-        },
-    }, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-        name, _ := req.Arguments["name"].(string)
-        return &mcp.CallToolResult{
-            Content: []mcp.Content{{Type: "text", Text: fmt.Sprintf("Hello, %s!", name)}},
-        }, nil
-    })
+Deploy with the bridge in tool mode:
 
-    handler := mcp.NewStreamableHTTPHandler(
-        func(r *http.Request) *mcp.Server { return server },
-        nil,
-    )
+```bash
+# Quick — name and description from CLI flags
+prism-bridge tool --name check-dns --description "Resolve DNS for a hostname" \
+  --port 3004 -- bash check-dns.sh
 
-    http.Handle("/mcp", handler)
-    http.Handle("/mcp/", handler)
-    log.Fatal(http.ListenAndServe(":3001", nil))
+# Better — full manifest with input schema (so agents know what arguments to pass)
+prism-bridge tool --manifest check-dns.json --port 3004 -- bash check-dns.sh
+```
+
+A tool manifest (`check-dns.json`):
+
+```json
+{
+  "name": "check-dns",
+  "description": "Resolve a hostname to its IP addresses",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "hostname": {
+        "type": "string",
+        "description": "The hostname to resolve"
+      }
+    },
+    "required": ["hostname"]
+  }
 }
 ```
 
-### Writing Your Own (Python)
+**The function contract:**
 
-```python
-from mcp.server import Server
-from mcp.server.transports import StreamableHTTPTransport
+| Channel | Purpose |
+|---|---|
+| stdin | JSON object of tool arguments |
+| stdout | Result text (returned to agent) |
+| stderr | Error message (if exit code ≠ 0) |
+| exit 0 | Success |
+| exit 1+ | Error |
 
-server = Server("my-server")
+Any language works. No SDK required. No MCP knowledge required.
 
-@server.tool("greet", description="Say hello")
-async def greet(name: str) -> str:
-    return f"Hello, {name}!"
+See `examples/tools/` for ready-to-use examples.
 
-transport = StreamableHTTPTransport(host="0.0.0.0", port=3001)
-server.run(transport)
-```
+### Option C: Connect a native HTTP MCP server
 
-### Verify Your Backends
-
-Before configuring Prism, make sure each backend is reachable:
+If your MCP server already speaks Streamable HTTP, just point Prism at it directly — no bridge needed:
 
 ```bash
-# Quick health check — send an MCP initialize request
-curl -X POST http://localhost:3001/mcp \
+# Your server is already running at http://localhost:3005/mcp
+# Just add it to Prism's config (Step 2)
+```
+
+### Verify backends are running
+
+```bash
+# Bridge health check
+curl http://localhost:3001/health
+# → {"status":"ok","tools":5}
+
+# Native HTTP — send an MCP initialize request
+curl -X POST http://localhost:3005/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}'
 ```
 
-You should get a JSON-RPC response with the server's capabilities.
-
 ## Step 2: Configure Prism
 
-Create `config.json` pointing to your running backends:
+Create `config.json` pointing to your backends (bridges and native servers alike):
 
 ```json
 {
@@ -145,18 +154,18 @@ Create `config.json` pointing to your running backends:
       }
     },
     {
-      "id": "filesystem",
-      "url": "http://localhost:3002/mcp",
-      "namespace": "fs"
+      "id": "dns",
+      "url": "http://localhost:3004/mcp",
+      "namespace": "dns"
     },
     {
-      "id": "postgres",
-      "url": "http://localhost:3003/mcp",
-      "namespace": "db",
+      "id": "custom-api",
+      "url": "http://localhost:3005/mcp",
+      "namespace": "api",
       "credentials": {
         "type": "static",
-        "header": "Authorization",
-        "value": "Bearer db-access-token"
+        "header": "X-API-Key",
+        "value": "sk_live_your_key"
       }
     }
   ],
@@ -172,7 +181,8 @@ Create `config.json` pointing to your running backends:
 ```
 
 **Key points:**
-- Each backend gets a `namespace`. Tools are exposed as `namespace__toolname` (e.g. `github__create_issue`)
+- Prism doesn't know or care whether a backend is bridged or native — it's all HTTP
+- Each backend gets a `namespace`. Tools are exposed as `namespace__toolname` (e.g. `github__create_issue`, `dns__check-dns`)
 - `credentials` are injected by Prism into outbound requests — the agent never sees them
 - `auth` defines how agents authenticate *to Prism* (API key for dev, OAuth for production)
 
@@ -180,7 +190,7 @@ Create `config.json` pointing to your running backends:
 
 ```bash
 export GITHUB_TOKEN="Bearer ghp_xxxxxxxxxxxx"
-./prism -config config.json
+./bin/prism -config config.json
 ```
 
 ### Verify Prism
@@ -192,18 +202,12 @@ curl http://localhost:9090/health
 
 # Connected backends
 curl http://localhost:9090/backends
-# → [{"id":"github","status":"connected"}, ...]
-
-# List tools through the gateway (with auth)
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: my-agent-key" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}'
+# → [{"id":"github","namespace":"github","url":"http://localhost:3001/mcp"}, ...]
 ```
 
 ## Step 3: Connect Agent Harnesses
 
-Prism exposes a single MCP endpoint at `http://localhost:8080/mcp`. Any MCP-compatible agent connects here instead of directly to backend servers.
+Prism exposes a single MCP endpoint at `http://localhost:8080/mcp`. Any MCP-compatible agent connects here instead of directly to backends.
 
 ### Claude Desktop
 
@@ -223,7 +227,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. You should see tools from all backends in the tool picker, prefixed by namespace (e.g. `github__create_issue`, `fs__read_file`, `db__query`).
+Restart Claude Desktop. You should see tools from all backends in the tool picker, prefixed by namespace.
 
 **Before Prism:** You'd configure each MCP server separately, each with its own credentials in the config. Every server's API keys sit in a plaintext JSON file on the user's machine.
 
@@ -231,7 +235,7 @@ Restart Claude Desktop. You should see tools from all backends in the tool picke
 
 ### Claude Code (CLI)
 
-Claude Code reads from `~/.claude/mcp_servers.json`:
+Add to `~/.claude/mcp_servers.json` (global) or `.claude/mcp_servers.json` (per-project):
 
 ```json
 {
@@ -245,8 +249,6 @@ Claude Code reads from `~/.claude/mcp_servers.json`:
 }
 ```
 
-Or set it per-project in `.claude/mcp_servers.json` at the repo root.
-
 ### Cursor
 
 In Cursor settings (Settings → MCP Servers → Add):
@@ -254,7 +256,7 @@ In Cursor settings (Settings → MCP Servers → Add):
 ```json
 {
   "prism": {
-    "transport": "streamable-http", 
+    "transport": "streamable-http",
     "url": "http://localhost:8080/mcp",
     "headers": {
       "X-API-Key": "my-agent-key"
@@ -290,87 +292,51 @@ async with MCPServerStreamableHTTP(
 ) as mcp:
     agent = Agent(
         name="my-agent",
-        instructions="You have access to GitHub, filesystem, and database tools.",
+        instructions="You have access to GitHub, DNS, and API tools.",
         mcp_servers=[mcp],
     )
-    result = await agent.run("Create a GitHub issue about the bug in main.py")
+    result = await agent.run("Look up the DNS records for example.com")
 ```
 
 ### Custom Agent (Go)
 
 ```go
-package main
+client := mcp.NewClient(&mcp.Implementation{Name: "my-agent", Version: "0.1.0"}, nil)
 
-import (
-    "context"
-    "fmt"
-    "net/http"
-
-    "github.com/modelcontextprotocol/go-sdk/mcp"
-)
-
-func main() {
-    client := mcp.NewClient(&mcp.Implementation{
-        Name:    "my-agent",
-        Version: "0.1.0",
-    }, nil)
-
-    transport := &mcp.StreamableClientTransport{
-        Endpoint: "http://localhost:8080/mcp",
-        HTTPClient: &http.Client{
-            Transport: &headerTransport{
-                base:   http.DefaultTransport,
-                header: "X-API-Key",
-                value:  "my-agent-key",
-            },
+session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+    Endpoint: "http://localhost:8080/mcp",
+    HTTPClient: &http.Client{
+        Transport: &headerTransport{
+            base:   http.DefaultTransport,
+            header: "X-API-Key",
+            value:  "my-agent-key",
         },
-    }
+    },
+}, nil)
 
-    session, err := client.Connect(context.Background(), transport, nil)
-    if err != nil {
-        panic(err)
-    }
-    defer session.Close()
+// List tools — you'll see github__create_issue, dns__check-dns, etc.
+tools, _ := session.ListTools(ctx, &mcp.ListToolsParams{})
 
-    // List all available tools
-    tools, err := session.ListTools(context.Background(), nil)
-    if err != nil {
-        panic(err)
-    }
-    for _, t := range tools.Tools {
-        fmt.Printf("  %s — %s\n", t.Name, t.Description)
-    }
+// Call a tool
+result, _ := session.CallTool(ctx, &mcp.CallToolParams{
+    Name:      "dns__check-dns",
+    Arguments: map[string]any{"hostname": "example.com"},
+})
 
-    // Call a tool
-    result, err := session.CallTool(context.Background(), &mcp.CallToolRequest{
-        Name:      "github__create_issue",
-        Arguments: map[string]any{
-            "title": "Bug in main.py",
-            "body":  "Found a null pointer on line 42",
-        },
-    })
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println(result.Content[0].Text)
-}
-
+// headerTransport sets the auth header on every request.
 type headerTransport struct {
     base   http.RoundTripper
-    header string
-    value  string
+    header, value string
 }
-
-func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-    req.Header.Set(t.header, t.value)
-    return t.base.RoundTrip(req)
+func (t *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+    r.Header.Set(t.header, t.value)
+    return t.base.RoundTrip(r)
 }
 ```
 
 ### Custom Agent (Python)
 
 ```python
-import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -380,36 +346,24 @@ async with streamablehttp_client(
 ) as (read, write, _):
     async with ClientSession(read, write) as session:
         await session.initialize()
-
-        # List tools
         tools = await session.list_tools()
-        for tool in tools.tools:
-            print(f"  {tool.name} — {tool.description}")
-
-        # Call a tool
-        result = await session.call_tool(
-            "github__create_issue",
-            arguments={"title": "Bug", "body": "Details here"},
-        )
+        result = await session.call_tool("dns__check-dns", {"hostname": "example.com"})
         print(result.content[0].text)
 ```
 
 ## Step 4: Verify End-to-End
 
-Once everything is wired up:
-
 ### 1. Check tool discovery
 
-Your agent should see namespaced tools. Ask it: "What tools do you have available?"
+Ask your agent: "What tools do you have available?"
 
-Expected: tools like `github__create_issue`, `fs__read_file`, `db__query`.
+Expected: namespaced tools like `github__create_issue`, `dns__check-dns`, `api__whatever`.
 
 ### 2. Check credential injection
 
 Watch the audit log (stderr or your configured output):
 
-```bash
-# You should see entries like:
+```json
 {"ts":"2025-01-15T10:30:00Z","namespace":"github","tool":"create_issue","allowed":true,"cred_injected":true,...}
 ```
 
@@ -418,10 +372,7 @@ Watch the audit log (stderr or your configured output):
 ### 3. Check the admin API
 
 ```bash
-# All backends connected?
 curl -s http://localhost:9090/backends | jq .
-
-# Gateway healthy?
 curl -s http://localhost:9090/health
 ```
 
@@ -432,19 +383,47 @@ Before Prism:
   Agent → GitHub API  (holds ghp_xxx token)
   Agent → Postgres    (holds db password)
   Agent → Filesystem  (unrestricted access)
-  No audit trail. Agent has all the keys.
+  No audit trail. Agent has all the keys. Can curl anything.
 
 After Prism:
   Agent → Prism (one API key or OAuth token)
-       → Prism injects GitHub token    → GitHub MCP
-       → Prism injects DB credential   → Postgres MCP  
-       → Prism passes through          → Filesystem MCP
-  Every call audited. Agent holds nothing.
+       ├→ bridge (isolated container) → GitHub stdio server
+       ├→ bridge (isolated container) → check-dns.sh
+       └→ native HTTP API server
+  Every call audited. Credentials injected. Agent holds nothing.
+  Stdio servers have no network endpoint — can't be curled.
 ```
+
+## Production Setup
+
+For production, swap API key auth for OAuth 2.1 and run bridges in containers:
+
+```yaml
+# docker-compose.yml
+services:
+  prism:
+    build: .
+    ports: ["8080:8080", "9090:9090"]
+    volumes: ["./config.json:/etc/prism/config.json:ro"]
+
+  bridge-github:
+    image: ghcr.io/prism-gateway/bridge
+    command: ["serve", "--port", "3001", "--", "npx", "@modelcontextprotocol/server-github"]
+    environment:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}
+
+  bridge-dns:
+    image: ghcr.io/prism-gateway/bridge
+    command: ["tool", "--manifest", "/tools/check-dns.json", "--port", "3002", "--", "bash", "/tools/check-dns.sh"]
+    volumes: ["./examples/tools:/tools:ro"]
+```
+
+Each bridge is isolated: own container, own resources, own network namespace. A buggy or compromised MCP server can't affect Prism or other backends.
 
 ## Next Steps
 
-- **Production auth**: Switch from API keys to [OAuth 2.1](../README.md#oauth-21-production--agentic) with Keycloak, Auth0, or any OIDC provider
+- **OAuth 2.1 auth**: See the [config reference](../README.md#oauth-21-production--agentic) for Keycloak, Auth0, or any OIDC provider
 - **Scope enforcement**: With OAuth, agents only see tools their token grants access to
 - **Deployment**: See [deployment.md](deployment.md) for systemd, Docker, Kubernetes, and production hardening
 - **Credential rotation**: Use `command`-type credentials with Vault or cloud CLI for automatic rotation
+- **Write your own tools**: See `examples/tools/` for bash and Python examples
