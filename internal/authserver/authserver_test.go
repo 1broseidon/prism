@@ -1,4 +1,4 @@
-package main
+package authserver
 
 import (
 	"crypto/rsa"
@@ -16,13 +16,12 @@ import (
 
 const testIssuer = "http://localhost:9100"
 
-// newTestServer builds a server with a fixed set of test clients and an ephemeral key.
-func newTestServer(t *testing.T) *server {
+func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
-	km, err := newKeyManager("")
+	km, err := NewKeyManager("")
 	if err != nil {
-		t.Fatalf("newKeyManager: %v", err)
+		t.Fatalf("NewKeyManager: %v", err)
 	}
 
 	cfg := &Config{
@@ -44,17 +43,16 @@ func newTestServer(t *testing.T) *server {
 		},
 	}
 
-	return newServer(cfg, km, nil)
+	return NewServer(cfg, km, nil)
 }
 
-// postToken sends a POST /token request with the given form values and returns the response.
-func postToken(t *testing.T, srv *server, form url.Values) *httptest.ResponseRecorder {
+func postToken(t *testing.T, srv *Server, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	body := strings.NewReader(form.Encode())
 	r := httptest.NewRequest(http.MethodPost, "/token", body)
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
-	srv.routes().ServeHTTP(w, r)
+	srv.Routes().ServeHTTP(w, r)
 	return w
 }
 
@@ -73,7 +71,7 @@ func TestTokenEndpoint_ValidClientCredentials(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp tokenResponse
+	var resp TokenResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -88,7 +86,6 @@ func TestTokenEndpoint_ValidClientCredentials(t *testing.T) {
 		t.Fatal("access_token is empty")
 	}
 
-	// Parse and verify JWT claims (without signature check here — TestEndToEnd covers that).
 	tok, _, err := jwt.NewParser().ParseUnverified(resp.AccessToken, jwt.MapClaims{})
 	if err != nil {
 		t.Fatalf("parse JWT: %v", err)
@@ -135,7 +132,7 @@ func TestTokenEndpoint_InvalidClient(t *testing.T) {
 			if w.Code != http.StatusUnauthorized {
 				t.Errorf("expected 401, got %d", w.Code)
 			}
-			var resp oauthError
+			var resp OAuthError
 			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 				t.Fatalf("decode error response: %v", err)
 			}
@@ -149,7 +146,6 @@ func TestTokenEndpoint_InvalidClient(t *testing.T) {
 func TestTokenEndpoint_ScopeSubset(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Request only one of the client's three allowed scopes.
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {"ci-agent"},
@@ -162,7 +158,7 @@ func TestTokenEndpoint_ScopeSubset(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp tokenResponse
+	var resp TokenResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -174,7 +170,6 @@ func TestTokenEndpoint_ScopeSubset(t *testing.T) {
 func TestTokenEndpoint_ScopeExceeded(t *testing.T) {
 	srv := newTestServer(t)
 
-	// analyst is not allowed github:create_issue.
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {"analyst"},
@@ -187,7 +182,7 @@ func TestTokenEndpoint_ScopeExceeded(t *testing.T) {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp oauthError
+	var resp OAuthError
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
@@ -204,13 +199,13 @@ func TestTokenEndpoint_BasicAuth(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.SetBasicAuth("ci-agent", "ci-secret")
 	w := httptest.NewRecorder()
-	srv.routes().ServeHTTP(w, r)
+	srv.Routes().ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp tokenResponse
+	var resp TokenResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -222,7 +217,6 @@ func TestTokenEndpoint_BasicAuth(t *testing.T) {
 func TestTokenEndpoint_NoScope(t *testing.T) {
 	srv := newTestServer(t)
 
-	// No scope field — should default to all client's allowed scopes.
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {"analyst"},
@@ -234,12 +228,11 @@ func TestTokenEndpoint_NoScope(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp tokenResponse
+	var resp TokenResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	// All of analyst's allowed scopes must be present (order may vary).
 	gotScopes := strings.Fields(resp.Scope)
 	if len(gotScopes) != 2 {
 		t.Errorf("expected 2 scopes, got %d: %q", len(gotScopes), resp.Scope)
@@ -251,7 +244,7 @@ func TestJWKSEndpoint(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", http.NoBody)
 	w := httptest.NewRecorder()
-	srv.routes().ServeHTTP(w, r)
+	srv.Routes().ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -291,13 +284,13 @@ func TestDiscoveryEndpoint(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", http.NoBody)
 	w := httptest.NewRecorder()
-	srv.routes().ServeHTTP(w, r)
+	srv.Routes().ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var meta discoveryMeta
+	var meta DiscoveryMeta
 	if err := json.NewDecoder(w.Body).Decode(&meta); err != nil {
 		t.Fatalf("decode discovery: %v", err)
 	}
@@ -323,7 +316,6 @@ func TestDiscoveryEndpoint(t *testing.T) {
 	}
 }
 
-// jwkToPublicKey reconstructs an *rsa.PublicKey from a JWK.
 func jwkToPublicKey(t *testing.T, k JWK) *rsa.PublicKey {
 	t.Helper()
 
@@ -343,9 +335,8 @@ func jwkToPublicKey(t *testing.T, k JWK) *rsa.PublicKey {
 
 func TestEndToEnd_TokenValidation(t *testing.T) {
 	srv := newTestServer(t)
-	mux := srv.routes()
+	mux := srv.Routes()
 
-	// 1. Mint a token via the token endpoint.
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {"ci-agent"},
@@ -362,12 +353,11 @@ func TestEndToEnd_TokenValidation(t *testing.T) {
 		t.Fatalf("token request failed: %d %s", w.Code, w.Body.String())
 	}
 
-	var tokenResp tokenResponse
+	var tokenResp TokenResponse
 	if err := json.NewDecoder(w.Body).Decode(&tokenResp); err != nil {
 		t.Fatalf("decode token response: %v", err)
 	}
 
-	// 2. Fetch the JWKS and reconstruct the public key.
 	r2 := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", http.NoBody)
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, r2)
@@ -381,7 +371,6 @@ func TestEndToEnd_TokenValidation(t *testing.T) {
 	}
 	pubKey := jwkToPublicKey(t, jwks.Keys[0])
 
-	// 3. Validate the JWT using the public key from JWKS (as Prism would do).
 	parser := jwt.NewParser(
 		jwt.WithIssuer(testIssuer),
 		jwt.WithAudience(testIssuer),
@@ -389,7 +378,7 @@ func TestEndToEnd_TokenValidation(t *testing.T) {
 		jwt.WithValidMethods([]string{"RS256"}),
 	)
 
-	parsed, err := parser.Parse(tokenResp.AccessToken, func(token *jwt.Token) (any, error) {
+	parsed, err := parser.Parse(tokenResp.AccessToken, func(_ *jwt.Token) (any, error) {
 		return pubKey, nil
 	})
 	if err != nil {

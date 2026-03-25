@@ -11,15 +11,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/prism-gateway/prism/internal/admin"
-	"github.com/prism-gateway/prism/internal/audit"
-	"github.com/prism-gateway/prism/internal/auth"
-	"github.com/prism-gateway/prism/internal/config"
-	"github.com/prism-gateway/prism/internal/gateway"
-	"github.com/prism-gateway/prism/internal/middleware"
+	"github.com/1broseidon/prism/internal/admin"
+	"github.com/1broseidon/prism/internal/audit"
+	"github.com/1broseidon/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/authserver"
+	"github.com/1broseidon/prism/internal/config"
+	"github.com/1broseidon/prism/internal/gateway"
+	"github.com/1broseidon/prism/internal/middleware"
 )
 
 func main() {
@@ -35,8 +37,8 @@ func main() {
 	}
 
 	logger.Info("loaded config",
-		"listen", cfg.ListenAddr,
-		"admin", cfg.AdminAddr,
+		"listen", cfg.Listen,
+		"admin", cfg.Admin,
 		"servers", len(cfg.Servers),
 	)
 
@@ -46,29 +48,39 @@ func main() {
 	gw := setupGateway(ctx, cfg, logger)
 	defer gw.Close()
 
-	handler := buildHandler(cfg, gw, logger)
-	mainMux := buildMux(cfg, handler, logger)
+	// Always start the embedded auth server — agents connect via OAuth DCR.
+	// If policy.agents is configured, those clients are pre-registered.
+	// Otherwise, agents self-register via DCR at runtime.
+	if cfg.EmbeddedAuth == nil {
+		cfg.EmbeddedAuth = &config.EmbeddedAuthConfig{
+			TokenTTLSeconds: 3600,
+			RequiredScopes:  []string{"mcp:connect"},
+		}
+	}
+	authSrv, authJWKS := setupEmbeddedAuth(cfg, logger)
+
+	handler := buildHandler(cfg, gw, authJWKS, logger)
+	mainMux := buildMux(cfg, handler, authSrv, logger)
 
 	mainServer := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           mainMux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	adminAPI := admin.NewAPI(func() any { return gw.Status() })
 	adminServer := &http.Server{
-		Addr:              cfg.AdminAddr,
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errCh := make(chan error, 2)
-	startServers(ctx, cfg, mainServer, adminServer, logger, errCh)
+	startServers(cfg, mainServer, adminServer, logger, errCh)
+	printStartupBanner(cfg, gw, logger)
 	waitForShutdown(cfg, mainServer, adminServer, gw, logger, errCh)
 }
 
 // setupGateway creates the gateway, wires the audit logger, and connects backends.
-func setupGateway(ctx context.Context, cfg *config.Config, logger *slog.Logger) *gateway.Gateway {
+func setupGateway(ctx context.Context, cfg *config.Loaded, logger *slog.Logger) *gateway.Gateway {
 	gw := gateway.New(logger)
 	gw.SetAuditLogger(buildAuditLogger(cfg, logger))
 
@@ -81,22 +93,64 @@ func setupGateway(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	return gw
 }
 
+// setupEmbeddedAuth creates an in-process OAuth 2.1 authorization server
+// from the policy.agents config. Returns the server and its JWKS bytes
+// (for pre-seeding the token validator).
+func setupEmbeddedAuth(cfg *config.Loaded, logger *slog.Logger) (srv *authserver.Server, jwksData []byte) {
+	ea := cfg.EmbeddedAuth
+
+	// Derive issuer from listen address.
+	issuer := "http://localhost" + cfg.Listen
+	ea.Issuer = issuer
+
+	// Convert embedded clients to authserver clients.
+	clients := make([]authserver.ClientConfig, len(ea.Clients))
+	for i, c := range ea.Clients {
+		clients[i] = authserver.ClientConfig{
+			ClientID:      c.ClientID,
+			ClientSecret:  c.ClientSecret,
+			AllowedScopes: c.AllowedScopes,
+		}
+	}
+
+	authCfg := &authserver.Config{
+		Issuer:          issuer,
+		Clients:         clients,
+		TokenTTLSeconds: ea.TokenTTLSeconds,
+		DefaultScopes:   ea.DefaultScopes,
+	}
+
+	km, err := authserver.NewKeyManager("")
+	if err != nil {
+		logger.Error("failed to initialize embedded auth signing key", "error", err)
+		os.Exit(1)
+	}
+
+	srv = authserver.NewServer(authCfg, km, logger)
+	jwksData = km.JWKS()
+
+	logger.Info("embedded auth server enabled",
+		"issuer", issuer,
+		"agents", len(clients),
+	)
+
+	return srv, jwksData
+}
+
 // buildHandler wraps the gateway handler with auth and rate-limit middleware.
-func buildHandler(cfg *config.Config, gw *gateway.Gateway, logger *slog.Logger) http.Handler {
+func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, logger *slog.Logger) http.Handler {
 	var middlewares []middleware.Middleware
 
-	switch {
-	case cfg.Auth != nil && cfg.Auth.OAuth != nil:
-		middlewares = append(middlewares, buildOAuthMiddleware(cfg, logger))
-	case cfg.Auth != nil && len(cfg.Auth.ValidKeys) > 0:
-		middlewares = append(middlewares, middleware.Auth(middleware.AuthConfig{
-			Header:    cfg.Auth.Header,
-			ValidKeys: cfg.Auth.ValidKeys,
-		}))
-		logger.Info("API key auth enabled")
-	default:
-		logger.Warn("no authentication configured — gateway is open")
-	}
+	ea := cfg.EmbeddedAuth
+	validator := auth.NewTokenValidator(&auth.TokenValidatorConfig{
+		IssuerURL:      ea.Issuer,
+		Audience:       ea.Issuer,
+		StaticJWKS:     authJWKS,
+		RequiredScopes: ea.RequiredScopes,
+	})
+
+	logger.Info("OAuth 2.1 token validation enabled", "issuer", ea.Issuer)
+	middlewares = append(middlewares, auth.Middleware(validator, ""))
 
 	if cfg.RateLimit != nil {
 		middlewares = append(middlewares, middleware.RateLimit(middleware.RateLimitConfig{
@@ -113,64 +167,52 @@ func buildHandler(cfg *config.Config, gw *gateway.Gateway, logger *slog.Logger) 
 	return handler
 }
 
-// buildOAuthMiddleware creates the OAuth 2.1 token validation middleware.
-func buildOAuthMiddleware(cfg *config.Config, logger *slog.Logger) middleware.Middleware {
-	oauthCfg := cfg.Auth.OAuth
-	validator := auth.NewTokenValidator(&auth.TokenValidatorConfig{
-		IssuerURL:      oauthCfg.IssuerURL,
-		JWKSURL:        oauthCfg.JWKSURL,
-		Audience:       oauthCfg.Audience,
-		RequiredScopes: oauthCfg.RequiredScopes,
-		MaxTokenAge:    oauthCfg.MaxTokenAge.Duration(),
-	})
-
-	resourceURI := cfg.ResourceURI
-	if resourceURI == "" && oauthCfg.ResourceURI != "" {
-		resourceURI = oauthCfg.ResourceURI
-	}
-
-	logger.Info("OAuth 2.1 token validation enabled",
-		"issuer", oauthCfg.IssuerURL,
-		"audience", oauthCfg.Audience,
-	)
-
-	return auth.Middleware(validator, resourceURI)
-}
-
-// buildMux creates the HTTP mux with the MCP handler and optional discovery endpoint.
-func buildMux(cfg *config.Config, handler http.Handler, logger *slog.Logger) *http.ServeMux {
+// buildMux creates the HTTP mux with the MCP handler and auth endpoints.
+func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Server, logger *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	if cfg.Auth != nil && cfg.Auth.OAuth != nil {
-		oauthCfg := cfg.Auth.OAuth
-		resourceURI := cfg.ResourceURI
-		if resourceURI == "" {
-			resourceURI = oauthCfg.ResourceURI
-		}
-		meta := &auth.ProtectedResourceMetadata{
-			Resource:               resourceURI,
-			AuthorizationServers:   []string{oauthCfg.IssuerURL},
-			ScopesSupported:        oauthCfg.ScopesSupported,
-			BearerMethodsSupported: []string{"header"},
-		}
-		mux.Handle("/.well-known/oauth-protected-resource", auth.DiscoveryHandler(meta))
-		logger.Info("serving Protected Resource Metadata", "path", "/.well-known/oauth-protected-resource")
+	// Mount embedded auth endpoints if present.
+	if authSrv != nil {
+		authRoutes := authSrv.Routes()
+		mux.Handle("POST /token", authRoutes)
+		mux.Handle("GET /authorize", authRoutes)
+		mux.Handle("POST /register", authRoutes)
+		mux.Handle("GET /.well-known/jwks.json", authRoutes)
+		mux.Handle("GET /.well-known/oauth-authorization-server", authRoutes)
+		logger.Info("mounted auth endpoints", "paths", "/token, /authorize, /register, /.well-known/*")
 	}
+
+	// Protected Resource Metadata (RFC 9728) — tells MCP clients where to authenticate.
+	meta := &auth.ProtectedResourceMetadata{
+		AuthorizationServers:   []string{cfg.EmbeddedAuth.Issuer},
+		ScopesSupported:        cfg.EmbeddedAuth.ScopesSupported,
+		BearerMethodsSupported: []string{"header"},
+	}
+	mux.Handle("/.well-known/oauth-protected-resource", auth.DiscoveryHandler(meta))
 
 	mux.Handle("/mcp", handler)
 	mux.Handle("/mcp/", handler)
 
+	// Catch-all: return JSON 404 for any unmatched path.
+	// MCP clients (Claude Code) expect JSON responses and fail to parse plain-text 404s.
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+	})
+
 	return mux
 }
 
-// startServers launches the main and admin HTTP servers in background goroutines.
-func startServers(ctx context.Context, cfg *config.Config, mainSrv, adminSrv *http.Server, logger *slog.Logger, errCh chan<- error) {
+// startServers launches the main and admin HTTP servers.
+func startServers(cfg *config.Loaded, mainSrv, adminSrv *http.Server, logger *slog.Logger, errCh chan<- error) {
 	lc := net.ListenConfig{}
+	ctx := context.Background()
 
 	go func() {
-		ln, err := lc.Listen(ctx, "tcp", cfg.ListenAddr)
+		ln, err := lc.Listen(ctx, "tcp", cfg.Listen)
 		if err != nil {
-			errCh <- fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
+			errCh <- fmt.Errorf("listen %s: %w", cfg.Listen, err)
 			return
 		}
 		logger.Info("MCP gateway listening", "addr", ln.Addr().String())
@@ -178,9 +220,9 @@ func startServers(ctx context.Context, cfg *config.Config, mainSrv, adminSrv *ht
 	}()
 
 	go func() {
-		ln, err := lc.Listen(ctx, "tcp", cfg.AdminAddr)
+		ln, err := lc.Listen(ctx, "tcp", cfg.Admin)
 		if err != nil {
-			errCh <- fmt.Errorf("listen %s: %w", cfg.AdminAddr, err)
+			errCh <- fmt.Errorf("listen %s: %w", cfg.Admin, err)
 			return
 		}
 		logger.Info("admin API listening", "addr", ln.Addr().String())
@@ -188,17 +230,43 @@ func startServers(ctx context.Context, cfg *config.Config, mainSrv, adminSrv *ht
 	}()
 }
 
+// printStartupBanner prints the ready message with connection instructions.
+func printStartupBanner(cfg *config.Loaded, gw *gateway.Gateway, logger *slog.Logger) {
+	toolCount := 0
+	for _, s := range gw.Status() {
+		_ = s // count backends
+		toolCount++
+	}
+
+	// Build listen URL for display.
+	host := "localhost"
+	port := strings.TrimPrefix(cfg.Listen, ":")
+	url := fmt.Sprintf("http://%s:%s/mcp", host, port)
+	tokenURL := fmt.Sprintf("http://%s:%s/token", host, port)
+
+	logger.Info("prism ready",
+		"backends", len(cfg.Servers),
+		"url", url,
+	)
+
+	if cfg.EmbeddedAuth != nil {
+		fmt.Fprintf(os.Stderr, "\n  Get a token:  curl -s -X POST %s -d \"grant_type=client_credentials&client_id=AGENT&client_secret=SECRET\"\n", tokenURL)
+		fmt.Fprintf(os.Stderr, "\n  Claude Code (~/.claude/mcp_servers.json):\n")
+		fmt.Fprintf(os.Stderr, "  { \"prism\": { \"type\": \"streamable-http\", \"url\": \"%s\", \"headers\": { \"Authorization\": \"Bearer TOKEN\" } } }\n\n", url)
+	} else {
+		fmt.Fprintf(os.Stderr, "\n  Claude Code (~/.claude/mcp_servers.json):\n")
+		fmt.Fprintf(os.Stderr, "  { \"prism\": { \"type\": \"streamable-http\", \"url\": \"%s\" } }\n\n", url)
+	}
+}
+
 // waitForShutdown blocks until a signal or server error, then gracefully shuts down.
-func waitForShutdown(cfg *config.Config, mainServer, adminServer *http.Server, gw *gateway.Gateway, logger *slog.Logger, errCh <-chan error) {
+func waitForShutdown(cfg *config.Loaded, mainServer, adminServer *http.Server, gw *gateway.Gateway, logger *slog.Logger, errCh <-chan error) {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	select {
 	case sig := <-sigCh:
 		logger.Info("received signal", "signal", sig)
-		if sig == syscall.SIGHUP {
-			logger.Info("SIGHUP received — hot reload not yet implemented")
-		}
 	case err := <-errCh:
 		logger.Error("server error", "error", err)
 	}
@@ -224,7 +292,7 @@ func waitForShutdown(cfg *config.Config, mainServer, adminServer *http.Server, g
 }
 
 // buildAuditLogger creates an audit.Logger from the audit config section.
-func buildAuditLogger(cfg *config.Config, logger *slog.Logger) *audit.Logger {
+func buildAuditLogger(cfg *config.Loaded, logger *slog.Logger) *audit.Logger {
 	if cfg.Audit == nil || !cfg.Audit.Enabled {
 		return audit.Noop()
 	}

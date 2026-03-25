@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/prism-gateway/prism/internal/audit"
+	"github.com/1broseidon/prism/internal/audit"
 )
 
 func TestLogCall_AllowedNoAuth(t *testing.T) {

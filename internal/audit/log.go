@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prism-gateway/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/auth"
 )
 
 // Entry is a single structured audit log record.

@@ -53,7 +53,7 @@ Most MCP servers speak stdio (npx, uvx, local binaries). Prism speaks HTTP. The 
 ## Quick Start
 
 ```bash
-git clone https://github.com/prism-gateway/prism.git
+git clone https://github.com/1broseidon/prism.git
 cd prism
 make build    # builds bin/prism and bin/prism-bridge
 ```

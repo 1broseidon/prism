@@ -1,3 +1,7 @@
+// Package main implements prism-auth, a standalone OAuth 2.1 authorization server
+// for the Prism MCP gateway. In most deployments, prism-auth is embedded in the
+// gateway process via the unified config. This standalone binary is for advanced
+// use cases (separate scaling, sidecar deployments).
 package main
 
 import (
@@ -6,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/1broseidon/prism/internal/authserver"
 )
 
 func main() {
@@ -16,13 +22,13 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
-	cfg, err := loadConfig(*configPath)
+	cfg, err := authserver.LoadConfig(*configPath)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
 
-	km, err := newKeyManager(cfg.SigningKey.Path)
+	km, err := authserver.NewKeyManager(cfg.SigningKey.Path)
 	if err != nil {
 		logger.Error("failed to initialize signing key", "error", err)
 		os.Exit(1)
@@ -32,11 +38,11 @@ func main() {
 		logger.Warn("using ephemeral signing key (dev mode) — tokens become invalid after restart")
 	}
 
-	srv := newServer(cfg, km, logger)
+	srv := authserver.NewServer(cfg, km, logger)
 
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           srv.routes(),
+		Handler:           srv.Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

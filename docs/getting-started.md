@@ -15,7 +15,7 @@ This guide walks through setting up Prism end-to-end: backends behind the gatewa
 ## Build
 
 ```bash
-git clone https://github.com/prism-gateway/prism.git
+git clone https://github.com/1broseidon/prism.git
 cd prism
 make build
 # → bin/prism         (the gateway)

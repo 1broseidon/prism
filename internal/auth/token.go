@@ -39,6 +39,10 @@ type TokenValidatorConfig struct {
 	// If empty, defaults to IssuerURL + "/.well-known/jwks.json".
 	JWKSURL string `json:"jwks_url,omitempty"`
 
+	// StaticJWKS provides JWKS data directly, bypassing HTTP fetch.
+	// Used when the auth server is embedded in the same process.
+	StaticJWKS []byte `json:"-"`
+
 	// Audience is the expected audience claim (the gateway's resource identifier per RFC 8707).
 	// Tokens not issued for this audience are rejected.
 	Audience string `json:"audience"`
@@ -62,14 +66,20 @@ type TokenValidator struct {
 
 // NewTokenValidator creates a token validator.
 func NewTokenValidator(cfg *TokenValidatorConfig) *TokenValidator {
-	jwksURL := cfg.JWKSURL
-	if jwksURL == "" {
-		jwksURL = strings.TrimRight(cfg.IssuerURL, "/") + "/.well-known/jwks.json"
+	var ks *jwksKeySet
+	if len(cfg.StaticJWKS) > 0 {
+		ks = newStaticJWKSKeySet(cfg.StaticJWKS)
+	} else {
+		jwksURL := cfg.JWKSURL
+		if jwksURL == "" {
+			jwksURL = strings.TrimRight(cfg.IssuerURL, "/") + "/.well-known/jwks.json"
+		}
+		ks = newJWKSKeySet(jwksURL)
 	}
 
 	return &TokenValidator{
 		cfg:    *cfg,
-		keySet: newJWKSKeySet(jwksURL),
+		keySet: ks,
 		parser: jwt.NewParser(
 			jwt.WithIssuer(cfg.IssuerURL),
 			jwt.WithAudience(cfg.Audience),
@@ -211,6 +221,41 @@ func newJWKSKeySet(url string) *jwksKeySet {
 	}
 }
 
+// newStaticJWKSKeySet creates a key set pre-loaded from JWKS JSON data.
+// Used when the auth server is embedded in-process (no HTTP fetch needed).
+func newStaticJWKSKeySet(data []byte) *jwksKeySet {
+	ks := &jwksKeySet{
+		keys:   make(map[string]*rsa.PublicKey),
+		expiry: time.Now().Add(100 * 365 * 24 * time.Hour), // never expires
+	}
+
+	var jwks jwksResponse
+	if err := json.Unmarshal(data, &jwks); err != nil {
+		return ks
+	}
+
+	for _, k := range jwks.Keys {
+		if k.Kty != "RSA" || k.Use != "sig" {
+			continue
+		}
+		nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
+		if err != nil {
+			continue
+		}
+		eBytes, err := base64.RawURLEncoding.DecodeString(k.E)
+		if err != nil {
+			continue
+		}
+		pubKey := &rsa.PublicKey{
+			N: new(big.Int).SetBytes(nBytes),
+			E: int(new(big.Int).SetBytes(eBytes).Int64()),
+		}
+		ks.keys[k.Kid] = pubKey
+	}
+
+	return ks
+}
+
 func (ks *jwksKeySet) GetKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	ks.mu.RLock()
 	key, ok := ks.keys[kid]
@@ -221,7 +266,12 @@ func (ks *jwksKeySet) GetKey(ctx context.Context, kid string) (*rsa.PublicKey, e
 		return key, nil
 	}
 
-	// Fetch or refresh
+	// Static key sets (embedded auth) don't refresh — keys are pre-loaded.
+	if ks.client == nil {
+		return nil, fmt.Errorf("key %q not found in JWKS", kid)
+	}
+
+	// Fetch or refresh from remote JWKS endpoint.
 	if err := ks.refresh(ctx); err != nil {
 		return nil, fmt.Errorf("JWKS fetch failed: %w", err)
 	}

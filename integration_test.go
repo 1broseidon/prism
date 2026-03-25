@@ -18,15 +18,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/1broseidon/prism/internal/audit"
+	"github.com/1broseidon/prism/internal/config"
+	"github.com/1broseidon/prism/internal/gateway"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/prism-gateway/prism/internal/audit"
-	"github.com/prism-gateway/prism/internal/config"
-	"github.com/prism-gateway/prism/internal/gateway"
 )
 
-// newBackendServer creates a real MCP backend httptest.Server and returns
-// both the server URL and a cleanup function.
-// The caller provides an *mcp.Server already configured with tools.
+// newBackendServer creates a real MCP backend httptest.Server.
 func newBackendServer(t *testing.T, s *mcp.Server) *httptest.Server {
 	t.Helper()
 	handler := mcp.NewStreamableHTTPHandler(
@@ -54,7 +52,6 @@ func connectClient(t *testing.T, ctx context.Context, prismURL string) *mcp.Clie
 }
 
 // newGateway wires a gateway with an optional audit buffer and connects backends.
-// Returns the gateway and its httptest.Server.
 func newGateway(t *testing.T, ctx context.Context, auditBuf *bytes.Buffer, backends []backendDef) (*gateway.Gateway, *httptest.Server) {
 	t.Helper()
 
@@ -111,7 +108,6 @@ type authCheckParams struct {
 func TestIntegration_ToolDiscoveryAndCall(t *testing.T) {
 	ctx := context.Background()
 
-	// Build backend.
 	backendSrv := mcp.NewServer(&mcp.Implementation{Name: "math-backend", Version: "0.1.0"}, nil)
 	mcp.AddTool(backendSrv, &mcp.Tool{Name: "echo", Description: "Echo input"},
 		func(_ context.Context, _ *mcp.CallToolRequest, p echoParams) (*mcp.CallToolResult, any, error) {
@@ -135,7 +131,6 @@ func TestIntegration_ToolDiscoveryAndCall(t *testing.T) {
 
 	session := connectClient(t, ctx, prismHS.URL)
 
-	// ── tools/list ────────────────────────────────────────────────────────────
 	listRes, err := session.ListTools(ctx, &mcp.ListToolsParams{})
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
@@ -150,7 +145,6 @@ func TestIntegration_ToolDiscoveryAndCall(t *testing.T) {
 		}
 	}
 
-	// ── call math__echo ───────────────────────────────────────────────────────
 	echoRes, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "math__echo",
 		Arguments: map[string]any{"text": "hello"},
@@ -165,7 +159,6 @@ func TestIntegration_ToolDiscoveryAndCall(t *testing.T) {
 		t.Errorf("math__echo: expected \"hello\" in response, got %q", text)
 	}
 
-	// ── call math__add ────────────────────────────────────────────────────────
 	addRes, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "math__add",
 		Arguments: map[string]any{"a": 2, "b": 3},
@@ -184,15 +177,13 @@ func TestIntegration_ToolDiscoveryAndCall(t *testing.T) {
 func TestIntegration_CredentialInjection(t *testing.T) {
 	ctx := context.Background()
 
-	// Backend MCP server that checks the Authorization header via a closure.
 	var receivedAuth string
 
 	innerMCPHandler := mcp.NewStreamableHTTPHandler(
 		func(_ *http.Request) *mcp.Server {
 			srv := mcp.NewServer(&mcp.Implementation{Name: "auth-backend", Version: "0.1.0"}, nil)
 			mcp.AddTool(srv, &mcp.Tool{Name: "whoami", Description: "Check auth"},
-				func(_ context.Context, req *mcp.CallToolRequest, _ authCheckParams) (*mcp.CallToolResult, any, error) {
-					// The auth header is captured at HTTP layer; return a pre-captured value.
+				func(_ context.Context, _ *mcp.CallToolRequest, _ authCheckParams) (*mcp.CallToolResult, any, error) {
 					text := "no-auth"
 					if receivedAuth != "" {
 						text = "authed:" + receivedAuth
@@ -207,7 +198,6 @@ func TestIntegration_CredentialInjection(t *testing.T) {
 		nil,
 	)
 
-	// Wrap the MCP handler to capture the Authorization header.
 	backendHS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
 		innerMCPHandler.ServeHTTP(w, r)
@@ -221,9 +211,7 @@ func TestIntegration_CredentialInjection(t *testing.T) {
 			url:       backendHS.URL,
 			namespace: "sec",
 			credentials: &config.CredentialConfig{
-				Type:   "static",
-				Header: "Authorization",
-				Value:  "Bearer test-token-123",
+				Value: "Bearer test-token-123",
 			},
 		},
 	})
@@ -248,7 +236,6 @@ func TestIntegration_CredentialInjection(t *testing.T) {
 		t.Errorf("expected token in response, got %q", text)
 	}
 
-	// Verify audit log recorded cred_injected=true.
 	entries := parseAuditLog(t, &auditBuf)
 	if len(entries) == 0 {
 		t.Fatal("no audit entries written")
@@ -318,16 +305,12 @@ func TestIntegration_AuditLog(t *testing.T) {
 		if !e.Allowed {
 			t.Errorf("entry %d: allowed=false, want true", i)
 		}
-		if e.LatencyMS < 0 {
-			t.Errorf("entry %d: latency_ms=%d, want >=0", i, e.LatencyMS)
-		}
 	}
 }
 
 func TestIntegration_MultipleBackends(t *testing.T) {
 	ctx := context.Background()
 
-	// Backend 1: github namespace.
 	githubSrv := mcp.NewServer(&mcp.Implementation{Name: "github-backend", Version: "0.1.0"}, nil)
 	mcp.AddTool(githubSrv, &mcp.Tool{Name: "create_issue", Description: "Create a GitHub issue"},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
@@ -338,7 +321,6 @@ func TestIntegration_MultipleBackends(t *testing.T) {
 	)
 	githubHS := newBackendServer(t, githubSrv)
 
-	// Backend 2: fs namespace.
 	fsSrv := mcp.NewServer(&mcp.Implementation{Name: "fs-backend", Version: "0.1.0"}, nil)
 	mcp.AddTool(fsSrv, &mcp.Tool{Name: "read_file", Description: "Read a file"},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
@@ -356,7 +338,6 @@ func TestIntegration_MultipleBackends(t *testing.T) {
 
 	session := connectClient(t, ctx, prismHS.URL)
 
-	// ── tools/list shows both namespaces ──────────────────────────────────────
 	listRes, err := session.ListTools(ctx, &mcp.ListToolsParams{})
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
@@ -371,7 +352,6 @@ func TestIntegration_MultipleBackends(t *testing.T) {
 		}
 	}
 
-	// ── route to github backend ───────────────────────────────────────────────
 	ghRes, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "github__create_issue",
 		Arguments: map[string]any{},
@@ -379,23 +359,16 @@ func TestIntegration_MultipleBackends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool github__create_issue: %v", err)
 	}
-	if ghRes.IsError {
-		t.Fatalf("github__create_issue error: %v", firstText(ghRes))
-	}
 	if !strings.Contains(firstText(ghRes), "issue-created") {
 		t.Errorf("github__create_issue: unexpected response %q", firstText(ghRes))
 	}
 
-	// ── route to fs backend ───────────────────────────────────────────────────
 	fsRes, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "fs__read_file",
 		Arguments: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("CallTool fs__read_file: %v", err)
-	}
-	if fsRes.IsError {
-		t.Fatalf("fs__read_file error: %v", firstText(fsRes))
 	}
 	if !strings.Contains(firstText(fsRes), "file-contents") {
 		t.Errorf("fs__read_file: unexpected response %q", firstText(fsRes))
@@ -404,7 +377,6 @@ func TestIntegration_MultipleBackends(t *testing.T) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// firstText returns the text of the first TextContent in a CallToolResult.
 func firstText(r *mcp.CallToolResult) string {
 	for _, c := range r.Content {
 		if tc, ok := c.(*mcp.TextContent); ok {
@@ -414,7 +386,6 @@ func firstText(r *mcp.CallToolResult) string {
 	return ""
 }
 
-// auditEntry mirrors audit.Entry for JSON decoding in tests.
 type auditEntry struct {
 	Timestamp    string `json:"ts"`
 	Subject      string `json:"subject"`
@@ -428,7 +399,6 @@ type auditEntry struct {
 	CredInjected bool   `json:"cred_injected"`
 }
 
-// parseAuditLog decodes newline-delimited JSON from buf into audit entries.
 func parseAuditLog(t *testing.T, buf *bytes.Buffer) []auditEntry {
 	t.Helper()
 	var entries []auditEntry

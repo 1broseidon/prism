@@ -13,12 +13,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1broseidon/prism/internal/audit"
+	"github.com/1broseidon/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/bridge"
+	"github.com/1broseidon/prism/internal/config"
+	"github.com/1broseidon/prism/internal/credentials"
+	"github.com/1broseidon/prism/internal/middleware"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/prism-gateway/prism/internal/audit"
-	"github.com/prism-gateway/prism/internal/auth"
-	"github.com/prism-gateway/prism/internal/config"
-	"github.com/prism-gateway/prism/internal/credentials"
-	"github.com/prism-gateway/prism/internal/middleware"
 )
 
 const namespaceSeparator = "__"
@@ -140,42 +141,56 @@ func (g *Gateway) Handler() http.Handler {
 
 // ConnectBackend establishes a connection to a backend MCP server
 // and registers its tools on the gateway server.
+// Supports both stdio (command) and HTTP (url) backends.
 func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) error {
-	client := mcp.NewClient(
-		&mcp.Implementation{
-			Name:    "prism-client",
-			Version: "0.1.0",
-		},
-		nil,
+	var (
+		client  *mcp.Client
+		session *mcp.ClientSession
+		err     error
 	)
 
-	// Register credential for this backend if configured.
-	if cfg.Credentials != nil {
-		cred := buildCredential(cfg.Credentials)
-		g.credStore.Register(cfg.ID, cred)
-		g.logger.Info("registered credential for backend",
-			"id", cfg.ID,
-			"type", cfg.Credentials.Type,
+	if cfg.IsStdio() {
+		// Stdio backend: spawn the process and connect via CommandTransport.
+		sb, serr := bridge.ConnectStdio(ctx, cfg.Command, cfg.Env, g.logger)
+		if serr != nil {
+			return fmt.Errorf("connect stdio %s: %w", cfg.ID, serr)
+		}
+		client = sb.Client
+		session = sb.Session
+	} else {
+		// HTTP backend: connect via StreamableClientTransport.
+		client = mcp.NewClient(
+			&mcp.Implementation{Name: "prism-client", Version: "0.1.0"},
+			nil,
 		)
-	}
 
-	// Build an HTTP client that injects the backend credential on every request.
-	httpClient := &http.Client{
-		Transport: &credentials.InjectingTransport{
-			Base:      http.DefaultTransport,
-			Store:     g.credStore,
-			BackendID: cfg.ID,
-		},
-	}
+		// Register credential for this backend if configured.
+		if cfg.Credentials != nil {
+			cred := buildCredential(cfg.Credentials)
+			g.credStore.Register(cfg.ID, cred)
+			g.logger.Info("registered credential for backend",
+				"id", cfg.ID,
+				"type", cfg.Credentials.InferredType(),
+			)
+		}
 
-	transport := &mcp.StreamableClientTransport{
-		Endpoint:   cfg.URL,
-		HTTPClient: httpClient,
-	}
+		httpClient := &http.Client{
+			Transport: &credentials.InjectingTransport{
+				Base:      http.DefaultTransport,
+				Store:     g.credStore,
+				BackendID: cfg.ID,
+			},
+		}
 
-	session, err := client.Connect(ctx, transport, nil)
-	if err != nil {
-		return fmt.Errorf("connect to %s (%s): %w", cfg.ID, cfg.URL, err)
+		transport := &mcp.StreamableClientTransport{
+			Endpoint:   cfg.URL,
+			HTTPClient: httpClient,
+		}
+
+		session, err = client.Connect(ctx, transport, nil)
+		if err != nil {
+			return fmt.Errorf("connect to %s (%s): %w", cfg.ID, cfg.URL, err)
+		}
 	}
 
 	var cb *middleware.CircuitBreaker
@@ -198,13 +213,15 @@ func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) 
 	g.backends[cfg.ID] = backend
 	g.mu.Unlock()
 
-	// Discover and register tools from this backend
 	if err := g.registerBackendTools(ctx, backend); err != nil {
 		g.logger.Warn("failed to register tools", "id", cfg.ID, "error", err)
-		// Don't fail — the backend is connected, tools can be registered later
 	}
 
-	g.logger.Info("connected to backend", "id", cfg.ID, "url", cfg.URL, "namespace", cfg.Namespace)
+	ttype := "http"
+	if cfg.IsStdio() {
+		ttype = "stdio"
+	}
+	g.logger.Info("connected to backend", "id", cfg.ID, "transport", ttype, "namespace", cfg.Namespace)
 	return nil
 }
 
@@ -408,18 +425,23 @@ func (g *Gateway) Status() []BackendStatus {
 }
 
 // buildCredential converts a CredentialConfig into the matching Credential implementation.
+// Type is inferred from which field is set (validated at config load time).
 func buildCredential(c *config.CredentialConfig) credentials.Credential {
-	switch c.Type {
+	header := c.Header
+	if header == "" {
+		header = "Authorization"
+	}
+
+	switch c.InferredType() {
 	case "static":
-		return &credentials.Static{Header: c.Header, Value: c.Value}
+		return &credentials.Static{Header: header, Value: c.Value}
 	case "env":
-		return &credentials.Env{Header: c.Header, EnvVar: c.EnvVar}
+		return &credentials.Env{Header: header, EnvVar: c.Env}
 	case "file":
-		return &credentials.File{Header: c.Header, Path: c.Path}
+		return &credentials.File{Header: header, Path: c.File}
 	case "command":
-		return &credentials.Command{Header: c.Header, Cmd: c.Command, TTL: c.TTL.Duration()}
+		return &credentials.Command{Header: header, Cmd: c.Command, TTL: c.TTL.Duration()}
 	default:
-		// Should never happen — config validation rejects unknown types.
 		return &credentials.Static{}
 	}
 }

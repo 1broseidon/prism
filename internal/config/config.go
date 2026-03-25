@@ -1,99 +1,159 @@
 // Package config handles loading and validation of Prism gateway configuration.
+//
+// The configuration uses the standard mcpServers map format familiar from
+// Claude Desktop, Claude Code, and other MCP clients — extended with Prism's
+// policy, credential injection, and operational controls.
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
 )
 
-// ServerConfig defines a backend MCP server to connect to.
-type ServerConfig struct {
-	ID          string            `json:"id"`
-	URL         string            `json:"url"`
-	Namespace   string            `json:"namespace"`
-	Credentials *CredentialConfig `json:"credentials,omitempty"`
+// Config is the top-level gateway configuration.
+type Config struct {
+	// Listen is the address for the MCP gateway. Default: ":8080".
+	Listen string `json:"listen,omitempty"`
 
-	// Per-server operational settings
-	RateLimit      *RateLimitConfig      `json:"rate_limit,omitempty"`
-	CircuitBreaker *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
-	Timeout        Duration              `json:"timeout,omitempty"`
+	// Admin is the address for the admin API. Default: ":9090".
+	Admin string `json:"admin,omitempty"`
+
+	// McpServers defines the backend MCP servers to aggregate.
+	// The map key becomes both the server ID and the tool namespace.
+	// Supports stdio (command) and HTTP (url) transports.
+	McpServers map[string]McpServerConfig `json:"mcpServers"`
+
+	// Policy defines who can access what. When policy.agents is present,
+	// Prism embeds an OAuth 2.1 authorization server in-process.
+	// When omitted, the gateway runs open (no auth).
+	Policy *PolicyConfig `json:"policy,omitempty"`
+
+	// Audit configures structured JSON audit logging for tool calls.
+	Audit *AuditConfig `json:"audit,omitempty"`
+
+	// RateLimit sets global rate limiting. Per-server overrides are also supported.
+	RateLimit *RateLimitConfig `json:"rate_limit,omitempty"`
+
+	// ShutdownTimeout is the graceful shutdown duration. Default: "10s".
+	ShutdownTimeout Duration `json:"shutdown_timeout,omitempty"`
 }
 
-// CredentialConfig describes how Prism obtains the backend credential at call time.
-// The agent never sees the raw value — Prism injects it into each outbound request.
-//
-// Supported types:
-//   - "static"  — fixed header/value (API keys, long-lived Bearer tokens)
-//   - "env"     — resolved from an environment variable at call time
-//   - "file"    — read from a file path (mounted secrets, k8s service account tokens)
-//   - "command" — execute a shell command and use stdout (AWS STS, Vault CLI, gcloud, etc.)
-type CredentialConfig struct {
-	// Type is one of: static, env, file, command.
-	Type string `json:"type"`
-	// Header is the HTTP header to set. Defaults to "Authorization".
-	Header string `json:"header,omitempty"`
-	// Value is the literal credential value. Required for type "static".
-	Value string `json:"value,omitempty"`
-	// EnvVar is the environment variable name. Required for type "env".
-	EnvVar string `json:"env_var,omitempty"`
-	// Path is the file to read. Required for type "file".
-	Path string `json:"path,omitempty"`
-	// Command is the shell command to execute. Required for type "command".
+// McpServerConfig defines a backend MCP server.
+// Supports two transport modes:
+//   - stdio: set "command" (and optionally "args", "env") — Prism spawns the process
+//   - HTTP:  set "url" — Prism connects to an existing HTTP endpoint
+type McpServerConfig struct {
+	// --- Standard MCP fields (copy-paste from claude_desktop_config.json) ---
+
+	// Command is the executable to spawn for stdio transport.
 	Command string `json:"command,omitempty"`
-	// TTL is how long to cache the result of a "command" credential.
-	// Defaults to 5m if unset.
+	// Args are the command arguments.
+	Args []string `json:"args,omitempty"`
+	// Env sets environment variables for the spawned process.
+	Env map[string]string `json:"env,omitempty"`
+
+	// --- HTTP transport (alternative to command) ---
+
+	// URL is the HTTP endpoint for an already-running MCP server.
+	URL string `json:"url,omitempty"`
+
+	// --- Prism extensions ---
+
+	// Credentials configures how Prism authenticates to this backend.
+	// The agent never sees the raw credential — Prism injects it into each outbound request.
+	// Only applies to HTTP backends.
+	Credentials *CredentialConfig `json:"credentials,omitempty"`
+
+	// RateLimit sets per-server rate limiting.
+	RateLimit *RateLimitConfig `json:"rate_limit,omitempty"`
+	// CircuitBreaker sets per-server circuit breaker.
+	CircuitBreaker *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
+	// Timeout is the per-request timeout for this backend. Default: "30s".
+	Timeout Duration `json:"timeout,omitempty"`
+}
+
+// IsStdio reports whether this server uses stdio transport (command-based).
+func (m *McpServerConfig) IsStdio() bool { return m.Command != "" }
+
+// PolicyConfig defines the authorization model.
+type PolicyConfig struct {
+	// Agents maps agent name → agent config. Each agent gets OAuth client credentials.
+	// When present, Prism embeds an OAuth 2.1 authorization server.
+	Agents map[string]AgentConfig `json:"agents,omitempty"`
+
+	// Groups maps group name → group config. Agents reference groups by name.
+	Groups map[string]GroupConfig `json:"groups,omitempty"`
+
+	// DefaultScopes are granted to agents with no group membership (e.g. DCR pending).
+	// Empty means no tool access until the operator adds the agent to a group.
+	DefaultScopes []string `json:"default_scopes,omitempty"`
+}
+
+// AgentConfig defines an agent's credentials and permissions.
+type AgentConfig struct {
+	// Secret is the client_secret for OAuth client credentials grant.
+	Secret string `json:"secret"`
+
+	// Groups lists the groups this agent belongs to.
+	Groups []string `json:"groups,omitempty"`
+
+	// Grant adds scopes beyond what groups provide.
+	Grant []string `json:"grant,omitempty"`
+
+	// Deny removes scopes even if groups grant them. Deny wins over grant.
+	Deny []string `json:"deny,omitempty"`
+}
+
+// GroupConfig defines a named set of scopes.
+type GroupConfig struct {
+	// Scopes are the permissions granted to members of this group.
+	Scopes []string `json:"scopes"`
+}
+
+// CredentialConfig describes how Prism obtains a backend credential.
+// The type is inferred from which field is set:
+//   - Value   → static header/value (API keys, long-lived tokens)
+//   - Env     → resolved from an environment variable at call time
+//   - File    → read from a file path (mounted secrets, k8s tokens)
+//   - Command → execute a shell command and use stdout (Vault, AWS STS, etc.)
+type CredentialConfig struct {
+	// Header is the HTTP header to set. Default: "Authorization".
+	Header string `json:"header,omitempty"`
+	// Value is the literal credential value (static type).
+	Value string `json:"value,omitempty"`
+	// Env is the environment variable name (env type).
+	Env string `json:"env,omitempty"`
+	// File is the path to read (file type).
+	File string `json:"file,omitempty"`
+	// Command is the shell command to execute (command type).
+	Command string `json:"command,omitempty"`
+	// TTL is the cache duration for command credentials. Default: "5m".
 	TTL Duration `json:"ttl,omitempty"`
 }
 
-// AuthConfig holds client-facing authentication settings.
-// Supports both simple API key auth and full OAuth 2.1.
-type AuthConfig struct {
-	// Simple API key auth (for development / internal use)
-	Header    string   `json:"header,omitempty"`
-	ValidKeys []string `json:"valid_keys,omitempty"`
-
-	// OAuth 2.1 Resource Server auth (for production / agentic use)
-	OAuth *OAuthConfig `json:"oauth,omitempty"`
-}
-
-// OAuthConfig configures OAuth 2.1 token validation.
-// Prism acts as a Resource Server (RFC 9728) — it validates tokens
-// issued by an external Authorization Server.
-type OAuthConfig struct {
-	// IssuerURL is the expected token issuer.
-	IssuerURL string `json:"issuer_url"`
-
-	// JWKSURL overrides automatic JWKS discovery. Optional.
-	JWKSURL string `json:"jwks_url,omitempty"`
-
-	// Audience is the gateway's resource identifier (per RFC 8707).
-	// Tokens not issued for this audience are rejected.
-	Audience string `json:"audience"`
-
-	// ResourceURI is the canonical URI of this gateway for Protected Resource Metadata.
-	// Defaults to "https://localhost" + ListenAddr if not set.
-	ResourceURI string `json:"resource_uri,omitempty"`
-
-	// RequiredScopes are scopes that MUST be present on every token.
-	RequiredScopes []string `json:"required_scopes,omitempty"`
-
-	// ScopesSupported lists all scopes this gateway recognizes.
-	// Published in the Protected Resource Metadata document.
-	ScopesSupported []string `json:"scopes_supported,omitempty"`
-
-	// MaxTokenAge limits how old a token can be from issuance. Optional.
-	MaxTokenAge Duration `json:"max_token_age,omitempty"`
+// InferredType returns the credential type based on which field is set.
+func (c *CredentialConfig) InferredType() string {
+	switch {
+	case c.Value != "":
+		return "static"
+	case c.Env != "":
+		return "env"
+	case c.File != "":
+		return "file"
+	case c.Command != "":
+		return "command"
+	default:
+		return ""
+	}
 }
 
 // RateLimitConfig holds rate-limiting parameters.
 type RateLimitConfig struct {
-	RequestsPerSecond float64 `json:"requests_per_second"`
+	RequestsPerSecond float64 `json:"rps"`
 	Burst             int     `json:"burst"`
 }
 
@@ -105,31 +165,12 @@ type CircuitBreakerConfig struct {
 }
 
 // AuditConfig configures structured JSON audit logging for tool calls.
-// When enabled, every tool call (allowed or denied) is written as a
-// single-line JSON entry to the configured output.
 type AuditConfig struct {
-	// Enabled turns audit logging on or off.
-	Enabled bool `json:"enabled"`
-	// Output is where audit entries are written.
-	// Accepted values: "stderr" (default), "stdout", or an absolute file path.
-	Output string `json:"output,omitempty"`
+	Enabled bool   `json:"enabled"`
+	Output  string `json:"output,omitempty"` // "stderr" (default), "stdout", or file path
 }
 
-// Config is the top-level gateway configuration.
-type Config struct {
-	ListenAddr      string                `json:"listen_addr"`
-	AdminAddr       string                `json:"admin_addr"`
-	Servers         []ServerConfig        `json:"servers"`
-	Auth            *AuthConfig           `json:"auth,omitempty"`
-	Audit           *AuditConfig          `json:"audit,omitempty"`
-	RateLimit       *RateLimitConfig      `json:"rate_limit,omitempty"`
-	CircuitBreaker  *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
-	ShutdownTimeout Duration              `json:"shutdown_timeout,omitempty"`
-
-	// ResourceURI is the canonical URI of this gateway (per RFC 8707).
-	// Used for token audience validation and Protected Resource Metadata.
-	ResourceURI string `json:"resource_uri,omitempty"`
-}
+// --- Duration type ---
 
 // Duration is a time.Duration that marshals/unmarshals as a JSON string.
 type Duration time.Duration
@@ -142,11 +183,10 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(time.Duration(d).String())
 }
 
-// UnmarshalJSON decodes a JSON string (e.g. "5m30s") or number (nanoseconds) into a Duration.
+// UnmarshalJSON decodes a JSON string (e.g. "5m30s") or number (nanoseconds).
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
-		// Try as number (nanoseconds)
 		var n int64
 		if err2 := json.Unmarshal(b, &n); err2 != nil {
 			return err
@@ -166,117 +206,175 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Load reads a JSON config file, applies defaults, and validates.
-func Load(path string) (*Config, error) {
+// --- Expanded types (used internally by the gateway) ---
+
+// ServerConfig is the internal representation of a backend server,
+// expanded from the mcpServers map by Load().
+type ServerConfig struct {
+	ID        string
+	Namespace string
+
+	// Stdio transport
+	Command []string
+	Env     map[string]string
+
+	// HTTP transport
+	URL string
+
+	// Prism extensions
+	Credentials    *CredentialConfig
+	RateLimit      *RateLimitConfig
+	CircuitBreaker *CircuitBreakerConfig
+	Timeout        Duration
+}
+
+// IsStdio reports whether this server uses stdio transport.
+func (s *ServerConfig) IsStdio() bool { return len(s.Command) > 0 }
+
+// EmbeddedAuthConfig carries the configuration for the embedded auth server
+// when policy.agents is present. Produced by Load(), consumed by cmd/prism.
+type EmbeddedAuthConfig struct {
+	Issuer          string
+	Clients         []EmbeddedClient
+	TokenTTLSeconds int
+	RequiredScopes  []string
+	ScopesSupported []string
+	DefaultScopes   []string
+}
+
+// EmbeddedClient is an agent identity for the embedded auth server.
+type EmbeddedClient struct {
+	ClientID      string
+	ClientSecret  string
+	AllowedScopes []string
+}
+
+// Loaded is the fully-resolved configuration returned by Load().
+type Loaded struct {
+	Listen          string
+	Admin           string
+	Servers         []ServerConfig
+	EmbeddedAuth    *EmbeddedAuthConfig
+	Audit           *AuditConfig
+	RateLimit       *RateLimitConfig
+	ShutdownTimeout Duration
+}
+
+// --- Loading ---
+
+// Load reads a JSON config file, applies defaults, validates, and expands
+// the unified config into the internal Loaded representation.
+func Load(path string) (*Loaded, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // Config path is from CLI flag
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-
 	var cfg Config
-	if err := dec.Decode(&cfg); err != nil {
+	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		return nil, errors.New("config must contain a single JSON object")
+
+	if err := validate(&cfg); err != nil {
+		return nil, err
 	}
 
-	applyDefaults(&cfg)
-	return &cfg, validate(&cfg)
+	return expand(&cfg)
 }
 
-func applyDefaults(cfg *Config) {
-	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = ":8080"
-	}
-	if cfg.AdminAddr == "" {
-		cfg.AdminAddr = ":9090"
-	}
-	if cfg.ShutdownTimeout == 0 {
-		cfg.ShutdownTimeout = Duration(10 * time.Second)
-	}
-	for i := range cfg.Servers {
-		if cfg.Servers[i].Namespace == "" {
-			cfg.Servers[i].Namespace = cfg.Servers[i].ID
-		}
-		if cfg.Servers[i].Timeout == 0 {
-			cfg.Servers[i].Timeout = Duration(30 * time.Second)
-		}
-	}
-}
+// --- Validation ---
 
 func validate(cfg *Config) error {
-	if cfg.ListenAddr == "" {
-		return errors.New("listen_addr is required")
-	}
-	if len(cfg.Servers) == 0 {
-		return errors.New("at least one server is required")
+	if len(cfg.McpServers) == 0 {
+		return errors.New("mcpServers: at least one server is required")
 	}
 
-	if err := validateServers(cfg.Servers); err != nil {
-		return err
+	for name, srv := range cfg.McpServers {
+		if err := validateServer(name, &srv); err != nil {
+			return err
+		}
+	}
+
+	if cfg.Policy != nil {
+		if err := validatePolicy(cfg.Policy); err != nil {
+			return err
+		}
 	}
 
 	return validateRateLimit(cfg.RateLimit)
 }
 
-func validateServers(servers []ServerConfig) error {
-	seenIDs := make(map[string]int, len(servers))
-	seenNamespaces := make(map[string]int, len(servers))
+func validateServer(name string, srv *McpServerConfig) error {
+	if name == "" {
+		return errors.New("mcpServers: server name cannot be empty")
+	}
 
-	for i, s := range servers {
-		if err := validateServer(i, &s, seenIDs, seenNamespaces); err != nil {
+	if err := validateServerTransport(name, srv); err != nil {
+		return err
+	}
+
+	if srv.Credentials != nil {
+		if err := validateCredential(name, srv.Credentials); err != nil {
 			return err
 		}
 	}
 
+	return validateServerLimits(name, srv)
+}
+
+func validateServerTransport(name string, srv *McpServerConfig) error {
+	hasCommand := srv.Command != ""
+	hasURL := srv.URL != ""
+
+	if !hasCommand && !hasURL {
+		return fmt.Errorf("mcpServers.%s: either command or url is required", name)
+	}
+	if hasCommand && hasURL {
+		return fmt.Errorf("mcpServers.%s: cannot set both command and url", name)
+	}
+	if hasURL && !strings.HasPrefix(srv.URL, "http://") && !strings.HasPrefix(srv.URL, "https://") {
+		return fmt.Errorf("mcpServers.%s: url must start with http:// or https://", name)
+	}
+	if hasCommand && srv.Credentials != nil {
+		return fmt.Errorf("mcpServers.%s: credentials are not supported for stdio backends (use env instead)", name)
+	}
 	return nil
 }
 
-func validateServer(i int, s *ServerConfig, seenIDs, seenNamespaces map[string]int) error {
-	if s.ID == "" {
-		return fmt.Errorf("server[%d]: id is required", i)
+func validateServerLimits(name string, srv *McpServerConfig) error {
+	if srv.CircuitBreaker != nil && srv.CircuitBreaker.Threshold <= 0 {
+		return fmt.Errorf("mcpServers.%s.circuit_breaker.threshold must be > 0", name)
 	}
-	if s.URL == "" {
-		return fmt.Errorf("server[%d]: url is required", i)
-	}
-	if !strings.HasPrefix(s.URL, "http://") && !strings.HasPrefix(s.URL, "https://") {
-		return fmt.Errorf("server[%d]: url must start with http:// or https://", i)
-	}
-	if prev, dup := seenIDs[s.ID]; dup {
-		return fmt.Errorf("server[%d]: duplicate id %q (first at server[%d])", i, s.ID, prev)
-	}
-	seenIDs[s.ID] = i
-
-	ns := s.Namespace
-	if ns == "" {
-		ns = s.ID
-	}
-	if prev, dup := seenNamespaces[ns]; dup {
-		return fmt.Errorf("server[%d]: duplicate namespace %q (first at server[%d])", i, ns, prev)
-	}
-	seenNamespaces[ns] = i
-
-	if s.Credentials != nil {
-		if err := validateCredential(i, s.Credentials); err != nil {
-			return err
+	if srv.RateLimit != nil {
+		if srv.RateLimit.RequestsPerSecond <= 0 {
+			return fmt.Errorf("mcpServers.%s.rate_limit.rps must be > 0", name)
+		}
+		if srv.RateLimit.Burst <= 0 {
+			return fmt.Errorf("mcpServers.%s.rate_limit.burst must be > 0", name)
 		}
 	}
-	if s.CircuitBreaker != nil && s.CircuitBreaker.Threshold <= 0 {
-		return fmt.Errorf("server[%d].circuit_breaker.threshold must be > 0", i)
-	}
-	if s.RateLimit != nil {
-		if s.RateLimit.RequestsPerSecond <= 0 {
-			return fmt.Errorf("server[%d].rate_limit.requests_per_second must be > 0", i)
-		}
-		if s.RateLimit.Burst <= 0 {
-			return fmt.Errorf("server[%d].rate_limit.burst must be > 0", i)
-		}
-	}
+	return nil
+}
 
+func validateCredential(serverName string, c *CredentialConfig) error {
+	t := c.InferredType()
+	if t == "" {
+		return fmt.Errorf("mcpServers.%s.credentials: one of value, env, file, or command is required", serverName)
+	}
+	return nil
+}
+
+func validatePolicy(p *PolicyConfig) error {
+	for name, agent := range p.Agents {
+		if agent.Secret == "" {
+			return fmt.Errorf("policy.agents.%s: secret is required", name)
+		}
+		for _, g := range agent.Groups {
+			if _, ok := p.Groups[g]; !ok {
+				return fmt.Errorf("policy.agents.%s: references unknown group %q", name, g)
+			}
+		}
+	}
 	return nil
 }
 
@@ -285,7 +383,7 @@ func validateRateLimit(rl *RateLimitConfig) error {
 		return nil
 	}
 	if rl.RequestsPerSecond <= 0 {
-		return errors.New("rate_limit.requests_per_second must be > 0")
+		return errors.New("rate_limit.rps must be > 0")
 	}
 	if rl.Burst <= 0 {
 		return errors.New("rate_limit.burst must be > 0")
@@ -293,29 +391,132 @@ func validateRateLimit(rl *RateLimitConfig) error {
 	return nil
 }
 
-func validateCredential(idx int, c *CredentialConfig) error {
-	prefix := fmt.Sprintf("server[%d].credentials", idx)
-	switch c.Type {
-	case "static":
-		if c.Value == "" {
-			return fmt.Errorf("%s: type %q requires a non-empty value", prefix, c.Type)
-		}
-	case "env":
-		if c.EnvVar == "" {
-			return fmt.Errorf("%s: type %q requires env_var", prefix, c.Type)
-		}
-	case "file":
-		if c.Path == "" {
-			return fmt.Errorf("%s: type %q requires path", prefix, c.Type)
-		}
-	case "command":
-		if c.Command == "" {
-			return fmt.Errorf("%s: type %q requires command", prefix, c.Type)
-		}
-	case "":
-		return fmt.Errorf("%s: type is required", prefix)
-	default:
-		return fmt.Errorf("%s: unknown type %q (must be static, env, file, or command)", prefix, c.Type)
+// --- Expansion ---
+
+// expand converts the user-facing Config into the internal Loaded representation.
+func expand(cfg *Config) (*Loaded, error) {
+	loaded := &Loaded{
+		Listen:          cfg.Listen,
+		Admin:           cfg.Admin,
+		Audit:           cfg.Audit,
+		RateLimit:       cfg.RateLimit,
+		ShutdownTimeout: cfg.ShutdownTimeout,
 	}
-	return nil
+
+	// Apply defaults.
+	if loaded.Listen == "" {
+		loaded.Listen = ":8080"
+	}
+	if loaded.Admin == "" {
+		loaded.Admin = ":9090"
+	}
+	if loaded.ShutdownTimeout == 0 {
+		loaded.ShutdownTimeout = Duration(10 * time.Second)
+	}
+
+	// Expand mcpServers map → ServerConfig slice.
+	for name, srv := range cfg.McpServers {
+		sc := ServerConfig{
+			ID:             name,
+			Namespace:      name,
+			URL:            srv.URL,
+			Credentials:    srv.Credentials,
+			RateLimit:      srv.RateLimit,
+			CircuitBreaker: srv.CircuitBreaker,
+			Timeout:        srv.Timeout,
+			Env:            srv.Env,
+		}
+
+		if srv.IsStdio() {
+			sc.Command = append([]string{srv.Command}, srv.Args...)
+		}
+
+		if sc.Timeout == 0 {
+			sc.Timeout = Duration(30 * time.Second)
+		}
+
+		loaded.Servers = append(loaded.Servers, sc)
+	}
+
+	// Expand policy → embedded auth config.
+	// Runs whenever policy is present (even with zero agents — DCR creates them at runtime).
+	if cfg.Policy != nil {
+		loaded.EmbeddedAuth = expandPolicy(cfg.Policy)
+	}
+
+	return loaded, nil
+}
+
+// expandPolicy converts policy agents/groups into embedded auth client configs.
+func expandPolicy(p *PolicyConfig) *EmbeddedAuthConfig {
+	clients := make([]EmbeddedClient, 0, len(p.Agents))
+	scopeSet := make(map[string]struct{})
+
+	for name, agent := range p.Agents {
+		scopes := resolveAgentScopes(name, &agent, p)
+		for _, s := range scopes {
+			scopeSet[s] = struct{}{}
+		}
+		clients = append(clients, EmbeddedClient{
+			ClientID:      name,
+			ClientSecret:  agent.Secret,
+			AllowedScopes: scopes,
+		})
+	}
+
+	allScopes := make([]string, 0, len(scopeSet))
+	for s := range scopeSet {
+		allScopes = append(allScopes, s)
+	}
+
+	return &EmbeddedAuthConfig{
+		// Issuer is set at runtime by cmd/prism once the listen address is known.
+		Clients:         clients,
+		TokenTTLSeconds: 3600,
+		RequiredScopes:  []string{"mcp:connect"},
+		ScopesSupported: allScopes,
+		DefaultScopes:   p.DefaultScopes,
+	}
+}
+
+// resolveAgentScopes computes the effective scopes for an agent:
+//
+//	(union of group scopes) + grant - deny + mcp:connect
+func resolveAgentScopes(_ string, agent *AgentConfig, p *PolicyConfig) []string {
+	scopeSet := make(map[string]struct{})
+
+	// Start with group scopes.
+	for _, groupName := range agent.Groups {
+		if group, ok := p.Groups[groupName]; ok {
+			for _, s := range group.Scopes {
+				scopeSet[s] = struct{}{}
+			}
+		}
+	}
+
+	// If no groups and default scopes exist, use those.
+	if len(agent.Groups) == 0 && len(p.DefaultScopes) > 0 {
+		for _, s := range p.DefaultScopes {
+			scopeSet[s] = struct{}{}
+		}
+	}
+
+	// Apply grants.
+	for _, s := range agent.Grant {
+		scopeSet[s] = struct{}{}
+	}
+
+	// Apply denials.
+	for _, s := range agent.Deny {
+		delete(scopeSet, s)
+	}
+
+	// Always include mcp:connect — agents must be able to connect.
+	scopeSet["mcp:connect"] = struct{}{}
+
+	scopes := make([]string, 0, len(scopeSet))
+	for s := range scopeSet {
+		scopes = append(scopes, s)
+	}
+	return scopes
 }

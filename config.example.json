@@ -1,61 +1,35 @@
 {
-  "listen_addr": ":8080",
-  "admin_addr": ":9090",
-  "servers": [
-    {
-      "id": "github",
-      "url": "http://localhost:3001/mcp",
-      "namespace": "github",
-      "credentials": {
-        "type": "env",
-        "header": "Authorization",
-        "env_var": "GITHUB_TOKEN"
-      },
-      "circuit_breaker": {
-        "threshold": 5,
-        "timeout": "30s",
-        "max_half_open": 2
-      }
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "ghp_xxx" }
     },
-    {
-      "id": "stripe",
-      "url": "http://localhost:3002/mcp",
-      "namespace": "stripe",
-      "credentials": {
-        "type": "static",
-        "header": "X-API-Key",
-        "value": "sk_live_your-stripe-key"
-      }
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
     },
-    {
-      "id": "vault-backed",
-      "url": "http://localhost:3003/mcp",
-      "namespace": "infra",
-      "credentials": {
-        "type": "command",
-        "header": "Authorization",
-        "command": "vault kv get -field=token secret/mcp/infra",
-        "ttl": "5m"
-      }
-    },
-    {
-      "id": "k8s",
-      "url": "http://localhost:3004/mcp",
-      "namespace": "k8s",
-      "credentials": {
-        "type": "file",
-        "header": "Authorization",
-        "path": "/var/run/secrets/kubernetes.io/serviceaccount/token"
-      }
+    "internal-api": {
+      "url": "http://existing-service:3001/mcp",
+      "credentials": { "env": "API_TOKEN" }
     }
-  ],
-  "auth": {
-    "header": "X-API-Key",
-    "valid_keys": ["your-secret-key"]
   },
-  "rate_limit": {
-    "requests_per_second": 100,
-    "burst": 200
+
+  "policy": {
+    "agents": {
+      "ci-agent":  { "secret": "change-me-ci",  "groups": ["deployers"] },
+      "analyst":   { "secret": "change-me-read", "groups": ["readers"] },
+      "admin":     { "secret": "change-me-admin", "groups": ["deployers", "readers"], "grant": ["*"] }
+    },
+    "groups": {
+      "deployers": { "scopes": ["github:*", "filesystem:*"] },
+      "readers":   { "scopes": ["github:list_prs", "filesystem:read_file", "filesystem:search_files"] }
+    },
+    "default_scopes": []
   },
-  "shutdown_timeout": "10s"
+
+  "audit": {
+    "enabled": true,
+    "output": "stderr"
+  }
 }

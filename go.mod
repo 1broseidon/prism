@@ -1,4 +1,4 @@
-module github.com/prism-gateway/prism
+module github.com/1broseidon/prism
 
 go 1.25.0
 
