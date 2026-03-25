@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/mcpgate/mcpgate/internal/audit"
 	"github.com/mcpgate/mcpgate/internal/auth"
 	"github.com/mcpgate/mcpgate/internal/config"
 	"github.com/mcpgate/mcpgate/internal/middleware"
@@ -34,6 +36,7 @@ type Gateway struct {
 	backends map[string]*Backend // keyed by server ID
 	server   *mcp.Server
 	logger   *slog.Logger
+	auditor  *audit.Logger
 }
 
 // New creates a new Gateway.
@@ -44,6 +47,7 @@ func New(logger *slog.Logger) *Gateway {
 	g := &Gateway{
 		backends: make(map[string]*Backend),
 		logger:   logger,
+		auditor:  audit.Noop(), // replaced via SetAuditLogger if audit is configured
 	}
 
 	g.server = mcp.NewServer(
@@ -54,7 +58,68 @@ func New(logger *slog.Logger) *Gateway {
 		nil,
 	)
 
+	// Register scope-filter middleware for tools/list.
+	// The middleware is stateless — it reads the policy from the per-request
+	// context that the Streamable HTTP transport propagates from the HTTP layer.
+	g.server.AddReceivingMiddleware(g.scopeFilterMiddleware())
+
 	return g
+}
+
+// SetAuditLogger replaces the audit logger used by the gateway.
+// Call this before serving any requests. It is not safe to call concurrently
+// with active requests.
+func (g *Gateway) SetAuditLogger(al *audit.Logger) {
+	if al == nil {
+		al = audit.Noop()
+	}
+	g.auditor = al
+}
+
+// scopeFilterMiddleware returns an MCP receiving middleware that intercepts
+// tools/list responses and strips out tools the caller cannot access.
+//
+// If no policy is in context (open / unauthenticated mode) all tools are returned.
+// If a policy is present, only tools whose namespace:name scope is granted pass through.
+func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			result, err := next(ctx, method, req)
+			if method != "tools/list" || err != nil {
+				return result, err
+			}
+
+			policy := auth.PolicyFromContext(ctx)
+			if policy == nil {
+				// Open / unauthenticated mode: return all tools.
+				return result, nil
+			}
+
+			toolsResult, ok := result.(*mcp.ListToolsResult)
+			if !ok {
+				return result, nil
+			}
+
+			filtered := make([]*mcp.Tool, 0, len(toolsResult.Tools))
+			for _, t := range toolsResult.Tools {
+				ns, name, ok := parseNamespacedTool(t.Name)
+				if !ok {
+					// Tool name doesn't follow the namespace__tool convention;
+					// include it only if the superuser wildcard is granted.
+					if _, hasStar := policy.AllowedScopes["*"]; hasStar {
+						filtered = append(filtered, t)
+					}
+					continue
+				}
+				if policy.CanAccessTool(ns, name) {
+					filtered = append(filtered, t)
+				}
+			}
+
+			toolsResult.Tools = filtered
+			return toolsResult, nil
+		}
+	}
 }
 
 // Server returns the underlying MCP server for transport binding.
@@ -153,7 +218,8 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 }
 
 // routeToolCall forwards a tool call to the correct backend.
-// If OAuth is enabled, it enforces scope-based access control per tool.
+// It enforces scope-based access control and emits a structured audit log entry
+// for every call (allowed or denied).
 func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	g.mu.RLock()
 	b, ok := g.backends[backendID]
@@ -168,7 +234,7 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}, nil
 	}
 
-	// Scope enforcement: check if the caller has permission for this tool
+	// Scope enforcement: check if the caller has permission for this tool.
 	if policy := auth.PolicyFromContext(ctx); policy != nil {
 		if !policy.CanAccessTool(b.Config.Namespace, toolName) {
 			g.logger.Warn("tool call denied by scope policy",
@@ -176,6 +242,8 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 				"tool", toolName,
 				"namespace", b.Config.Namespace,
 			)
+			// Audit: log the denial before returning.
+			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, 0, nil)
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -197,10 +265,16 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}, nil
 	}
 
+	start := time.Now()
 	result, err := b.Session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      toolName,
 		Arguments: req.Params.Arguments,
 	})
+	latencyMS := time.Since(start).Milliseconds()
+
+	// Audit: log the outcome after the call (success or backend error).
+	g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, true, latencyMS, err)
+
 	if err != nil {
 		if b.CB != nil {
 			b.CB.RecordFailure()

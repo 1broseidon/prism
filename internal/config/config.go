@@ -83,15 +83,27 @@ type CircuitBreakerConfig struct {
 	MaxHalfOpen int      `json:"max_half_open"`
 }
 
+// AuditConfig configures structured JSON audit logging for tool calls.
+// When enabled, every tool call (allowed or denied) is written as a
+// single-line JSON entry to the configured output.
+type AuditConfig struct {
+	// Enabled turns audit logging on or off.
+	Enabled bool `json:"enabled"`
+	// Output is where audit entries are written.
+	// Accepted values: "stderr" (default), "stdout", or an absolute file path.
+	Output string `json:"output,omitempty"`
+}
+
 // Config is the top-level gateway configuration.
 type Config struct {
-	ListenAddr      string               `json:"listen_addr"`
-	AdminAddr       string               `json:"admin_addr"`
-	Servers         []ServerConfig       `json:"servers"`
-	Auth            *AuthConfig          `json:"auth,omitempty"`
-	RateLimit       *RateLimitConfig     `json:"rate_limit,omitempty"`
+	ListenAddr      string                `json:"listen_addr"`
+	AdminAddr       string                `json:"admin_addr"`
+	Servers         []ServerConfig        `json:"servers"`
+	Auth            *AuthConfig           `json:"auth,omitempty"`
+	Audit           *AuditConfig          `json:"audit,omitempty"`
+	RateLimit       *RateLimitConfig      `json:"rate_limit,omitempty"`
 	CircuitBreaker  *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
-	ShutdownTimeout Duration             `json:"shutdown_timeout,omitempty"`
+	ShutdownTimeout Duration              `json:"shutdown_timeout,omitempty"`
 
 	// ResourceURI is the canonical URI of this gateway (per RFC 8707).
 	// Used for token audience validation and Protected Resource Metadata.
