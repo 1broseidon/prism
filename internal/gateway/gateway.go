@@ -26,10 +26,11 @@ const namespaceSeparator = "__"
 
 // Backend represents a connected backend MCP server.
 type Backend struct {
-	Config  *config.ServerConfig
-	Client  *mcp.Client
-	Session *mcp.ClientSession
-	CB      *middleware.CircuitBreaker
+	Config    *config.ServerConfig
+	Client    *mcp.Client
+	Session   *mcp.ClientSession
+	CB        *middleware.CircuitBreaker
+	ToolNames []string // namespaced tool names registered on the gateway
 }
 
 // Gateway aggregates multiple MCP backends behind a single server.
@@ -226,12 +227,14 @@ func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) 
 }
 
 // registerBackendTools fetches tools from a backend and registers them on the gateway server.
+// Each call to AddTool triggers notifications/tools/list_changed to all connected clients.
 func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 	result, err := b.Session.ListTools(ctx, &mcp.ListToolsParams{})
 	if err != nil {
 		return fmt.Errorf("list tools from %s: %w", b.Config.ID, err)
 	}
 
+	names := make([]string, 0, len(result.Tools))
 	for _, tool := range result.Tools {
 		namespacedName := b.Config.Namespace + namespaceSeparator + tool.Name
 
@@ -250,8 +253,11 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 		}
 
 		g.server.AddTool(namespacedTool, handler)
-		g.logger.Debug("registered tool", "name", namespacedName, "backend", b.Config.ID)
+		names = append(names, namespacedName)
 	}
+
+	// Track tool names so we can remove them when the backend disconnects.
+	b.ToolNames = names
 
 	g.logger.Info("registered tools from backend", "id", b.Config.ID, "count", len(result.Tools))
 	return nil
@@ -361,13 +367,14 @@ func (g *Gateway) DisconnectBackend(id string) error {
 	return nil
 }
 
-// removeBackendTools removes all tools with a given backend's namespace prefix.
+// removeBackendTools removes all tools registered by a backend.
+// Triggers notifications/tools/list_changed to all connected clients.
 func (g *Gateway) removeBackendTools(b *Backend) {
-	prefix := b.Config.Namespace + namespaceSeparator
-	// We don't have a way to list registered tools from the server,
-	// so we'd need to track them. For now, we'll use RemoveTools with known names.
-	// This will be populated during registerBackendTools in a future iteration.
-	_ = prefix
+	if len(b.ToolNames) == 0 {
+		return
+	}
+	g.server.RemoveTools(b.ToolNames...)
+	g.logger.Info("removed tools from backend", "id", b.Config.ID, "count", len(b.ToolNames))
 }
 
 // Close disconnects all backends.

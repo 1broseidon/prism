@@ -67,7 +67,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	adminAPI := admin.NewAPI(func() any { return gw.Status() })
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -76,7 +76,7 @@ func main() {
 	errCh := make(chan error, 2)
 	startServers(cfg, mainServer, adminServer, logger, errCh)
 	printStartupBanner(cfg, gw, logger)
-	waitForShutdown(cfg, mainServer, adminServer, gw, logger, errCh)
+	waitForShutdown(cfg, *configPath, mainServer, adminServer, gw, logger, errCh)
 }
 
 // setupGateway creates the gateway, wires the audit logger, and connects backends.
@@ -260,15 +260,24 @@ func printStartupBanner(cfg *config.Loaded, gw *gateway.Gateway, logger *slog.Lo
 }
 
 // waitForShutdown blocks until a signal or server error, then gracefully shuts down.
-func waitForShutdown(cfg *config.Loaded, mainServer, adminServer *http.Server, gw *gateway.Gateway, logger *slog.Logger, errCh <-chan error) {
+// On SIGHUP, reloads config and hot-adds/removes backends.
+func waitForShutdown(cfg *config.Loaded, configPath string, mainServer, adminServer *http.Server, gw *gateway.Gateway, logger *slog.Logger, errCh <-chan error) {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	select {
-	case sig := <-sigCh:
-		logger.Info("received signal", "signal", sig)
-	case err := <-errCh:
-		logger.Error("server error", "error", err)
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig == syscall.SIGHUP {
+				logger.Info("SIGHUP received — reloading config")
+				reloadConfig(configPath, gw, logger)
+				continue
+			}
+			logger.Info("received signal", "signal", sig)
+		case err := <-errCh:
+			logger.Error("server error", "error", err)
+		}
+		break
 	}
 
 	logger.Info("shutting down...")
@@ -289,6 +298,52 @@ func waitForShutdown(cfg *config.Loaded, mainServer, adminServer *http.Server, g
 	gw.Close()
 
 	logger.Info("shutdown complete")
+}
+
+// reloadConfig re-reads the config file, diffs mcpServers, and hot-adds/removes backends.
+func reloadConfig(configPath string, gw *gateway.Gateway, logger *slog.Logger) {
+	newCfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Error("reload failed — keeping current config", "error", err)
+		return
+	}
+
+	// Build sets of current and new backend IDs.
+	currentIDs := make(map[string]struct{})
+	for _, id := range gw.BackendIDs() {
+		currentIDs[id] = struct{}{}
+	}
+
+	newIDs := make(map[string]struct{}, len(newCfg.Servers))
+	for _, s := range newCfg.Servers {
+		newIDs[s.ID] = struct{}{}
+	}
+
+	// Remove backends that no longer exist in config.
+	for id := range currentIDs {
+		if _, ok := newIDs[id]; !ok {
+			if err := gw.DisconnectBackend(id); err != nil {
+				logger.Error("reload: failed to remove backend", "id", id, "error", err)
+			} else {
+				logger.Info("reload: removed backend", "id", id)
+			}
+		}
+	}
+
+	// Add backends that are new in config.
+	ctx := context.Background()
+	for i := range newCfg.Servers {
+		s := &newCfg.Servers[i]
+		if _, ok := currentIDs[s.ID]; !ok {
+			if err := gw.ConnectBackend(ctx, s); err != nil {
+				logger.Error("reload: failed to add backend", "id", s.ID, "error", err)
+			} else {
+				logger.Info("reload: added backend", "id", s.ID)
+			}
+		}
+	}
+
+	logger.Info("config reloaded", "backends", len(newCfg.Servers))
 }
 
 // buildAuditLogger creates an audit.Logger from the audit config section.

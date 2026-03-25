@@ -15,15 +15,18 @@ type StatusProvider interface {
 
 // API exposes admin endpoints.
 type API struct {
-	statusFn  func() any
-	startedAt time.Time
+	statusFn   func() any
+	backendMgr BackendManager
+	startedAt  time.Time
 }
 
 // NewAPI creates an admin API. statusFn returns the current backend status.
-func NewAPI(statusFn func() any) *API {
+// backendMgr enables runtime backend add/remove (may be nil).
+func NewAPI(statusFn func() any, backendMgr BackendManager) *API {
 	return &API{
-		statusFn:  statusFn,
-		startedAt: time.Now(),
+		statusFn:   statusFn,
+		backendMgr: backendMgr,
+		startedAt:  time.Now(),
 	}
 }
 
@@ -33,6 +36,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /health", a.handleHealth)
 	mux.HandleFunc("GET /backends", a.handleBackends)
 	mux.HandleFunc("GET /info", a.handleInfo)
+	mux.HandleFunc("POST /backends/", a.handleAddBackend)
+	mux.HandleFunc("DELETE /backends/", a.handleRemoveBackend)
 	return mux
 }
 
