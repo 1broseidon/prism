@@ -117,8 +117,42 @@ func (g *Gateway) SetStore(s store.Store) {
 	g.kvStore = s
 }
 
-// credKVPrefix is the KV key prefix for persisted credential configs.
+// KV key prefixes for backend persistence.
 const credKVPrefix = "backend/cred/"
+const backendKVPrefix = "backend/config/"
+
+// persistedBackend is the JSON representation of a runtime-added backend stored in KV.
+type persistedBackend struct {
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+}
+
+// persistBackend saves a backend config to KV for restart persistence.
+func (g *Gateway) persistBackend(backendID string, pb *persistedBackend) {
+	if g.kvStore == nil {
+		return
+	}
+	data, err := json.Marshal(pb)
+	if err != nil {
+		g.logger.Warn("failed to marshal backend for persistence", "id", backendID, "error", err)
+		return
+	}
+	if err := g.kvStore.Set(backendKVPrefix+backendID, data); err != nil {
+		g.logger.Warn("failed to persist backend", "id", backendID, "error", err)
+	}
+}
+
+// deletePersistedBackend removes a backend config from KV.
+func (g *Gateway) deletePersistedBackend(backendID string) {
+	if g.kvStore == nil {
+		return
+	}
+	if err := g.kvStore.Delete(backendKVPrefix + backendID); err != nil {
+		g.logger.Warn("failed to delete persisted backend", "id", backendID, "error", err)
+	}
+}
 
 // persistedCredential is the JSON representation stored in KV.
 type persistedCredential struct {
@@ -185,6 +219,60 @@ func (g *Gateway) LoadPersistedCredentials() {
 			g.credStore.Register(backendID, cred)
 			g.logger.Info("restored persisted credential", "id", backendID, "type", pc.Type)
 		}
+	}
+}
+
+// LoadPersistedBackends restores runtime-added backends from KV.
+// Call this after SetStore and after config backends are connected.
+func (g *Gateway) LoadPersistedBackends(ctx context.Context) {
+	if g.kvStore == nil {
+		return
+	}
+	keys, err := g.kvStore.List(backendKVPrefix)
+	if err != nil {
+		g.logger.Warn("failed to list persisted backends", "error", err)
+		return
+	}
+
+	for _, key := range keys {
+		backendID := strings.TrimPrefix(key, backendKVPrefix)
+
+		// Skip if already connected from config
+		g.mu.RLock()
+		_, exists := g.backends[backendID]
+		g.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		data, err := g.kvStore.Get(key)
+		if err != nil {
+			g.logger.Warn("failed to read persisted backend", "key", key, "error", err)
+			continue
+		}
+
+		var pb persistedBackend
+		if err := json.Unmarshal(data, &pb); err != nil {
+			g.logger.Warn("failed to unmarshal persisted backend", "key", key, "error", err)
+			continue
+		}
+
+		sc := &config.ServerConfig{
+			ID:        backendID,
+			Namespace: backendID,
+			URL:       pb.URL,
+			Env:       pb.Env,
+			Timeout:   config.Duration(30 * time.Second),
+		}
+		if pb.Command != "" {
+			sc.Command = append([]string{pb.Command}, pb.Args...)
+		}
+
+		if err := g.ConnectBackend(ctx, sc); err != nil {
+			g.logger.Warn("failed to reconnect persisted backend", "id", backendID, "error", err)
+			continue
+		}
+		g.logger.Info("restored persisted backend", "id", backendID)
 	}
 }
 
@@ -532,9 +620,10 @@ func (g *Gateway) DisconnectBackend(id string) error {
 	// Remove tools registered under this backend's namespace
 	g.removeBackendTools(b)
 
-	// Remove credential registration and persisted credential config
+	// Remove credential registration and persisted configs
 	g.credStore.Unregister(id)
 	g.deletePersistedCredential(id)
+	g.deletePersistedBackend(id)
 
 	if b.Session != nil {
 		_ = b.Session.Close()

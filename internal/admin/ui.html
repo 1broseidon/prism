@@ -230,6 +230,9 @@
     font-family: var(--font-mono); font-size: 10px;
     color: var(--muted); margin-left: 8px;
   }
+  .backend-edit-row { border-bottom: 1px solid var(--line); }
+  .backend-edit-row:hover { background: transparent !important; }
+  .backend-edit { padding: 4px 0 8px 0; }
   .scope-pending {
     font-family: var(--font-mono); font-size: 9px;
     color: var(--muted); opacity: 0.6;
@@ -542,6 +545,7 @@ const $ = s => document.querySelector(s);
 // --- State ---
 let agentNames = {};         // client_id → display name (for events)
 let cachedAgents = [];       // latest agent data from API
+let cachedBackends = [];     // latest backend data from API
 let cachedGroups = [];       // latest group data from API
 let knownNamespaces = [];    // backend namespaces for autocomplete
 let editState = null;        // { prismId, scopes[], original[], defaults[], td }
@@ -976,6 +980,7 @@ async function refreshBackends() {
   try {
     const backends = await fetchJSON('/backends');
     backends.sort((a, b) => a.id.localeCompare(b.id));
+    cachedBackends = backends;
     knownNamespaces = backends.map(b => b.namespace).filter(Boolean);
 
     const body = $('#backends-body');
@@ -990,9 +995,13 @@ async function refreshBackends() {
 
     // Only rebuild table if expanded
     if (backendsExpanded) {
+      // Don't rebuild if a backend edit form is open
+      if (body.querySelector('.backend-edit-row')) return;
       body.innerHTML = '';
       backends.forEach(b => {
         const tr = document.createElement('tr');
+        tr.dataset.backendId = b.id;
+        tr.style.cursor = 'pointer';
         const nsSuffix = (b.namespace && b.namespace !== b.id)
           ? `<span class="backend-ns-suffix">(${esc(b.namespace)})</span>` : '';
         let credBadge = '';
@@ -1495,6 +1504,118 @@ document.addEventListener('mousedown', (e) => {
   if (editState && !editState.td.contains(e.target)) {
     saveScopeEdit();
   }
+});
+
+// --- Backend row click-to-edit ---
+$('#backends-body').addEventListener('click', (e) => {
+  const row = e.target.closest('tr[data-backend-id]');
+  if (!row) return;
+  // Don't re-open if already editing
+  if (row.nextElementSibling?.classList.contains('backend-edit-row')) {
+    row.nextElementSibling.remove();
+    return;
+  }
+  // Close any other open edit row
+  const existing = document.querySelector('.backend-edit-row');
+  if (existing) existing.remove();
+
+  const backendId = row.dataset.backendId;
+  const b = cachedBackends.find(x => x.id === backendId);
+
+  const editRow = document.createElement('tr');
+  editRow.className = 'backend-edit-row';
+
+  const credType = b?.credential?.type || 'none';
+  const credHeader = b?.credential?.header || 'Authorization';
+  const credEnv = b?.credential?.env || '';
+  const credCmd = b?.credential?.command || '';
+
+  editRow.innerHTML = `
+    <td colspan="2" style="padding:8px 0">
+      <div class="backend-edit">
+        <div class="inline-form" style="flex-wrap:wrap;gap:8px">
+          <div style="display:flex;gap:6px;align-items:center;width:100%">
+            <span class="policy-label" style="width:auto">credential</span>
+            <select class="cred-select" data-field="cred-type">
+              <option value="none" ${credType === 'none' ? 'selected' : ''}>none</option>
+              <option value="static" ${credType === 'static' ? 'selected' : ''}>API Key</option>
+              <option value="env" ${credType === 'env' ? 'selected' : ''}>Env Var</option>
+              <option value="command" ${credType === 'command' ? 'selected' : ''}>Command</option>
+            </select>
+            <div class="cred-fields" data-cred-fields></div>
+          </div>
+          <div style="display:flex;gap:6px;margin-left:auto">
+            <button class="save-btn" data-action="save">save</button>
+            <button class="cancel-btn" data-action="remove" style="color:var(--denied)">remove</button>
+            <button class="cancel-btn" data-action="cancel">cancel</button>
+          </div>
+        </div>
+      </div>
+    </td>
+  `;
+
+  row.after(editRow);
+
+  const select = editRow.querySelector('[data-field="cred-type"]');
+  const fieldsContainer = editRow.querySelector('[data-cred-fields]');
+
+  function updateFields() {
+    const type = select.value;
+    if (type === 'none') {
+      fieldsContainer.innerHTML = '';
+    } else if (type === 'static') {
+      fieldsContainer.innerHTML =
+        '<input type="text" placeholder="header" value="' + esc(credHeader) + '" data-field="header" style="width:100px">' +
+        '<input type="password" placeholder="secret value (write-only)" data-field="value" style="width:180px">' +
+        '<span class="cred-hint">write-only</span>';
+    } else if (type === 'env') {
+      fieldsContainer.innerHTML =
+        '<input type="text" placeholder="header" value="' + esc(credHeader) + '" data-field="header" style="width:100px">' +
+        '<input type="text" placeholder="ENV_VAR_NAME" value="' + esc(credEnv) + '" data-field="env" style="width:140px">';
+    } else if (type === 'command') {
+      fieldsContainer.innerHTML =
+        '<input type="text" placeholder="header" value="' + esc(credHeader) + '" data-field="header" style="width:100px">' +
+        '<input type="text" placeholder="vault kv get..." value="' + esc(credCmd) + '" data-field="command" style="flex:1">';
+    }
+  }
+  select.addEventListener('change', updateFields);
+  updateFields();
+
+  // Save credential
+  editRow.querySelector('[data-action="save"]').addEventListener('click', async () => {
+    const type = select.value;
+    const cred = { type };
+    if (type !== 'none') {
+      cred.header = fieldsContainer.querySelector('[data-field="header"]')?.value || 'Authorization';
+      if (type === 'static') cred.value = fieldsContainer.querySelector('[data-field="value"]')?.value || '';
+      if (type === 'env') cred.env = fieldsContainer.querySelector('[data-field="env"]')?.value || '';
+      if (type === 'command') cred.command = fieldsContainer.querySelector('[data-field="command"]')?.value || '';
+    }
+    try {
+      // Re-add backend with credential (the API handles upsert via reconnect)
+      await fetch('/backends/' + backendId, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ url: b?.url || '', credential: type === 'none' ? null : cred })
+      });
+      editRow.remove();
+      $('#backends-body').dataset.hash = '';
+      refreshBackends();
+    } catch {}
+  });
+
+  // Remove backend
+  editRow.querySelector('[data-action="remove"]').addEventListener('click', async () => {
+    try {
+      await fetch('/backends/' + backendId, { method: 'DELETE' });
+      editRow.remove();
+      $('#backends-body').dataset.hash = '';
+      refreshBackends();
+    } catch {}
+  });
+
+  // Cancel
+  editRow.querySelector('[data-action="cancel"]').addEventListener('click', () => editRow.remove());
 });
 
 // --- Global defaults editor ---

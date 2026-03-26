@@ -59,6 +59,15 @@ func (g *Gateway) AddBackend(ctx context.Context, id string, cfg admin.BackendCo
 		g.deletePersistedCredential(id)
 		return err
 	}
+
+	// Persist backend config for restart survival.
+	g.persistBackend(id, &persistedBackend{
+		Command: cfg.Command,
+		Args:    cfg.Args,
+		Env:     cfg.Env,
+		URL:     cfg.URL,
+	})
+
 	return nil
 }
 
