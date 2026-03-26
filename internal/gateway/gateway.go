@@ -50,6 +50,7 @@ type Gateway struct {
 	credStore      *credentials.Store
 	kvStore        store.Store         // optional KV store for persisting runtime credential configs
 	policyResolver auth.PolicyResolver // live policy resolution, bypasses stale session context
+	authFlows      any                 // *authFlowManager when OAuth support is compiled in
 }
 
 // New creates a new Gateway.
@@ -624,6 +625,7 @@ func (g *Gateway) DisconnectBackend(id string) error {
 	g.credStore.Unregister(id)
 	g.deletePersistedCredential(id)
 	g.deletePersistedBackend(id)
+	g.cleanupOAuthForBackend(id)
 
 	if b.Session != nil {
 		_ = b.Session.Close()

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/1broseidon/prism/internal/metrics"
@@ -35,30 +36,32 @@ type GroupManager interface {
 
 // API exposes admin endpoints.
 type API struct {
-	statusFn      func() any
-	agentsFn      func() []any
-	removeFn      func(string) bool
-	removeStaleFn func() int
-	eventsFn      func() []any
-	backendMgr    BackendManager
-	agentMgr      AgentManager
-	groupMgr      GroupManager
-	startedAt     time.Time
+	statusFn             func() any
+	agentsFn             func() []any
+	removeFn             func(string) bool
+	removeStaleFn        func() int
+	eventsFn             func() []any
+	backendMgr           BackendManager
+	agentMgr             AgentManager
+	groupMgr             GroupManager
+	oauthCallbackHandler http.Handler // optional: gateway's OAuth callback handler
+	startedAt            time.Time
 }
 
 // NewAPI creates an admin API.
-// agentMgr and groupMgr are optional — when nil, their endpoints return 503.
-func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, removeFn func(string) bool, removeStaleFn func() int, eventsFn func() []any, agentMgr AgentManager, groupMgr GroupManager) *API {
+// agentMgr, groupMgr, and oauthCallback are optional — when nil, their endpoints return 503/404.
+func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, removeFn func(string) bool, removeStaleFn func() int, eventsFn func() []any, agentMgr AgentManager, groupMgr GroupManager, oauthCallback http.Handler) *API {
 	return &API{
-		statusFn:      statusFn,
-		agentsFn:      agentsFn,
-		removeFn:      removeFn,
-		removeStaleFn: removeStaleFn,
-		eventsFn:      eventsFn,
-		backendMgr:    backendMgr,
-		agentMgr:      agentMgr,
-		groupMgr:      groupMgr,
-		startedAt:     time.Now(),
+		statusFn:             statusFn,
+		agentsFn:             agentsFn,
+		removeFn:             removeFn,
+		removeStaleFn:        removeStaleFn,
+		eventsFn:             eventsFn,
+		backendMgr:           backendMgr,
+		agentMgr:             agentMgr,
+		groupMgr:             groupMgr,
+		oauthCallbackHandler: oauthCallback,
+		startedAt:            time.Now(),
 	}
 }
 
@@ -83,6 +86,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PUT /defaults", a.handleSetDefaults)
 	mux.HandleFunc("POST /backends/", a.handleAddBackend)
 	mux.HandleFunc("DELETE /backends/", a.handleRemoveBackend)
+	mux.HandleFunc("GET /backends/", a.handleBackendSub)
+	if a.oauthCallbackHandler != nil {
+		mux.Handle("GET /oauth/callback", a.oauthCallbackHandler)
+	}
 	if metrics.Enabled() {
 		mux.Handle("GET /metrics", metrics.Handler())
 	}
@@ -135,6 +142,15 @@ func (a *API) handleInfo(w http.ResponseWriter, _ *http.Request) {
 		"uptime":     time.Since(a.startedAt).String(),
 		"goroutines": runtime.NumGoroutine(),
 	})
+}
+
+// handleBackendSub dispatches GET /backends/{id}/auth-status.
+func (a *API) handleBackendSub(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/auth-status") {
+		a.handleAuthStatus(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

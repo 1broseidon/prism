@@ -89,6 +89,12 @@ func runServe() {
 	// Give the gateway access to the KV store for persisting runtime configs.
 	gw.SetStore(kvStore)
 	gw.LoadPersistedCredentials()
+
+	// Initialize OAuth client support for upstream MCP servers that require authentication.
+	// This must happen after SetStore (needs KV for persisted tokens) and before LoadPersistedBackends
+	// (so OAuth credentials are registered before backends try to connect).
+	oauthCallback := gw.SetupOAuth(cfg.Admin)
+
 	gw.LoadPersistedBackends(ctx)
 
 	// Always start the embedded auth server — agents connect via OAuth DCR.
@@ -141,7 +147,7 @@ func runServe() {
 	}
 	agentMgr := &authServerAgentManager{srv: authSrv}
 	groupMgr := &authServerGroupManager{srv: authSrv}
-	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr)
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

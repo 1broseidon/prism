@@ -192,6 +192,9 @@ func (s *Store) Info(backendID string) *CredentialInfo {
 		info.Type = "command"
 		info.Header = c.Header
 		info.Command = c.Cmd
+	case *OAuth:
+		info.Type = "oauth"
+		info.Header = c.header
 	default:
 		info.Type = "unknown"
 	}

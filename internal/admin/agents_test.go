@@ -96,6 +96,7 @@ func newTestAPI() (*API, *mockAgentManager) {
 		func() []any { return nil },
 		mgr,
 		nil, // no group manager
+		nil, // no OAuth callback
 	)
 	return api, mgr
 }
@@ -256,6 +257,7 @@ func TestAgentMgrNil_Returns503(t *testing.T) {
 		nil,
 		nil, // no agent manager
 		nil, // no group manager
+		nil, // no OAuth callback
 	)
 
 	r := httptest.NewRequest(http.MethodGet, "/agents/some-id", nil)

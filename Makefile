@@ -1,17 +1,20 @@
 .PHONY: all build test lint fmt vet check clean
 
+# Build tags required for OAuth client support (upstream MCP server auth).
+TAGS := -tags mcp_go_client_oauth
+
 # Default: run all checks then build
 all: check build
 
 # Build all binaries
 build:
-	go build -o bin/prism ./cmd/prism
-	go build -o bin/prism-bridge ./cmd/prism-bridge
-	go build -o bin/prism-auth ./cmd/prism-auth
+	go build $(TAGS) -o bin/prism ./cmd/prism
+	go build $(TAGS) -o bin/prism-bridge ./cmd/prism-bridge
+	go build $(TAGS) -o bin/prism-auth ./cmd/prism-auth
 
 # Run tests with race detector
 test:
-	go test -count=1 ./...
+	go test $(TAGS) -count=1 ./...
 
 # Run golangci-lint (all linters including gocyclo, misspell, etc.)
 lint:
@@ -23,7 +26,7 @@ fmt:
 
 # Go vet
 vet:
-	go vet ./...
+	go vet $(TAGS) ./...
 
 # Full check: fmt verification + vet + lint + test
 check: fmt-check vet lint test

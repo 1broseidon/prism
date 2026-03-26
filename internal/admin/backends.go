@@ -36,11 +36,11 @@ type CredentialConfig struct {
 // BackendCredentialInfo is the obfuscated credential metadata returned by GET /backends.
 // Secret values are never included.
 type BackendCredentialInfo struct {
-	Type       string `json:"type"`                // "static", "env", "command", "none"
-	Header     string `json:"header,omitempty"`    // which header is set
-	Env        string `json:"env,omitempty"`       // env var name (env type only)
-	Command    string `json:"command,omitempty"`   // shell command (command type only)
-	Configured bool   `json:"configured"`          // true if a credential is registered
+	Type       string `json:"type"`              // "static", "env", "command", "none"
+	Header     string `json:"header,omitempty"`  // which header is set
+	Env        string `json:"env,omitempty"`     // env var name (env type only)
+	Command    string `json:"command,omitempty"` // shell command (command type only)
+	Configured bool   `json:"configured"`        // true if a credential is registered
 }
 
 // BackendManager is the interface the admin API uses to mutate backends.
@@ -50,6 +50,17 @@ type BackendManager interface {
 	// NotifyToolsChanged sends tools/list_changed to all MCP sessions,
 	// causing clients to re-fetch their tool list with current policy.
 	NotifyToolsChanged()
+}
+
+// OAuthProber is an optional interface that BackendManager may implement
+// to support probing backends for OAuth authentication requirements.
+type OAuthProber interface {
+	// ProbeBackendOAuth probes a URL. If the backend requires OAuth, returns
+	// (authURL, state, nil). If no OAuth is needed, returns ("", "", nil).
+	ProbeBackendOAuth(ctx context.Context, backendID, url string) (authURL, state string, err error)
+	// AuthFlowStatus returns the status of an OAuth flow for a backend.
+	// Returns "pending", "connected", "failed:{reason}", or "".
+	AuthFlowStatus(backendID string) string
 }
 
 func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
@@ -67,10 +78,39 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for auth-status sub-path: GET is handled separately but POST /backends/{id}/auth-status
+	// should not be valid. Only strip /auth-status for the GET handler below.
+	if strings.HasSuffix(id, "/auth-status") {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET for auth-status"})
+		return
+	}
+
 	var cfg BackendConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 		return
+	}
+
+	// If a URL is provided with no explicit credential, probe for OAuth.
+	if cfg.URL != "" && cfg.Credential == nil {
+		if prober, ok := a.backendMgr.(OAuthProber); ok {
+			authURL, state, err := prober.ProbeBackendOAuth(r.Context(), id, cfg.URL)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "probe failed: " + err.Error()})
+				return
+			}
+			if authURL != "" {
+				// Backend requires OAuth — return auth_required with the URL.
+				writeJSON(w, http.StatusOK, map[string]any{
+					"status":     "auth_required",
+					"auth_url":   authURL,
+					"state":      state,
+					"backend_id": id,
+				})
+				return
+			}
+			// No OAuth needed, fall through to normal add.
+		}
 	}
 
 	if err := a.backendMgr.AddBackend(r.Context(), id, cfg); err != nil {
@@ -99,4 +139,29 @@ func (a *API) handleRemoveBackend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+// handleAuthStatus returns the current OAuth flow status for a backend.
+// GET /backends/{id}/auth-status
+func (a *API) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	// Path: /backends/{id}/auth-status
+	path := strings.TrimPrefix(r.URL.Path, "/backends/")
+	id := strings.TrimSuffix(path, "/auth-status")
+	if id == "" || id == path {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+
+	prober, ok := a.backendMgr.(OAuthProber)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "OAuth not available"})
+		return
+	}
+
+	status := prober.AuthFlowStatus(id)
+	if status == "" {
+		status = "unknown"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": status})
 }

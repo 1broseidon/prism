@@ -182,6 +182,12 @@
     font-size: 9px; color: var(--muted); opacity: 0.4;
     margin-left: 2px;
   }
+  .scope-tag.removable { cursor: pointer; }
+  .scope-tag.removable:hover { border-color: var(--denied); }
+  .scope-tag.removable .x {
+    font-size: 9px; margin-left: 2px; opacity: 0.5;
+  }
+  .scope-tag.removable:hover .x { opacity: 1; color: var(--denied); }
   .policy-summary {
     font-family: var(--font-mono); font-size: 11px;
     color: var(--muted);
@@ -835,14 +841,14 @@ function renderBreakdown(a) {
           <div class="policy-row">
             <span class="policy-label">grants</span>
             <div class="policy-scopes">
-              ${grants.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('')}
+              ${grants.map(s => `<span class="scope-tag removable" data-remove-grant="${esc(s)}" data-prism="${esc(a.prism_id)}" title="Click to remove">${esc(s)} <span class="x">x</span></span>`).join('')}
               <button class="add-btn" data-add-grant="${esc(a.prism_id)}">+ grant</button>
             </div>
           </div>
           <div class="policy-row">
             <span class="policy-label">denies</span>
             <div class="policy-scopes">
-              ${denies.map(s => `<span class="scope-tag" style="color:var(--denied);border-color:var(--denied)">${esc(s)}</span>`).join('')}
+              ${denies.map(s => `<span class="scope-tag removable" data-remove-deny="${esc(s)}" data-prism="${esc(a.prism_id)}" title="Click to remove" style="color:var(--denied);border-color:var(--denied)">${esc(s)} <span class="x" style="color:var(--denied)">x</span></span>`).join('')}
               <button class="add-btn" data-add-deny="${esc(a.prism_id)}">+ deny</button>
             </div>
           </div>
@@ -1116,7 +1122,15 @@ function addBackend() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      if (!r.ok) { const d = await r.json(); nameInput.style.borderColor = 'var(--denied)'; return; }
+      const d = await r.json();
+
+      // Handle OAuth auth_required response
+      if (d.status === 'auth_required' && d.auth_url) {
+        showOAuthFlow(form, name, d.auth_url, d.state);
+        return;
+      }
+
+      if (!r.ok) { nameInput.style.borderColor = 'var(--denied)'; return; }
       form.remove();
       refreshBackends();
     } catch {}
@@ -1126,6 +1140,81 @@ function addBackend() {
   form.querySelector('.cancel-btn').addEventListener('click', () => form.remove());
   cmdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') form.remove(); });
   nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') cmdInput.focus(); if (e.key === 'Escape') form.remove(); });
+}
+
+function showOAuthFlow(form, backendId, authUrl, state) {
+  // Replace form content with OAuth flow UI.
+  const btns = form.querySelector('.save-btn');
+  const cancelBtn = form.querySelector('.cancel-btn');
+  const credSelect = form.querySelector('.cred-select');
+  const credFieldsDiv = form.querySelector('[data-field="cred-fields"]');
+  if (credSelect) credSelect.style.display = 'none';
+  if (credFieldsDiv) credFieldsDiv.style.display = 'none';
+  if (btns) btns.style.display = 'none';
+
+  // Add OAuth status area.
+  const oauthArea = document.createElement('div');
+  oauthArea.className = 'oauth-flow';
+  oauthArea.style.cssText = 'display:flex;gap:8px;align-items:center;width:100%;margin-top:4px';
+  oauthArea.innerHTML = `
+    <button class="auth-btn" style="background:var(--accent);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px">Authenticate</button>
+    <span class="oauth-status" style="font-size:11px;color:var(--dim)">Waiting for authorization...</span>
+    <button class="cancel-btn" style="margin-left:auto">cancel</button>
+  `;
+  form.appendChild(oauthArea);
+
+  const authBtn = oauthArea.querySelector('.auth-btn');
+  const statusSpan = oauthArea.querySelector('.oauth-status');
+  const oauthCancel = oauthArea.querySelector('.cancel-btn');
+
+  let pollTimer = null;
+  let timeoutTimer = null;
+
+  // Open browser popup for OAuth consent.
+  authBtn.addEventListener('click', () => {
+    window.open(authUrl, 'prism-auth', 'width=600,height=700');
+    authBtn.disabled = true;
+    authBtn.textContent = 'Waiting...';
+    statusSpan.textContent = 'Authorization in progress...';
+
+    // Poll for completion.
+    pollTimer = setInterval(async () => {
+      try {
+        const r = await fetch(`/backends/${backendId}/auth-status`);
+        const d = await r.json();
+        if (d.status === 'connected') {
+          cleanup();
+          form.remove();
+          refreshBackends();
+        } else if (d.status && d.status.startsWith('failed')) {
+          cleanup();
+          statusSpan.textContent = 'Authentication failed: ' + d.status.replace('failed:', '');
+          statusSpan.style.color = 'var(--denied)';
+          authBtn.disabled = false;
+          authBtn.textContent = 'Retry';
+        }
+      } catch {}
+    }, 2000);
+
+    // Timeout after 5 minutes.
+    timeoutTimer = setTimeout(() => {
+      cleanup();
+      statusSpan.textContent = 'Authentication timed out';
+      statusSpan.style.color = 'var(--denied)';
+      authBtn.disabled = false;
+      authBtn.textContent = 'Retry';
+    }, 5 * 60 * 1000);
+  });
+
+  function cleanup() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = null; }
+  }
+
+  oauthCancel.addEventListener('click', () => {
+    cleanup();
+    form.remove();
+  });
 }
 
 async function refreshEvents() {
@@ -1440,6 +1529,22 @@ function inlineScopeInput(btn, onSubmit) {
   input.addEventListener('blur', () => setTimeout(() => { if (form.parentElement) finish(null); }, 150));
 }
 
+function removeGrantFromAgent(prismId, scope) {
+  const agent = getAgentByPrismId(prismId);
+  if (!agent) return;
+  const policy = agent.policy || { groups: [], grant: [], deny: [] };
+  const newGrant = (policy.grant || []).filter(s => s !== scope);
+  updateAgentPolicy(prismId, policy.groups || [], newGrant, policy.deny || []);
+}
+
+function removeDenyFromAgent(prismId, scope) {
+  const agent = getAgentByPrismId(prismId);
+  if (!agent) return;
+  const policy = agent.policy || { groups: [], grant: [], deny: [] };
+  const newDeny = (policy.deny || []).filter(s => s !== scope);
+  updateAgentPolicy(prismId, policy.groups || [], policy.grant || [], newDeny);
+}
+
 function addGrantToAgent(prismId) {
   const btn = document.querySelector(`[data-add-grant="${prismId}"]`);
   if (!btn) return;
@@ -1477,6 +1582,18 @@ $('#agents-body').addEventListener('click', (e) => {
     const groupChip = e.target.closest('.group-chip');
     if (groupChip) {
       removeGroupFromAgent(groupChip.dataset.prism, groupChip.dataset.group);
+      return;
+    }
+    // Remove grant
+    const removeGrant = e.target.closest('[data-remove-grant]');
+    if (removeGrant) {
+      removeGrantFromAgent(removeGrant.dataset.prism, removeGrant.dataset.removeGrant);
+      return;
+    }
+    // Remove deny
+    const removeDeny = e.target.closest('[data-remove-deny]');
+    if (removeDeny) {
+      removeDenyFromAgent(removeDeny.dataset.prism, removeDeny.dataset.removeDeny);
       return;
     }
     // Add group
