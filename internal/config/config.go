@@ -262,6 +262,7 @@ func (s *ServerConfig) IsStdio() bool { return len(s.Command) > 0 }
 type EmbeddedAuthConfig struct {
 	Issuer          string
 	Clients         []EmbeddedClient
+	Groups          map[string]GroupConfig // Group definitions for PrismID-based policy resolution.
 	TokenTTLSeconds int
 	RequiredScopes  []string
 	ScopesSupported []string
@@ -508,6 +509,7 @@ func expandPolicy(p *PolicyConfig) *EmbeddedAuthConfig {
 	return &EmbeddedAuthConfig{
 		// Issuer is set at runtime by cmd/prism once the listen address is known.
 		Clients:         clients,
+		Groups:          p.Groups,
 		TokenTTLSeconds: 3600,
 		RequiredScopes:  []string{"mcp:connect"},
 		ScopesSupported: allScopes,

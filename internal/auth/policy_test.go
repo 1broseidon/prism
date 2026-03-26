@@ -21,6 +21,21 @@ func TestPolicyCanAccessTool(t *testing.T) {
 		{"multiple scopes", "github:create_issue fs:read_file", "fs", "read_file", true},
 		{"multiple scopes miss", "github:create_issue fs:read_file", "fs", "write_file", false},
 		{"namespace wildcard only for that ns", "github:*", "fs", "read_file", false},
+
+		// Glob pattern matching
+		{"glob prefix match", "fs:read*", "fs", "read_file", true},
+		{"glob prefix match longer", "fs:read*", "fs", "read_text_file", true},
+		{"glob prefix no match", "fs:read*", "fs", "write_file", false},
+		{"glob with underscore wildcard", "github:list_*", "github", "list_repos", true},
+		{"glob namespace star", "*:read_file", "fs", "read_file", true},
+		{"glob namespace star other ns", "*:read_file", "s3", "read_file", true},
+		{"glob namespace star no match", "*:read_file", "fs", "write_file", false},
+		{"glob suffix match", "fs:*_file", "fs", "read_file", true},
+		{"glob suffix match write", "fs:*_file", "fs", "write_file", true},
+		{"glob suffix no match", "fs:*_file", "fs", "read_dir", false},
+		{"glob question mark", "fs:read_fil?", "fs", "read_file", true},
+		{"glob question mark no match", "fs:read_fil?", "fs", "read_files", false},
+		{"no glob is exact only", "fs:read_file", "fs", "read_files", false},
 	}
 
 	for _, tt := range tests {

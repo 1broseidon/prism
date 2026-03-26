@@ -208,6 +208,9 @@ func (s *Server) loadPersistedState() {
 			"refresh_tokens", len(refreshKeys),
 		)
 	}
+
+	// Restore runtime-modified default scopes (if any).
+	s.loadPersistedDefaults()
 }
 
 func sha256Hash(s string) string {

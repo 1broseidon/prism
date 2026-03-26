@@ -18,8 +18,13 @@ import (
 	"github.com/1broseidon/prism/internal/bridge"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/credentials"
+	"github.com/1broseidon/prism/internal/metrics"
 	"github.com/1broseidon/prism/internal/middleware"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const namespaceSeparator = "__"
@@ -35,12 +40,13 @@ type Backend struct {
 
 // Gateway aggregates multiple MCP backends behind a single server.
 type Gateway struct {
-	mu        sync.RWMutex
-	backends  map[string]*Backend // keyed by server ID
-	server    *mcp.Server
-	logger    *slog.Logger
-	auditor   *audit.Logger
-	credStore *credentials.Store
+	mu             sync.RWMutex
+	backends       map[string]*Backend // keyed by server ID
+	server         *mcp.Server
+	logger         *slog.Logger
+	auditor        *audit.Logger
+	credStore      *credentials.Store
+	policyResolver auth.PolicyResolver // live policy resolution, bypasses stale session context
 }
 
 // New creates a new Gateway.
@@ -71,6 +77,26 @@ func New(logger *slog.Logger) *Gateway {
 	return g
 }
 
+// SetPolicyResolver sets a live policy resolver for the gateway.
+// When set, scope enforcement reads policy from the resolver (live from KV)
+// instead of the stale session context. This ensures policy changes take
+// effect immediately without requiring MCP client reconnection.
+func (g *Gateway) SetPolicyResolver(pr auth.PolicyResolver) {
+	g.policyResolver = pr
+}
+
+// NotifyToolsChanged triggers a tools/list_changed notification to all MCP sessions.
+// Clients that receive this notification re-fetch tools/list, which goes through
+// the scope filter with live policy — so newly granted or denied tools appear/disappear.
+func (g *Gateway) NotifyToolsChanged() {
+	// The MCP SDK doesn't expose a public method to send arbitrary notifications.
+	// Adding and immediately removing a sentinel tool triggers changeAndNotify
+	// for notificationToolListChanged, which debounces and sends to all sessions.
+	sentinel := &mcp.Tool{Name: "__prism_policy_refresh"}
+	g.server.AddTool(sentinel, nil)
+	g.server.RemoveTools(sentinel.Name)
+}
+
 // SetAuditLogger replaces the audit logger used by the gateway.
 // Call this before serving any requests. It is not safe to call concurrently
 // with active requests.
@@ -87,6 +113,8 @@ func (g *Gateway) SetAuditLogger(al *audit.Logger) {
 // If no policy is in context (open / unauthenticated mode) all tools are returned.
 // If a policy is present, only tools whose namespace:name scope is granted pass through.
 func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
+	tracer := otel.Tracer("prism.gateway")
+
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			result, err := next(ctx, method, req)
@@ -94,7 +122,7 @@ func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
 				return result, err
 			}
 
-			policy := auth.PolicyFromContext(ctx)
+			policy := auth.LivePolicy(ctx, g.policyResolver)
 			if policy == nil {
 				// Open / unauthenticated mode: return all tools.
 				return result, nil
@@ -104,6 +132,13 @@ func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
 			if !ok {
 				return result, nil
 			}
+
+			ctx, span := tracer.Start(ctx, "prism.gateway.scope_filter",
+				trace.WithSpanKind(trace.SpanKindInternal),
+			)
+			defer span.End()
+
+			toolsBefore := len(toolsResult.Tools)
 
 			filtered := make([]*mcp.Tool, 0, len(toolsResult.Tools))
 			for _, t := range toolsResult.Tools {
@@ -122,6 +157,12 @@ func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
 			}
 
 			toolsResult.Tools = filtered
+
+			span.SetAttributes(
+				attribute.Int("scope.tools_before", toolsBefore),
+				attribute.Int("scope.tools_after", len(filtered)),
+			)
+
 			return toolsResult, nil
 		}
 	}
@@ -223,6 +264,7 @@ func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) 
 		ttype = "stdio"
 	}
 	g.logger.Info("connected to backend", "id", cfg.ID, "transport", ttype, "namespace", cfg.Namespace)
+	metrics.IncActiveBackends()
 	return nil
 }
 
@@ -267,11 +309,23 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 // It enforces scope-based access control and emits a structured audit log entry
 // for every call (allowed or denied).
 func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	tracer := otel.Tracer("prism.gateway")
+	ctx, span := tracer.Start(ctx, "prism.gateway.tool_call",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+
 	g.mu.RLock()
 	b, ok := g.backends[backendID]
 	g.mu.RUnlock()
 
 	if !ok {
+		span.SetAttributes(
+			attribute.String("tool.name", toolName),
+			attribute.String("tool.backend", backendID),
+			attribute.Bool("tool.allowed", false),
+		)
+		span.SetStatus(codes.Error, "backend not found")
 		return &mcp.CallToolResult{
 			IsError: true,
 			Content: []mcp.Content{
@@ -280,14 +334,23 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}, nil
 	}
 
+	span.SetAttributes(
+		attribute.String("tool.namespace", b.Config.Namespace),
+		attribute.String("tool.name", toolName),
+		attribute.String("tool.backend", backendID),
+	)
+
 	// credInjected tracks whether a backend credential is registered for this backend.
 	// The actual injection happens in the HTTP transport; we record the fact (not the value).
 	credHeader, _, _ := g.credStore.Resolve(ctx, backendID)
 	credInjected := credHeader != ""
 
 	// Scope enforcement: check if the caller has permission for this tool.
-	if policy := auth.PolicyFromContext(ctx); policy != nil {
+	// Uses LivePolicy to resolve from KV store (not stale session context).
+	if policy := auth.LivePolicy(ctx, g.policyResolver); policy != nil {
 		if !policy.CanAccessTool(b.Config.Namespace, toolName) {
+			span.SetAttributes(attribute.Bool("tool.allowed", false))
+			span.SetStatus(codes.Error, "access denied")
 			g.logger.Warn("tool call denied by scope policy",
 				"backend", backendID,
 				"tool", toolName,
@@ -295,6 +358,8 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 			)
 			// Audit: log the denial before returning.
 			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, credInjected, 0, nil)
+			metrics.RecordScopeDenial(b.Config.Namespace, toolName)
+			metrics.RecordToolCall(b.Config.Namespace, toolName, backendID, false, 0)
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -307,7 +372,10 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}
 	}
 
+	span.SetAttributes(attribute.Bool("tool.allowed", true))
+
 	if b.CB != nil && !b.CB.Allow() {
+		span.SetStatus(codes.Error, "circuit breaker open")
 		return &mcp.CallToolResult{
 			IsError: true,
 			Content: []mcp.Content{
@@ -321,12 +389,17 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		Name:      toolName,
 		Arguments: req.Params.Arguments,
 	})
-	latencyMS := time.Since(start).Milliseconds()
+	elapsed := time.Since(start)
+	latencyMS := elapsed.Milliseconds()
+
+	span.SetAttributes(attribute.Int64("tool.latency_ms", latencyMS))
 
 	// Audit: log the outcome after the call (success or backend error).
 	g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, true, credInjected, latencyMS, err)
+	metrics.RecordToolCall(b.Config.Namespace, toolName, backendID, true, elapsed)
 
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		if b.CB != nil {
 			b.CB.RecordFailure()
 		}
@@ -364,6 +437,7 @@ func (g *Gateway) DisconnectBackend(id string) error {
 		_ = b.Session.Close()
 	}
 	g.logger.Info("disconnected backend", "id", id)
+	metrics.DecActiveBackends()
 	return nil
 }
 

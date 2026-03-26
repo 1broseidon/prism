@@ -6,30 +6,58 @@ import (
 	"net/http"
 	"runtime"
 	"time"
+
+	"github.com/1broseidon/prism/internal/metrics"
 )
+
+// GroupInfo mirrors authserver.GroupInfo for the admin API boundary.
+type GroupInfo struct {
+	Name   string   `json:"name"`
+	Scopes []string `json:"scopes"`
+	Source string   `json:"source"` // "config" or "dynamic"
+}
+
+// GroupManager is the interface the admin API uses to manage scope groups.
+type GroupManager interface {
+	// ListGroups returns all groups (config + dynamic) with source info.
+	ListGroups() []GroupInfo
+	// GetGroup returns a single group by name, or nil if not found.
+	GetGroup(name string) *GroupInfo
+	// SetGroup creates or updates a dynamic group. Returns error for config groups.
+	SetGroup(name string, scopes []string) error
+	// DeleteGroup removes a dynamic group. Returns error for config groups.
+	DeleteGroup(name string) error
+	// DefaultScopes returns the configured default scopes.
+	DefaultScopes() []string
+	// SetDefaultScopes updates the runtime default scopes.
+	SetDefaultScopes(scopes []string) error
+}
 
 // API exposes admin endpoints.
 type API struct {
 	statusFn      func() any
 	agentsFn      func() []any
-	updateFn      func(string, []string) bool
 	removeFn      func(string) bool
 	removeStaleFn func() int
 	eventsFn      func() []any
 	backendMgr    BackendManager
+	agentMgr      AgentManager
+	groupMgr      GroupManager
 	startedAt     time.Time
 }
 
 // NewAPI creates an admin API.
-func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, updateFn func(string, []string) bool, removeFn func(string) bool, removeStaleFn func() int, eventsFn func() []any) *API {
+// agentMgr and groupMgr are optional — when nil, their endpoints return 503.
+func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, removeFn func(string) bool, removeStaleFn func() int, eventsFn func() []any, agentMgr AgentManager, groupMgr GroupManager) *API {
 	return &API{
 		statusFn:      statusFn,
 		agentsFn:      agentsFn,
-		updateFn:      updateFn,
 		removeFn:      removeFn,
 		removeStaleFn: removeStaleFn,
 		eventsFn:      eventsFn,
 		backendMgr:    backendMgr,
+		agentMgr:      agentMgr,
+		groupMgr:      groupMgr,
 		startedAt:     time.Now(),
 	}
 }
@@ -42,13 +70,53 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /backends", a.handleBackends)
 	mux.HandleFunc("GET /info", a.handleInfo)
 	mux.HandleFunc("GET /agents", a.handleAgents)
-	mux.HandleFunc("PUT /agents/", a.handleUpdateAgent)
+	mux.HandleFunc("GET /agents/", a.handleAgentByPrismID)
+	mux.HandleFunc("PUT /agents/", a.handlePutAgent)
 	mux.HandleFunc("DELETE /agents/stale", a.handleRemoveStaleAgents)
-	mux.HandleFunc("DELETE /agents/", a.handleRemoveAgent)
+	mux.HandleFunc("DELETE /agents/", a.handleDeleteAgent)
 	mux.HandleFunc("GET /events", a.handleEvents)
+	mux.HandleFunc("GET /groups", a.handleListGroups)
+	mux.HandleFunc("GET /groups/", a.handleGetGroup)
+	mux.HandleFunc("PUT /groups/", a.handleSetGroup)
+	mux.HandleFunc("DELETE /groups/", a.handleDeleteGroup)
+	mux.HandleFunc("GET /defaults", a.handleDefaults)
+	mux.HandleFunc("PUT /defaults", a.handleSetDefaults)
 	mux.HandleFunc("POST /backends/", a.handleAddBackend)
 	mux.HandleFunc("DELETE /backends/", a.handleRemoveBackend)
+	if metrics.Enabled() {
+		mux.Handle("GET /metrics", metrics.Handler())
+	}
 	return mux
+}
+
+// handlePutAgent dispatches PUT /agents/{prism_id}/policy to the policy handler.
+func (a *API) handlePutAgent(w http.ResponseWriter, r *http.Request) {
+	a.handleSetAgentPolicy(w, r)
+}
+
+// handleDeleteAgent dispatches DELETE /agents/{id} or DELETE /agents/{prism_id}/policy.
+func (a *API) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	// Route to policy delete if path ends with /policy.
+	if isPolicyPath(r.URL.Path) {
+		a.handleDeleteAgentPolicy(w, r)
+		return
+	}
+	// Otherwise fall through to the legacy remove-agent handler.
+	a.handleRemoveAgent(w, r)
+}
+
+// isPolicyPath returns true if the URL path matches /agents/{id}/policy.
+func isPolicyPath(path string) bool {
+	// Path: /agents/{prism_id}/policy
+	trimmed := path
+	if len(trimmed) > 0 && trimmed[len(trimmed)-1] == '/' {
+		trimmed = trimmed[:len(trimmed)-1]
+	}
+	return len(trimmed) > len("/agents/") && hasSuffix(trimmed, "/policy")
+}
+
+func hasSuffix(s, suffix string) bool {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, _ *http.Request) {

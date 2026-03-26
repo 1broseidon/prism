@@ -25,8 +25,55 @@ type Claims struct {
 	Audience string `json:"aud"`
 	Scope    string `json:"scope"`
 	ClientID string `json:"client_id,omitempty"`
+	PrismID  string `json:"prism_id,omitempty"` // Audit enrichment only — gateway MUST ignore.
+	TokenGen int64  `json:"token_gen,omitempty"`
 	Exp      int64  `json:"exp"`
 	Iat      int64  `json:"iat"`
+}
+
+// GenerationChecker validates token generation counters.
+type GenerationChecker interface {
+	GetTokenGeneration(clientID string) int64
+}
+
+// CachedGenerationChecker wraps a GenerationChecker with a per-client TTL cache.
+type CachedGenerationChecker struct {
+	inner GenerationChecker
+	mu    sync.RWMutex
+	cache map[string]cachedGen
+	ttl   time.Duration
+}
+
+type cachedGen struct {
+	gen     int64
+	fetched time.Time
+}
+
+// NewCachedGenerationChecker creates a generation checker that caches lookups for ttl.
+func NewCachedGenerationChecker(inner GenerationChecker, ttl time.Duration) *CachedGenerationChecker {
+	return &CachedGenerationChecker{
+		inner: inner,
+		cache: make(map[string]cachedGen),
+		ttl:   ttl,
+	}
+}
+
+// GetTokenGeneration returns the current generation for a client, using the cache when fresh.
+func (c *CachedGenerationChecker) GetTokenGeneration(clientID string) int64 {
+	c.mu.RLock()
+	if entry, ok := c.cache[clientID]; ok && time.Since(entry.fetched) < c.ttl {
+		c.mu.RUnlock()
+		return entry.gen
+	}
+	c.mu.RUnlock()
+
+	gen := c.inner.GetTokenGeneration(clientID)
+
+	c.mu.Lock()
+	c.cache[clientID] = cachedGen{gen: gen, fetched: time.Now()}
+	c.mu.Unlock()
+
+	return gen
 }
 
 // TokenValidatorConfig configures the JWT token validator.
@@ -55,13 +102,19 @@ type TokenValidatorConfig struct {
 	// Tokens older than this are rejected even if not expired.
 	// Zero means no max age check (only exp is checked).
 	MaxTokenAge time.Duration `json:"max_token_age,omitempty"`
+
+	// GenerationChecker validates that token generation counters are current.
+	// When set, tokens with a stale token_gen claim are rejected, forcing
+	// clients to re-authenticate after policy changes.
+	GenerationChecker GenerationChecker `json:"-"`
 }
 
 // TokenValidator validates OAuth 2.1 JWT access tokens.
 type TokenValidator struct {
-	cfg    TokenValidatorConfig
-	keySet *jwksKeySet
-	parser *jwt.Parser
+	cfg        TokenValidatorConfig
+	keySet     *jwksKeySet
+	parser     *jwt.Parser
+	genChecker GenerationChecker
 }
 
 // NewTokenValidator creates a token validator.
@@ -87,6 +140,7 @@ func NewTokenValidator(cfg *TokenValidatorConfig) *TokenValidator {
 			jwt.WithIssuedAt(),
 			jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}),
 		),
+		genChecker: cfg.GenerationChecker,
 	}
 }
 
@@ -119,6 +173,10 @@ func (v *TokenValidator) Validate(ctx context.Context, tokenString string) (*Cla
 		return nil, nil, err
 	}
 
+	if err := v.checkTokenGeneration(mapClaims); err != nil {
+		return nil, nil, err
+	}
+
 	return claims, NewPolicy(claims.Scope), nil
 }
 
@@ -137,6 +195,12 @@ func extractClaims(mc jwt.MapClaims) *Claims {
 	}
 	if clientID, ok := mc["client_id"].(string); ok {
 		claims.ClientID = clientID
+	}
+	if prismID, ok := mc["prism_id"].(string); ok {
+		claims.PrismID = prismID
+	}
+	if tg, ok := mc["token_gen"].(float64); ok {
+		claims.TokenGen = int64(tg)
 	}
 
 	switch aud := mc["aud"].(type) {
@@ -183,6 +247,30 @@ func (v *TokenValidator) checkRequiredScopes(scopeStr string) error {
 		if _, ok := granted[required]; !ok {
 			return fmt.Errorf("missing required scope %q", required)
 		}
+	}
+	return nil
+}
+
+// checkTokenGeneration rejects tokens whose generation counter is behind the
+// current generation stored in the KV store. Tokens without a token_gen claim
+// (e.g. external IdP tokens) are allowed through.
+func (v *TokenValidator) checkTokenGeneration(mc jwt.MapClaims) error {
+	if v.genChecker == nil {
+		return nil
+	}
+	tg, ok := mc["token_gen"].(float64)
+	if !ok {
+		// No token_gen claim — external IdP token or static client. Skip.
+		return nil
+	}
+	clientID, _ := mc["client_id"].(string)
+	if clientID == "" {
+		return nil
+	}
+	tokenGen := int64(tg)
+	currentGen := v.genChecker.GetTokenGeneration(clientID)
+	if tokenGen < currentGen {
+		return fmt.Errorf("stale_token: policy updated, re-authenticate to get new scopes")
 	}
 	return nil
 }

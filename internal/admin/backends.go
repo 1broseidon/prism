@@ -20,6 +20,9 @@ type BackendConfig struct {
 type BackendManager interface {
 	AddBackend(ctx context.Context, id string, cfg BackendConfig) error
 	RemoveBackend(id string) error
+	// NotifyToolsChanged sends tools/list_changed to all MCP sessions,
+	// causing clients to re-fetch their tool list with current policy.
+	NotifyToolsChanged()
 }
 
 func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {

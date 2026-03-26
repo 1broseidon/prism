@@ -13,9 +13,21 @@
 package auth
 
 import (
+	"context"
 	"fmt"
+	"path"
 	"strings"
+	"sync"
+	"time"
 )
+
+// PolicyResolver resolves live policy for a client, bypassing stale session context.
+// Implementations should cache results to avoid per-request KV reads.
+type PolicyResolver interface {
+	// ResolvePolicy returns the current effective policy for a client.
+	// Returns nil if the client has no policy (open access or unknown client).
+	ResolvePolicy(clientID, prismID string) *Policy
+}
 
 // Policy defines what a client is allowed to do based on granted scopes.
 //
@@ -39,6 +51,8 @@ func NewPolicy(scopeString string) *Policy {
 // A scope of "namespace:*" grants access to all tools in that namespace.
 // A scope of "namespace:tool" grants access to that specific tool.
 // A scope of "*" grants access to everything (superuser — use with caution).
+// A scope containing glob characters (e.g. "fs:read*") is matched using
+// path.Match against the full "namespace:tool" string.
 func (p *Policy) CanAccessTool(namespace, tool string) bool {
 	if p == nil || len(p.AllowedScopes) == 0 {
 		return false
@@ -54,9 +68,20 @@ func (p *Policy) CanAccessTool(namespace, tool string) bool {
 		return true
 	}
 
-	// Specific tool
-	if _, ok := p.AllowedScopes[namespace+":"+tool]; ok {
+	full := namespace + ":" + tool
+
+	// Specific tool (exact match)
+	if _, ok := p.AllowedScopes[full]; ok {
 		return true
+	}
+
+	// Glob pattern match — only reached if exact/wildcard fast paths miss.
+	for scope := range p.AllowedScopes {
+		if strings.ContainsAny(scope, "*?[") {
+			if matched, _ := path.Match(scope, full); matched {
+				return true
+			}
+		}
 	}
 
 	return false
@@ -67,6 +92,66 @@ func (p *Policy) CanAccessTool(namespace, tool string) bool {
 // but calls are still gated per-tool.
 func (p *Policy) CanListTools() bool {
 	return p != nil && len(p.AllowedScopes) > 0
+}
+
+// LivePolicy returns the current effective policy for the request.
+// If a PolicyResolver is provided and claims are available in the context,
+// it resolves live policy (bypassing stale session context).
+// Falls back to PolicyFromContext if no resolver is available.
+func LivePolicy(ctx context.Context, resolver PolicyResolver) *Policy {
+	claims := ClaimsFromContext(ctx)
+	if resolver != nil && claims != nil && claims.ClientID != "" {
+		if p := resolver.ResolvePolicy(claims.ClientID, claims.PrismID); p != nil {
+			return p
+		}
+	}
+	// Fallback: use the policy from context (set at HTTP auth time).
+	return PolicyFromContext(ctx)
+}
+
+// CachedPolicyResolver wraps a PolicyResolver with a per-client TTL cache.
+type CachedPolicyResolver struct {
+	inner PolicyResolver
+	mu    sync.RWMutex
+	cache map[string]cachedPolicy
+	ttl   time.Duration
+}
+
+type cachedPolicy struct {
+	policy  *Policy
+	fetched time.Time
+}
+
+// NewCachedPolicyResolver creates a cached wrapper around a PolicyResolver.
+func NewCachedPolicyResolver(inner PolicyResolver, ttl time.Duration) *CachedPolicyResolver {
+	return &CachedPolicyResolver{
+		inner: inner,
+		cache: make(map[string]cachedPolicy),
+		ttl:   ttl,
+	}
+}
+
+// ResolvePolicy returns cached policy or fetches from inner resolver.
+func (c *CachedPolicyResolver) ResolvePolicy(clientID, prismID string) *Policy {
+	key := clientID
+	if prismID != "" {
+		key = prismID // PrismID is more stable for DCR agents
+	}
+
+	c.mu.RLock()
+	if cached, ok := c.cache[key]; ok && time.Since(cached.fetched) < c.ttl {
+		c.mu.RUnlock()
+		return cached.policy
+	}
+	c.mu.RUnlock()
+
+	p := c.inner.ResolvePolicy(clientID, prismID)
+
+	c.mu.Lock()
+	c.cache[key] = cachedPolicy{policy: p, fetched: time.Now()}
+	c.mu.Unlock()
+
+	return p
 }
 
 // Describe returns a human-readable description of the policy.

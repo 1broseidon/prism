@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/1broseidon/prism/internal/authserver"
+	"github.com/1broseidon/prism/internal/telemetry"
 )
 
 func main() {
@@ -21,6 +23,9 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
+
+	shutdownTracer := telemetry.Init("prism-auth", logger)
+	defer func() { _ = shutdownTracer(context.Background()) }()
 
 	cfg, err := authserver.LoadConfig(*configPath)
 	if err != nil {

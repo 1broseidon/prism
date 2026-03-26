@@ -23,6 +23,9 @@ type Entry struct {
 	Subject string `json:"subject"`
 	// ClientID is the OAuth client_id claim. Empty if unauthenticated.
 	ClientID string `json:"client_id"`
+	// PrismID is the stable agent identity from the JWT prism_id claim.
+	// Present only for DCR agents that have been consented. For audit enrichment only.
+	PrismID string `json:"prism_id,omitempty"`
 	// Namespace is the backend namespace (e.g. "github").
 	Namespace string `json:"namespace"`
 	// Tool is the unqualified tool name (e.g. "create_issue").
@@ -106,6 +109,7 @@ func (l *Logger) LogCall(ctx context.Context, namespace, tool, backend string, a
 	if claims := auth.ClaimsFromContext(ctx); claims != nil {
 		entry.Subject = claims.Subject
 		entry.ClientID = claims.ClientID
+		entry.PrismID = claims.PrismID
 	}
 
 	if callErr != nil {

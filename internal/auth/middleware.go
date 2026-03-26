@@ -4,6 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+
+	"github.com/1broseidon/prism/internal/metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type contextKey string
@@ -32,24 +38,44 @@ func PolicyFromContext(ctx context.Context) *Policy {
 //
 // On 403, it returns insufficient_scope with the required scopes.
 func Middleware(validator *TokenValidator, resourceURI string) func(http.Handler) http.Handler {
+	tracer := otel.Tracer("prism.auth")
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, span := tracer.Start(r.Context(), "prism.auth.validate",
+				trace.WithSpanKind(trace.SpanKindInternal),
+			)
+			defer span.End()
+
 			token, err := ExtractBearerToken(r)
 			if err != nil {
+				span.SetAttributes(attribute.String("auth.result", "error"))
+				span.SetStatus(codes.Error, err.Error())
+				metrics.RecordAuthValidation("error")
 				writeWWWAuthenticate(w, resourceURI, http.StatusUnauthorized,
 					"", err.Error())
 				return
 			}
 
-			claims, policy, err := validator.Validate(r.Context(), token)
+			claims, policy, err := validator.Validate(ctx, token)
 			if err != nil {
+				span.SetAttributes(attribute.String("auth.result", "error"))
+				span.SetStatus(codes.Error, err.Error())
+				metrics.RecordAuthValidation("error")
 				writeWWWAuthenticate(w, resourceURI, http.StatusUnauthorized,
 					"", err.Error())
 				return
 			}
+
+			span.SetAttributes(
+				attribute.String("auth.client_id", claims.ClientID),
+				attribute.Int("auth.scope_count", len(policy.AllowedScopes)),
+				attribute.String("auth.result", "ok"),
+			)
+			metrics.RecordAuthValidation("ok")
 
 			// Inject claims and policy into request context
-			ctx := context.WithValue(r.Context(), claimsKey, claims)
+			ctx = context.WithValue(ctx, claimsKey, claims)
 			ctx = context.WithValue(ctx, policyKey, policy)
 
 			next.ServeHTTP(w, r.WithContext(ctx))

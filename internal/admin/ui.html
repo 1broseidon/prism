@@ -3,206 +3,516 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prism Admin</title>
+<title>Prism | System Monitor</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  @import url('https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #fafafa;
+    --fg: #111111;
+    --muted: #737373;
+    --faint: #d4d4d4;
+    --line: #e5e5e5;
+    --active: #10b981;
+    --denied: #ef4444;
+    --hover: rgba(0,0,0,0.015);
+    --tag-bg: #ffffff;
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-mono: 'Azeret Mono', 'SF Mono', 'Consolas', monospace;
+  }
+
+  .dark {
+    --bg: #0a0a0a;
+    --fg: #e5e5e5;
+    --muted: #737373;
+    --faint: #2a2a2a;
+    --line: #1f1f1f;
+    --active: #34d399;
+    --denied: #f87171;
+    --hover: rgba(255,255,255,0.03);
+    --tag-bg: #141414;
+  }
+
+  ::selection { background: var(--fg); color: var(--bg); }
+
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 0; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
   body {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    background: #000; color: #e0e0e0; font-size: 13px; line-height: 1.5;
+    font-family: var(--font-sans);
+    background: var(--bg); color: var(--fg);
+    font-size: 13px; line-height: 1.5;
+    display: flex; justify-content: center;
+    overflow: hidden;
   }
+
+  .container {
+    width: 100%; max-width: 1440px;
+    padding: 32px; display: flex;
+    flex-direction: column; height: 100vh;
+  }
+
+  /* Header */
   header {
-    padding: 16px 24px; border-bottom: 1px solid #222;
-    display: flex; align-items: center; gap: 16px;
+    display: flex; justify-content: space-between; align-items: flex-end;
+    padding-bottom: 24px; border-bottom: 1px solid var(--fg);
+    flex-shrink: 0;
   }
-  header h1 { font-size: 16px; font-weight: 600; color: #fff; }
-  header .status { font-size: 12px; color: #4a4; }
-  header .info { font-size: 12px; color: #666; margin-left: auto; }
-  .grid {
-    display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr;
-    gap: 1px; background: #222; min-height: calc(100vh - 53px);
+  .header-left { display: flex; align-items: center; gap: 24px; }
+  header h1 {
+    font-size: 30px; font-weight: 600;
+    letter-spacing: -0.04em; line-height: 1;
   }
-  .panel { background: #000; padding: 16px 24px; overflow: auto; }
-  .panel.events { grid-column: 1 / -1; max-height: 45vh; }
-  .panel h2 {
-    font-size: 12px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.1em; color: #666; margin-bottom: 12px;
+  .status-badge {
+    display: flex; align-items: center; gap: 6px; margin-top: 4px;
   }
-  .panel h2 .count { color: #888; font-weight: 400; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font-size: 11px; color: #555; font-weight: 500;
-       padding: 4px 8px; border-bottom: 1px solid #1a1a1a; text-transform: uppercase; }
-  td { padding: 6px 8px; border-bottom: 1px solid #111; vertical-align: top; }
-  .tag {
-    display: inline-block; padding: 1px 6px; border-radius: 3px;
-    font-size: 11px; margin: 1px 2px;
+  .status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--active);
   }
-  .tag.scope { background: #1a2a1a; color: #6a6; }
-  .tag.group { background: #1a1a2a; color: #66a; }
-  .tag.dynamic { background: #2a2a1a; color: #aa6; }
-  .tag.static { background: #1a1a1a; color: #666; }
-  .tag.denied { background: #2a1a1a; color: #a66; }
-  .tag.allowed { background: #1a2a1a; color: #6a6; }
-  .event-row { font-size: 12px; }
-  .event-row td { padding: 3px 8px; }
-  .event-row .ts { color: #555; white-space: nowrap; }
-  .event-row .agent { color: #6af; }
-  .event-row .tool { color: #fff; }
-  .event-row .latency { color: #555; }
-  .empty { color: #444; font-style: italic; padding: 24px 0; }
-  .actions { display: flex; gap: 8px; margin-top: 12px; }
-  button {
-    background: #1a1a1a; color: #aaa; border: 1px solid #333;
-    padding: 4px 12px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 12px;
+  .status-dot.error { background: var(--denied); }
+  .status-text {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--muted); letter-spacing: -0.02em;
   }
-  button:hover { background: #222; color: #fff; }
-  input[type="text"] {
-    background: #111; color: #e0e0e0; border: 1px solid #333;
-    padding: 4px 8px; border-radius: 3px; font-family: inherit; font-size: 12px; width: 200px;
+  .header-meta {
+    display: flex; gap: 20px;
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--muted); letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
   }
-  .backend-transport { color: #555; }
+
+  /* Main layout */
+  main {
+    flex: 1; display: flex; flex-direction: column;
+    margin-top: 32px; gap: 40px; overflow: hidden;
+  }
+  .sections {
+    display: flex; flex-direction: column; gap: 24px; flex-shrink: 0;
+  }
+
+  /* Section headers */
+  .section-header {
+    display: flex; justify-content: space-between;
+    align-items: flex-end; margin-bottom: 16px;
+  }
+  .section-title {
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.15em;
+    color: var(--muted);
+  }
+  .section-btn {
+    font-family: var(--font-mono); font-size: 10px;
+    border: 1px solid var(--line); padding: 4px 8px;
+    background: transparent; color: var(--muted);
+    cursor: pointer; transition: all 0.15s;
+  }
+  .section-btn:hover { color: var(--fg); border-color: var(--fg); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  thead tr { border-bottom: 2px solid var(--faint); }
+  th {
+    text-align: left; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--muted); padding-bottom: 8px;
+  }
+  th.right { text-align: right; }
+  tbody tr { border-bottom: 1px solid var(--line); }
+  tbody tr:hover { background: var(--hover); }
+  td { padding: 12px 0; padding-right: 16px; vertical-align: middle; }
+  td.right { text-align: right; padding-right: 0; }
+  td.vtop { vertical-align: top; }
+
+  /* Agent cells */
+  .agent-name-row { display: flex; align-items: baseline; gap: 8px; }
+  .agent-label { font-weight: 500; white-space: nowrap; }
+  .agent-ctx {
+    font-size: 10px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .agent-name-row .copy-id {
+    font-family: var(--font-mono); font-size: 9px;
+    color: var(--muted); opacity: 0; cursor: pointer;
+    border: 1px solid var(--line); padding: 0 4px;
+    background: var(--tag-bg); transition: opacity 0.15s;
+    white-space: nowrap; margin-left: auto; flex-shrink: 0;
+  }
+  tr:hover .copy-id { opacity: 0.6; }
+  .copy-id:hover { opacity: 1 !important; }
+  .copy-id.copied { color: var(--active); border-color: var(--active); }
+
+  /* Status — compact single line */
+  .status-cell { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .status-cell .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--active); flex-shrink: 0;
+  }
+  .status-cell .dot.faded { opacity: 0.4; }
+  .status-cell .dot.stale { background: var(--denied); }
+  .status-cell .time {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--muted);
+  }
+  .status-cell .time.fresh { color: var(--active); }
+  .status-cell .time.stale { color: var(--denied); }
+
+  /* Scope tags — read mode */
+  .scope-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .scope-list.editable { cursor: pointer; }
+  .scope-list.editable:hover .scope-tag { border-color: var(--muted); }
+  .scope-tag {
+    border: 1px solid var(--line); padding: 0 4px;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--muted); line-height: 1.6;
+    transition: border-color 0.15s;
+  }
+  .scope-add-cta {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--muted); opacity: 0.5; cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .scope-add-cta:hover { opacity: 1; }
+  .scope-lock {
+    font-size: 9px; color: var(--muted); opacity: 0.4;
+    margin-left: 2px;
+  }
+  .policy-summary {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--muted);
+  }
+  .scope-pending {
+    font-family: var(--font-mono); font-size: 9px;
+    color: var(--muted); opacity: 0.6;
+    margin-left: 4px; font-style: italic;
+  }
+
+  /* Scope editor — edit mode */
+  .scope-editor {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    align-items: center; position: relative;
+  }
+  .scope-pill {
+    display: inline-flex; align-items: center; gap: 2px;
+    border: 1px solid var(--active); padding: 0 2px 0 4px;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--fg); line-height: 1.6; background: var(--tag-bg);
+  }
+  .scope-pill .x {
+    cursor: pointer; color: var(--muted); padding: 0 2px;
+    font-size: 11px; line-height: 1;
+    transition: color 0.15s;
+  }
+  .scope-pill .x:hover { color: var(--denied); }
+  .scope-input {
+    font-family: var(--font-mono); font-size: 10px;
+    border: none; outline: none; background: transparent;
+    color: var(--fg); width: 100px; padding: 0;
+    line-height: 1.6;
+  }
+  .scope-input::placeholder { color: var(--muted); opacity: 0.5; }
+
+  /* Autocomplete dropdown */
+  .scope-suggest {
+    position: absolute; top: 100%; left: 0;
+    margin-top: 4px; z-index: 20;
+    background: var(--bg); border: 1px solid var(--line);
+    min-width: 160px; max-height: 140px; overflow-y: auto;
+  }
+  .scope-suggest-item {
+    font-family: var(--font-mono); font-size: 10px;
+    padding: 4px 8px; cursor: pointer; color: var(--muted);
+  }
+  .scope-suggest-item:hover,
+  .scope-suggest-item.selected {
+    background: var(--hover); color: var(--fg);
+  }
+  .scope-suggest:empty { display: none; }
+
+  /* Save indicator */
+  .scope-saving {
+    font-family: var(--font-mono); font-size: 9px;
+    color: var(--active); margin-left: 4px;
+  }
+
+  /* Remove button — hidden until hover */
+  .remove-btn {
+    font-family: var(--font-mono); font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--muted); background: transparent;
+    border: none; cursor: pointer; padding: 0;
+    opacity: 0; transition: opacity 0.15s;
+  }
+  tr:hover .remove-btn { opacity: 1; }
+  .remove-btn:hover { color: var(--denied); }
+
+  /* Backends section */
+  .backend-name { font-family: var(--font-mono); font-weight: 500; }
+  .backend-ns-suffix {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--muted); margin-left: 4px;
+  }
+  .backend-transport { font-family: var(--font-mono); color: var(--muted); font-size: 12px; }
+  .backends-summary {
+    display: flex; align-items: center; gap: 8px;
+    cursor: pointer; padding: 8px 0;
+  }
+  .backends-summary .names {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--muted);
+  }
+  .backends-summary .expand-arrow {
+    font-size: 10px; color: var(--muted); margin-left: auto;
+  }
+
+  /* Global policy */
+  .global-policy {
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .global-scopes {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    align-items: center;
+  }
+
+  /* Events section */
+  .events-section {
+    flex: 1; display: flex; flex-direction: column;
+    padding-top: 32px; border-top: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .events-scroll { flex: 1; overflow-y: auto; padding-right: 16px; }
+  .events-table td {
+    padding: 8px 0; padding-right: 16px;
+    font-family: var(--font-mono); font-size: 11px;
+  }
+  .events-table thead { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+  .events-table th { background: var(--bg); }
+  .ev-ts {
+    color: var(--muted); opacity: 0.6;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .ev-agent { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev-tool-ns { color: var(--muted); }
+  .ev-tool-name { color: var(--fg); }
+  .ev-status { white-space: nowrap; }
+  .ev-status .dot {
+    display: inline-block; width: 5px; height: 5px;
+    border-radius: 50%; background: var(--active);
+  }
+  .ev-status .denied-text { color: var(--denied); font-weight: 500; }
+  .ev-latency { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+
+  /* Empty states */
+  .empty-state {
+    color: var(--muted); font-style: italic;
+    padding: 24px 0; font-size: 12px;
+  }
+
+  /* Groups bar */
+  .groups-bar { flex-shrink: 0; }
+  .groups-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .group-card {
+    display: flex; align-items: center; gap: 6px;
+    border: 1px solid var(--line); padding: 4px 8px;
+    font-family: var(--font-mono); font-size: 11px;
+  }
+  .group-name { font-weight: 500; margin-right: 4px; }
+  .group-scope {
+    font-size: 10px; color: var(--muted);
+    border: 1px solid var(--line); padding: 0 3px;
+  }
+  .group-action {
+    font-size: 9px; color: var(--muted); cursor: pointer;
+    border: none; background: none; margin-left: 4px;
+  }
+  .group-action:hover { color: var(--fg); }
+  .group-action.delete:hover { color: var(--denied); }
+  .group-source {
+    font-size: 9px; color: var(--muted); opacity: 0.5;
+    font-style: italic;
+  }
+  .group-editor {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    align-items: center; flex: 1;
+  }
+
+  /* Policy breakdown */
+  .policy-breakdown {
+    padding: 12px 0 12px 24px;
+    border-bottom: 1px solid var(--line);
+  }
+  .policy-row {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 4px 0; font-size: 11px;
+  }
+  .policy-label {
+    font-family: var(--font-mono); font-size: 9px;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--muted); width: 70px; flex-shrink: 0;
+  }
+  .policy-scopes {
+    display: flex; flex-wrap: wrap; gap: 4px; flex: 1;
+  }
+  .group-chip {
+    border: 1px solid var(--active); padding: 0 6px;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--active); cursor: pointer; line-height: 1.6;
+  }
+  .group-chip:hover { background: var(--active); color: var(--bg); }
+  .policy-effective {
+    border-top: 1px solid var(--line); margin-top: 4px; padding-top: 8px;
+  }
+  .add-btn {
+    font-family: var(--font-mono); font-size: 9px;
+    color: var(--muted); opacity: 0.5; cursor: pointer;
+    border: none; background: none; padding: 0;
+  }
+  .add-btn:hover { opacity: 1; }
+  .expand-indicator {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--muted); margin-right: 4px; cursor: pointer;
+    user-select: none;
+  }
+  .group-dropdown {
+    position: absolute; z-index: 20;
+    background: var(--bg); border: 1px solid var(--line);
+    min-width: 120px; max-height: 140px; overflow-y: auto;
+  }
+  .group-dropdown-item {
+    font-family: var(--font-mono); font-size: 10px;
+    padding: 4px 8px; cursor: pointer; color: var(--muted);
+  }
+  .group-dropdown-item:hover { background: var(--hover); color: var(--fg); }
 </style>
 </head>
 <body>
-<header>
-  <h1>prism</h1>
-  <span class="status" id="status">connecting...</span>
-  <span class="info" id="info"></span>
-</header>
-<div class="grid">
-  <div class="panel" id="agents-panel">
-    <h2>Agents <span class="count" id="agent-count"></span> <button onclick="cleanStale()" style="float:right;font-size:11px">Clean stale</button></h2>
-    <table>
-      <thead><tr><th>Agent</th><th>Prism ID</th><th>Status</th><th>Scopes</th><th></th></tr></thead>
-      <tbody id="agents-body"></tbody>
-    </table>
-    <div class="empty" id="agents-empty">No agents registered yet. Agents self-register via OAuth DCR.</div>
-  </div>
-  <div class="panel" id="backends-panel">
-    <h2>Backends <span class="count" id="backend-count"></span></h2>
-    <table>
-      <thead><tr><th>ID</th><th>Namespace</th><th>Transport</th></tr></thead>
-      <tbody id="backends-body"></tbody>
-    </table>
-  </div>
-  <div class="panel events">
-    <h2>Events <span class="count" id="event-count"></span></h2>
-    <table>
-      <thead><tr><th>Time</th><th>Agent</th><th>Tool</th><th>Status</th><th>Latency</th></tr></thead>
-      <tbody id="events-body"></tbody>
-    </table>
-    <div class="empty" id="events-empty">Waiting for tool calls...</div>
-  </div>
-</div>
-<script>
-const $ = s => document.querySelector(s);
-let agentNames = {}; // client_id → description cache
+<div class="container">
 
+  <header>
+    <div class="header-left">
+      <h1>prism</h1>
+      <div class="status-badge">
+        <div class="status-dot" id="status-dot"></div>
+        <span class="status-text" id="status-text">connecting...</span>
+      </div>
+    </div>
+    <div class="header-meta" id="info"></div>
+  </header>
+
+  <main>
+    <div class="sections">
+      <!-- Global Policy -->
+      <div class="global-policy">
+        <div class="section-header">
+          <span class="section-title">Default Scopes</span>
+        </div>
+        <div class="global-scopes" id="global-scopes"></div>
+      </div>
+
+      <!-- Groups -->
+      <div class="groups-bar" id="groups-bar" style="display:none">
+        <div class="section-header">
+          <span class="section-title">Groups <span id="group-count"></span></span>
+          <button class="section-btn" onclick="addGroup()">+ Group</button>
+        </div>
+        <div id="groups-list" class="groups-list"></div>
+      </div>
+
+      <!-- Agents (full width) -->
+      <div>
+        <div class="section-header">
+          <span class="section-title">Agents <span id="agent-count"></span></span>
+          <button class="section-btn" onclick="cleanStale()">Clean stale</button>
+        </div>
+        <table>
+          <thead><tr>
+            <th style="width:40%">Agent</th>
+            <th style="width:12%">Last seen</th>
+            <th>Policy</th>
+            <th style="width:5%"></th>
+          </tr></thead>
+          <tbody id="agents-body"></tbody>
+        </table>
+        <div class="empty-state" id="agents-empty">No agents registered. Agents self-register via OAuth DCR.</div>
+      </div>
+
+      <!-- Backends (collapsible) -->
+      <div class="backends-section">
+        <div class="backends-summary" onclick="toggleBackends()">
+          <span class="section-title">Backends <span id="backend-count"></span></span>
+          <span class="names" id="backend-names"></span>
+          <span class="expand-arrow" id="backends-arrow">&#9656;</span>
+        </div>
+        <div id="backends-detail" style="display:none">
+          <table>
+            <thead><tr>
+              <th>Name</th>
+              <th style="width:35%">Transport</th>
+            </tr></thead>
+            <tbody id="backends-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Events (scrollable, fills remaining space) -->
+    <div class="events-section">
+      <div class="section-header">
+        <span class="section-title">Events <span id="event-count"></span></span>
+      </div>
+      <div class="events-scroll">
+        <table class="events-table">
+          <thead><tr>
+            <th style="width:8%">Time</th>
+            <th style="width:18%">Agent</th>
+            <th>Tool</th>
+            <th style="width:7%">Status</th>
+            <th style="width:8%" class="right">Latency</th>
+          </tr></thead>
+          <tbody id="events-body"></tbody>
+        </table>
+        <div class="empty-state" id="events-empty">Waiting for tool calls...</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+// --- Theme ---
+function applyTheme() {
+  document.documentElement.classList.toggle('dark',
+    window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+applyTheme();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+
+const $ = s => document.querySelector(s);
+
+// --- State ---
+let agentNames = {};         // client_id → display name (for events)
+let cachedAgents = [];       // latest agent data from API
+let cachedGroups = [];       // latest group data from API
+let knownNamespaces = [];    // backend namespaces for autocomplete
+let editState = null;        // { prismId, scopes[], original[], defaults[], td }
+let expandedAgents = {};     // prism_id → true if expanded
+let groupEditState = null;   // { name, scopes[], card }
+let prevAgentHash = '';      // fingerprint for diff detection
+let prevEventHash = '';
+let prevGroupHash = '';
+let backendsExpanded = false; // backends section collapsed by default
+let globalDefaults = [];      // current default scopes from server
+let defaultsEditState = null; // { scopes[], original[], container }
+let prevDefaultsHash = '';    // fingerprint for change detection
+
+// --- Helpers ---
 async function fetchJSON(path) {
   const r = await fetch(path);
   return r.json();
-}
-
-async function refreshInfo() {
-  try {
-    const info = await fetchJSON('/info');
-    $('#status').textContent = 'running';
-    $('#info').textContent = `v${info.version} \u00b7 uptime ${info.uptime} \u00b7 ${info.goroutines} goroutines`;
-  } catch {
-    $('#status').textContent = 'disconnected';
-    $('#status').style.color = '#a44';
-  }
-}
-
-async function refreshAgents() {
-  try {
-    const agents = await fetchJSON('/agents');
-    const body = $('#agents-body');
-    body.innerHTML = '';
-    $('#agents-empty').style.display = agents.length ? 'none' : 'block';
-    $('#agent-count').textContent = `(${agents.length})`;
-    agentNames = {};
-    agents.forEach(a => {
-      const displayName = a.label || a.description || a.client_id;
-      agentNames[a.client_id] = displayName;
-      const tr = document.createElement('tr');
-      const scopes = (a.scopes || []).map(s =>
-        `<span class="tag scope">${esc(s)}</span>`
-      ).join('');
-      const prismID = a.prism_id ? a.prism_id.substring(0, 8) + '...' : '--';
-      const status = getAgentStatus(a);
-      const removeBtn = a.dynamic
-        ? `<button onclick="removeAgent('${esc(a.client_id)}')" style="font-size:11px">remove</button>`
-        : '';
-      tr.innerHTML = `<td>${esc(displayName)}<br><span class="tag static">${esc(a.client_id.substring(0,8))}…</span></td><td><span class="tag static">${esc(prismID)}</span></td><td>${status}</td><td>${scopes}</td><td>${removeBtn}</td>`;
-      body.appendChild(tr);
-    });
-  } catch {}
-}
-
-async function refreshBackends() {
-  try {
-    const backends = await fetchJSON('/backends');
-    const body = $('#backends-body');
-    body.innerHTML = '';
-    $('#backend-count').textContent = `(${backends.length})`;
-    backends.forEach(b => {
-      const tr = document.createElement('tr');
-      const transport = b.url
-        ? `<span class="backend-transport">${esc(b.url)}</span>`
-        : '<span class="backend-transport">stdio</span>';
-      tr.innerHTML = `<td>${esc(b.id)}</td><td>${esc(b.namespace)}</td><td>${transport}</td>`;
-      body.appendChild(tr);
-    });
-  } catch {}
-}
-
-async function refreshEvents() {
-  try {
-    const events = await fetchJSON('/events');
-    const body = $('#events-body');
-    body.innerHTML = '';
-    $('#events-empty').style.display = events.length ? 'none' : 'block';
-    $('#event-count').textContent = `(${events.length})`;
-    events.forEach(e => {
-      const tr = document.createElement('tr');
-      tr.className = 'event-row';
-      const ts = e.ts ? e.ts.split('T')[1].replace('Z','') : '';
-      const status = e.allowed
-        ? '<span class="tag allowed">allowed</span>'
-        : '<span class="tag denied">denied</span>';
-      const latency = e.allowed ? `${e.latency_ms}ms` : '-';
-      tr.innerHTML = `
-        <td class="ts">${esc(ts)}</td>
-        <td class="agent">${esc(agentNames[e.client_id] || e.client_id || 'anonymous')}</td>
-        <td class="tool">${esc(e.namespace)}__${esc(e.tool)}</td>
-        <td>${status}</td>
-        <td class="latency">${latency}</td>
-      `;
-      body.appendChild(tr);
-    });
-  } catch {}
-}
-
-function getAgentStatus(a) {
-  const ts = a.last_used_at || a.created_at;
-  if (!ts) return '<span class="tag dynamic">new</span>';
-  const age = Date.now() - new Date(ts).getTime();
-  const days = Math.floor(age / 86400000);
-  const hours = Math.floor(age / 3600000);
-  if (days > 7) return `<span class="tag denied">stale (${days}d)</span>`;
-  if (hours > 0) return `<span class="tag allowed">active (${hours}h ago)</span>`;
-  return '<span class="tag allowed">active (now)</span>';
-}
-
-async function removeAgent(id) {
-  await fetch('/agents/' + id, { method: 'DELETE' });
-  refreshAgents();
-}
-
-async function cleanStale() {
-  const r = await fetch('/agents/stale', { method: 'DELETE' });
-  const d = await r.json();
-  refreshAgents();
 }
 
 function esc(s) {
@@ -211,15 +521,982 @@ function esc(s) {
   return d.innerHTML;
 }
 
-// Init.
+function fmtUptime(raw) {
+  const m = raw.match(/(?:(\d+)h)?(?:(\d+)m)?(?:[\d.]+s)?/);
+  if (!m) return raw;
+  const h = m[1] ? parseInt(m[1]) : 0;
+  const min = m[2] ? parseInt(m[2]) : 0;
+  const sMatch = raw.match(/([\d.]+)s$/);
+  const s = sMatch ? Math.floor(parseFloat(sMatch[1])) : 0;
+  if (h > 24) { const d = Math.floor(h / 24); return `${d}d ${h % 24}h`; }
+  if (h > 0) return `${h}h ${min}m`;
+  if (min > 0) return `${min}m ${s}s`;
+  return `${s}s`;
+}
+
+function fmtAge(ts) {
+  if (!ts) return null;
+  const age = Date.now() - new Date(ts).getTime();
+  if (age < 0) return 'now';
+  const s = Math.floor(age / 1000);
+  if (s < 60) return 'now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function splitLabel(label) {
+  const m = label.match(/^(.+?)\s*\((.+)\)$/);
+  return m ? [m[1], m[2]] : [label, ''];
+}
+
+// Stable fingerprint for change detection (ignores last_used_at for status — that changes every refresh)
+function agentFingerprint(a) {
+  return JSON.stringify([a.client_id, a.label, a.description, a.prism_id, a.scopes, a.dynamic, a.policy, a.breakdown]);
+}
+
+function copyToClipboard(text, el) {
+  navigator.clipboard.writeText(text).then(() => {
+    el.classList.add('copied');
+    const prev = el.textContent;
+    el.textContent = 'copied';
+    setTimeout(() => { el.classList.remove('copied'); el.textContent = prev; }, 1200);
+  });
+}
+
+// --- Scope Editor ---
+
+function getScopeHints() {
+  return knownNamespaces.map(ns => ns + ':*').sort();
+}
+
+function startScopeEdit(agent, td) {
+  if (!agent.dynamic) return;
+  if (editState && editState.prismId === agent.prism_id) return;
+  if (editState) cancelScopeEdit();
+
+  // Server returns effective scopes — use directly.
+  const currentScopes = (agent.scopes || []).filter(s => s !== 'mcp:connect').sort();
+  const defaults = agent.policy ? inferDefaults(agent) : [...currentScopes];
+
+  editState = {
+    prismId: agent.prism_id,
+    clientId: agent.client_id,
+    scopes: [...currentScopes],
+    original: [...currentScopes],
+    defaults,
+    td
+  };
+  renderEditor();
+}
+
+function inferDefaults(agent) {
+  const policy = agent.policy;
+  if (!policy) return (agent.scopes || []).filter(s => s !== 'mcp:connect');
+  const grants = new Set(policy.grant || []);
+  const denies = new Set(policy.deny || []);
+  const current = (agent.scopes || []).filter(s => s !== 'mcp:connect');
+  const defaults = current.filter(s => !grants.has(s));
+  for (const d of denies) defaults.push(d);
+  return [...new Set(defaults)];
+}
+
+function renderEditor() {
+  if (!editState) return;
+  const { scopes, td } = editState;
+
+  td.innerHTML = `
+    <div class="scope-editor">
+      ${scopes.map(s =>
+        `<span class="scope-pill">${esc(s)}<span class="x" data-scope="${esc(s)}">x</span></span>`
+      ).join('')}
+      <input class="scope-input" type="text" placeholder="+ scope" spellcheck="false" autocomplete="off">
+      <div class="scope-suggest"></div>
+    </div>
+  `;
+
+  const input = td.querySelector('.scope-input');
+  const suggest = td.querySelector('.scope-suggest');
+  let selectedIdx = -1;
+
+  input.focus();
+
+  td.querySelectorAll('.x').forEach(x => {
+    x.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editState.scopes = editState.scopes.filter(s => s !== x.dataset.scope);
+      renderEditor();
+    });
+  });
+
+  input.addEventListener('input', () => {
+    selectedIdx = -1;
+    const val = input.value.toLowerCase();
+    suggest.innerHTML = '';
+    if (!val) return;
+    const hints = getScopeHints().filter(h =>
+      h.toLowerCase().includes(val) && !editState.scopes.includes(h)
+    );
+    if (val.includes(':') && !hints.includes(val) && !editState.scopes.includes(val)) {
+      hints.unshift(val);
+    }
+    hints.slice(0, 6).forEach(h => {
+      const div = document.createElement('div');
+      div.className = 'scope-suggest-item';
+      div.dataset.scope = h;
+      div.textContent = h;
+      div.addEventListener('mousedown', (e) => { e.preventDefault(); addScope(h); });
+      suggest.appendChild(div);
+    });
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const items = suggest.querySelectorAll('.scope-suggest-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIdx = Math.min(selectedIdx + 1, items.length - 1);
+      items.forEach((it, i) => it.classList.toggle('selected', i === selectedIdx));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIdx = Math.max(selectedIdx - 1, -1);
+      items.forEach((it, i) => it.classList.toggle('selected', i === selectedIdx));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (selectedIdx >= 0 && items[selectedIdx]) addScope(items[selectedIdx].dataset.scope);
+      else if (input.value.trim()) addScope(input.value.trim());
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelScopeEdit();
+    } else if (e.key === 'Backspace' && !input.value && editState.scopes.length) {
+      editState.scopes.pop();
+      renderEditor();
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (editState && !editState.td.contains(document.activeElement)) saveScopeEdit();
+    }, 200);
+  });
+}
+
+function addScope(scope) {
+  if (!editState || editState.scopes.includes(scope)) return;
+  editState.scopes.push(scope);
+  editState.scopes.sort();
+  renderEditor();
+}
+
+function cancelScopeEdit() {
+  if (!editState) return;
+  const { td, original } = editState;
+  editState = null;
+  td.innerHTML = `<div class="scope-list editable">${
+    original.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('')
+  }</div>`;
+}
+
+async function saveScopeEdit() {
+  if (!editState) return;
+  const { prismId, scopes, original, defaults, td } = editState;
+
+  if (JSON.stringify(scopes) === JSON.stringify(original)) {
+    cancelScopeEdit();
+    return;
+  }
+
+  const desiredSet = new Set(scopes);
+  const defaultSet = new Set(defaults);
+  const grant = scopes.filter(s => !defaultSet.has(s));
+  const deny = defaults.filter(s => !desiredSet.has(s));
+
+  // Preserve existing group assignments — the scope pill editor only changes grant/deny.
+  const agent = cachedAgents.find(a => a.prism_id === prismId);
+  const existingGroups = (agent?.policy?.groups) || [];
+
+  editState = null;
+
+  td.innerHTML = `<div class="scope-list">${
+    scopes.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('')
+  }<span class="scope-saving">saving...</span></div>`;
+
+  try {
+    await fetch(`/agents/${prismId}/policy`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groups: existingGroups, grant, deny })
+    });
+    prevAgentHash = ''; // force full re-render to pick up new state
+    refreshAgents();
+  } catch {
+    const saving = td.querySelector('.scope-saving');
+    if (saving) { saving.textContent = 'error'; saving.style.color = 'var(--denied)'; }
+    setTimeout(() => { prevAgentHash = ''; refreshAgents(); }, 1500);
+  }
+}
+
+// --- Render helpers ---
+
+function renderAgentStatus(a) {
+  const ts = a.last_used_at || a.created_at;
+  if (!ts) return '<div class="status-cell"><div class="dot faded"></div><span class="time">new</span></div>';
+  const age = Date.now() - new Date(ts).getTime();
+  const days = Math.floor(age / 86400000);
+  const label = fmtAge(ts);
+  if (days > 7) return `<div class="status-cell"><div class="dot stale"></div><span class="time stale">${label}</span></div>`;
+  if (Math.floor(age / 60000) < 5) return `<div class="status-cell"><div class="dot"></div><span class="time fresh">${label}</span></div>`;
+  return `<div class="status-cell"><div class="dot faded"></div><span class="time">${label}</span></div>`;
+}
+
+function renderBreakdown(a) {
+  const bd = a.breakdown;
+  if (!bd) return '';
+
+  const defaults = (bd.defaults || []).filter(s => s !== 'mcp:connect');
+  const effective = (bd.effective || []).filter(s => s !== 'mcp:connect').sort();
+  const grants = bd.grants || [];
+  const denies = bd.denies || [];
+  const groups = bd.groups || {};
+
+  // Build group chips
+  const groupNames = Object.keys(groups);
+  const groupHtml = groupNames.map(g =>
+    `<span class="group-chip" data-group="${esc(g)}" data-prism="${esc(a.prism_id)}" title="Click to remove from group">${esc(g)}</span>`
+  ).join('');
+
+  return `
+    <tr class="breakdown-row" data-breakdown-for="${esc(a.client_id)}">
+      <td colspan="4" style="padding:0">
+        <div class="policy-breakdown">
+          <div class="policy-row">
+            <span class="policy-label">defaults</span>
+            <div class="policy-scopes">${defaults.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('') || '<span style="color:var(--muted);font-size:10px;font-style:italic">none</span>'}</div>
+          </div>
+          <div class="policy-row">
+            <span class="policy-label">groups</span>
+            <div class="policy-scopes" style="position:relative">
+              ${groupHtml}
+              <button class="add-btn" data-add-group="${esc(a.prism_id)}">+ group</button>
+            </div>
+          </div>
+          <div class="policy-row">
+            <span class="policy-label">grants</span>
+            <div class="policy-scopes">
+              ${grants.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('')}
+              <button class="add-btn" data-add-grant="${esc(a.prism_id)}">+ grant</button>
+            </div>
+          </div>
+          <div class="policy-row">
+            <span class="policy-label">denies</span>
+            <div class="policy-scopes">
+              ${denies.map(s => `<span class="scope-tag" style="color:var(--denied);border-color:var(--denied)">${esc(s)}</span>`).join('')}
+              <button class="add-btn" data-add-deny="${esc(a.prism_id)}">+ deny</button>
+            </div>
+          </div>
+          <div class="policy-row policy-effective">
+            <span class="policy-label">effective</span>
+            <div class="policy-scopes">${effective.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('')}</div>
+          </div>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+// Compute a one-line policy summary for the collapsed agent row.
+function policyLabel(agent) {
+  if (!agent.policy) return 'defaults';
+  const parts = [];
+  const groups = agent.policy.groups || [];
+  const grants = agent.policy.grant || [];
+  const denies = agent.policy.deny || [];
+  if (groups.length) parts.push(groups.join(', '));
+  if (grants.length) parts.push(`+${grants.length} grant${grants.length > 1 ? 's' : ''}`);
+  if (denies.length) parts.push(`\u2212${denies.length} deny`);
+  return parts.join('  ') || 'defaults';
+}
+
+function renderAgentRow(a, idx) {
+  const displayName = a.label || a.description || a.client_id;
+  const [name, ctx] = splitLabel(displayName);
+  const copyVal = a.prism_id || a.client_id;
+  const copyLabel = a.prism_id ? 'id' : 'cid';
+  const isExpanded = a.prism_id && expandedAgents[a.prism_id];
+  const canExpand = a.dynamic && a.prism_id && a.breakdown;
+  const expandArrow = canExpand
+    ? `<span class="expand-indicator">${isExpanded ? '\u25BE' : '\u25B8'}</span>` : '';
+
+  // Policy summary for collapsed view
+  const plabel = policyLabel(a);
+  const policyHtml = !a.dynamic
+    ? '<span class="scope-lock">config</span>'
+    : `<span class="policy-summary">${esc(plabel)}</span>`;
+
+  const removeBtn = a.dynamic
+    ? `<button class="remove-btn" onclick="event.stopPropagation(); removeAgent('${esc(a.client_id)}')">remove</button>` : '';
+
+  const tr = document.createElement('tr');
+  tr.dataset.key = a.client_id;
+  if (a.prism_id) tr.dataset.prismId = a.prism_id;
+  if (canExpand) tr.style.cursor = 'pointer';
+  tr.innerHTML = `
+    <td>
+      <div class="agent-name-row">
+        ${expandArrow}
+        <span class="agent-label">${esc(name)}</span>
+        ${ctx ? `<span class="agent-ctx">${esc(ctx)}</span>` : ''}
+        <span class="copy-id" title="${esc(copyVal)}" onclick="event.stopPropagation(); copyToClipboard('${esc(copyVal)}', this)">${copyLabel}</span>
+      </div>
+    </td>
+    <td>${renderAgentStatus(a)}</td>
+    <td>${policyHtml}</td>
+    <td class="right">${removeBtn}</td>
+  `;
+
+  // If expanded, return a document fragment with both the main row and breakdown row
+  if (isExpanded && a.breakdown) {
+    const fragment = document.createDocumentFragment();
+    fragment.appendChild(tr);
+    const breakdownHtml = renderBreakdown(a);
+    const temp = document.createElement('tbody');
+    temp.innerHTML = breakdownHtml;
+    if (temp.firstElementChild) fragment.appendChild(temp.firstElementChild);
+    return fragment;
+  }
+
+  return tr;
+}
+
+// --- Diff-and-patch rendering ---
+// Key principle: only touch DOM nodes whose data actually changed.
+// Rows are keyed by a stable identifier and reused across refreshes.
+
+async function refreshInfo() {
+  try {
+    const info = await fetchJSON('/info');
+    $('#status-dot').className = 'status-dot';
+    $('#status-text').textContent = 'running';
+    $('#info').innerHTML = `<span>v${esc(info.version)}</span><span>up ${esc(fmtUptime(info.uptime))}</span>`;
+  } catch {
+    $('#status-dot').className = 'status-dot error';
+    $('#status-text').textContent = 'disconnected';
+    $('#info').innerHTML = '';
+  }
+}
+
+async function refreshAgents() {
+  if (editState) return; // never touch DOM while editing
+
+  try {
+    const agents = await fetchJSON('/agents');
+    agents.sort((a, b) => (a.label || a.description || a.client_id).localeCompare(b.label || b.description || b.client_id));
+
+    // Build name cache for events
+    agentNames = {};
+    agents.forEach(a => { agentNames[a.client_id] = a.label || a.description || a.client_id; });
+
+    // Fingerprint: skip DOM work if nothing meaningful changed
+    const hash = agents.map(agentFingerprint).join('|');
+    if (hash === prevAgentHash) {
+      // Only update status cells (relative times change every minute)
+      const body = $('#agents-body');
+      agents.forEach((a, i) => {
+        const row = body.children[i];
+        if (row) row.querySelectorAll('td')[1].innerHTML = renderAgentStatus(a);
+      });
+      return;
+    }
+    prevAgentHash = hash;
+    cachedAgents = agents;
+
+    // Full rebuild — simpler with expand/collapse rows
+    const body = $('#agents-body');
+    body.innerHTML = '';
+
+    agents.forEach((a, idx) => {
+      const rowOrFragment = renderAgentRow(a, idx);
+      body.appendChild(rowOrFragment);
+    });
+
+    $('#agents-empty').style.display = agents.length ? 'none' : 'block';
+    $('#agent-count').textContent = `(${agents.length})`;
+  } catch {}
+}
+
+async function refreshBackends() {
+  try {
+    const backends = await fetchJSON('/backends');
+    backends.sort((a, b) => a.id.localeCompare(b.id));
+    knownNamespaces = backends.map(b => b.namespace).filter(Boolean);
+
+    const body = $('#backends-body');
+    const hash = JSON.stringify(backends);
+
+    // Always update summary line
+    $('#backend-count').textContent = `(${backends.length})`;
+    $('#backend-names').textContent = backends.map(b => b.id).join(' \u00b7 ');
+
+    if (body.dataset.hash === hash) return;
+    body.dataset.hash = hash;
+
+    // Only rebuild table if expanded
+    if (backendsExpanded) {
+      body.innerHTML = '';
+      backends.forEach(b => {
+        const tr = document.createElement('tr');
+        const nsSuffix = (b.namespace && b.namespace !== b.id)
+          ? `<span class="backend-ns-suffix">(${esc(b.namespace)})</span>` : '';
+        tr.innerHTML = `
+          <td><span class="backend-name">${esc(b.id)}</span>${nsSuffix}</td>
+          <td><span class="backend-transport">${esc(b.url || 'stdio')}</span></td>
+        `;
+        body.appendChild(tr);
+      });
+    }
+  } catch {}
+}
+
+function toggleBackends() {
+  backendsExpanded = !backendsExpanded;
+  const detail = $('#backends-detail');
+  const arrow = $('#backends-arrow');
+  if (backendsExpanded) {
+    detail.style.display = '';
+    arrow.textContent = '\u25BE';
+    // Force table rebuild since we may have skipped it while collapsed
+    const body = $('#backends-body');
+    body.dataset.hash = '';
+    refreshBackends();
+  } else {
+    detail.style.display = 'none';
+    arrow.textContent = '\u25B8';
+  }
+}
+
+async function refreshEvents() {
+  try {
+    const events = await fetchJSON('/events');
+
+    // Skip if identical
+    const hash = events.length + ':' + (events[0]?.ts || '');
+    if (hash === prevEventHash) return;
+    prevEventHash = hash;
+
+    const body = $('#events-body');
+    body.innerHTML = '';
+    $('#events-empty').style.display = events.length ? 'none' : 'block';
+    $('#event-count').textContent = `(${events.length})`;
+    events.forEach(e => {
+      const tr = document.createElement('tr');
+      const ts = e.ts ? e.ts.split('T')[1].replace('Z', '').split('.')[0] : '';
+      const fullLabel = agentNames[e.client_id] || e.client_id || 'anonymous';
+      const [shortName] = splitLabel(fullLabel);
+      let latency = '-';
+      if (e.allowed) latency = e.latency_ms === 0 ? '&lt;1ms' : `${e.latency_ms}ms`;
+      tr.innerHTML = `
+        <td class="ev-ts">${esc(ts)}</td>
+        <td class="ev-agent" title="${esc(fullLabel)}">${esc(shortName)}</td>
+        <td><span class="ev-tool-ns">${esc(e.namespace)}__</span><span class="ev-tool-name">${esc(e.tool)}</span></td>
+        <td>${e.allowed ? '<span class="ev-status"><span class="dot"></span></span>' : '<span class="ev-status"><span class="denied-text">denied</span></span>'}</td>
+        <td class="ev-latency">${latency}</td>
+      `;
+      body.appendChild(tr);
+    });
+  } catch {}
+}
+
+async function removeAgent(id) {
+  await fetch('/agents/' + id, { method: 'DELETE' });
+  prevAgentHash = '';
+  refreshAgents();
+}
+
+async function cleanStale() {
+  await fetch('/agents/stale', { method: 'DELETE' });
+  prevAgentHash = '';
+  refreshAgents();
+}
+
+// --- Groups panel ---
+
+async function refreshGroups() {
+  try {
+    const groups = await fetchJSON('/groups');
+    const hash = JSON.stringify(groups);
+    if (hash === prevGroupHash) return;
+    prevGroupHash = hash;
+    cachedGroups = groups;
+
+    const bar = $('#groups-bar');
+    const list = $('#groups-list');
+
+    bar.style.display = '';
+    list.innerHTML = '';
+    $('#group-count').textContent = `(${groups.length})`;
+
+    groups.sort((a, b) => a.name.localeCompare(b.name));
+
+    groups.forEach(g => {
+      const card = document.createElement('div');
+      card.className = 'group-card';
+      card.dataset.groupName = g.name;
+
+      const scopes = (g.scopes || []);
+      const scopeHtml = scopes.map(s => `<span class="group-scope">${esc(s)}</span>`).join('');
+
+      if (g.source === 'config') {
+        card.innerHTML = `<span class="group-name">${esc(g.name)}</span>${scopeHtml}<span class="group-source">config</span>`;
+      } else {
+        card.innerHTML = `<span class="group-name">${esc(g.name)}</span><span class="group-scopes-area">${scopeHtml}</span>
+          <button class="group-action" onclick="editGroupScopes('${esc(g.name)}', this.closest('.group-card'))">edit</button>
+          <button class="group-action delete" onclick="deleteGroup('${esc(g.name)}')">&times;</button>`;
+      }
+
+      list.appendChild(card);
+    });
+  } catch {}
+}
+
+async function addGroup() {
+  const name = prompt('Group name:');
+  if (!name || !name.trim()) return;
+  try {
+    await fetch(`/groups/${encodeURIComponent(name.trim())}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scopes: []})
+    });
+    prevGroupHash = '';
+    refreshGroups();
+  } catch {}
+}
+
+async function deleteGroup(name) {
+  if (!confirm(`Delete group "${name}"?`)) return;
+  try {
+    await fetch(`/groups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    prevGroupHash = '';
+    refreshGroups();
+  } catch {}
+}
+
+function editGroupScopes(name, card) {
+  const group = cachedGroups.find(g => g.name === name);
+  if (!group || group.source === 'config') return;
+
+  groupEditState = { name, scopes: [...(group.scopes || [])], card };
+  renderGroupEditor();
+}
+
+function renderGroupEditor() {
+  if (!groupEditState) return;
+  const { name, scopes, card } = groupEditState;
+
+  card.innerHTML = `
+    <span class="group-name">${esc(name)}</span>
+    <div class="group-editor">
+      ${scopes.map(s => `<span class="scope-pill">${esc(s)}<span class="x" data-gscope="${esc(s)}">x</span></span>`).join('')}
+      <input class="scope-input" type="text" placeholder="+ scope" spellcheck="false" autocomplete="off" style="width:80px">
+    </div>
+  `;
+
+  const input = card.querySelector('.scope-input');
+  input.focus();
+
+  card.querySelectorAll('.x').forEach(x => {
+    x.addEventListener('click', (e) => {
+      e.stopPropagation();
+      groupEditState.scopes = groupEditState.scopes.filter(s => s !== x.dataset.gscope);
+      renderGroupEditor();
+    });
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const val = input.value.trim();
+      if (val && !groupEditState.scopes.includes(val)) {
+        groupEditState.scopes.push(val);
+        groupEditState.scopes.sort();
+      }
+      input.value = '';
+      renderGroupEditor();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      groupEditState = null;
+      prevGroupHash = '';
+      refreshGroups();
+    } else if (e.key === 'Backspace' && !input.value && groupEditState.scopes.length) {
+      groupEditState.scopes.pop();
+      renderGroupEditor();
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(async () => {
+      if (!groupEditState) return;
+      const { name: gName, scopes: gScopes } = groupEditState;
+      groupEditState = null;
+      try {
+        await fetch(`/groups/${encodeURIComponent(gName)}`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({scopes: gScopes})
+        });
+      } catch {}
+      prevGroupHash = '';
+      refreshGroups();
+      // Group changes affect agent scopes — force agent refresh
+      prevAgentHash = '';
+      refreshAgents();
+    }, 200);
+  });
+}
+
+// --- Policy breakdown interaction ---
+
+function toggleAgentExpand(prismId) {
+  if (!prismId) return;
+  expandedAgents[prismId] = !expandedAgents[prismId];
+  prevAgentHash = ''; // force re-render
+  refreshAgents();
+}
+
+async function updateAgentPolicy(prismId, groups, grant, deny) {
+  try {
+    await fetch(`/agents/${prismId}/policy`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ groups, grant, deny })
+    });
+    prevAgentHash = '';
+    refreshAgents();
+  } catch {}
+}
+
+function getAgentByPrismId(prismId) {
+  return cachedAgents.find(a => a.prism_id === prismId);
+}
+
+function addGroupToAgent(prismId) {
+  const agent = getAgentByPrismId(prismId);
+  if (!agent) return;
+
+  const policy = agent.policy || { groups: [], grant: [], deny: [] };
+  const currentGroups = new Set(policy.groups || []);
+  const available = cachedGroups.filter(g => !currentGroups.has(g.name));
+
+  if (available.length === 0) {
+    alert('No available groups to add.');
+    return;
+  }
+
+  // Find the button and show a dropdown
+  const btn = document.querySelector(`[data-add-group="${prismId}"]`);
+  if (!btn) return;
+
+  // Remove existing dropdown if any
+  const existing = btn.parentElement.querySelector('.group-dropdown');
+  if (existing) { existing.remove(); return; }
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'group-dropdown';
+  available.forEach(g => {
+    const item = document.createElement('div');
+    item.className = 'group-dropdown-item';
+    item.textContent = g.name;
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dropdown.remove();
+      const newGroups = [...(policy.groups || []), g.name];
+      updateAgentPolicy(prismId, newGroups, policy.grant || [], policy.deny || []);
+    });
+    dropdown.appendChild(item);
+  });
+  btn.parentElement.style.position = 'relative';
+  btn.parentElement.appendChild(dropdown);
+
+  // Close on outside click
+  setTimeout(() => {
+    const close = (e) => {
+      if (!dropdown.contains(e.target)) {
+        dropdown.remove();
+        document.removeEventListener('mousedown', close);
+      }
+    };
+    document.addEventListener('mousedown', close);
+  }, 0);
+}
+
+function removeGroupFromAgent(prismId, groupName) {
+  const agent = getAgentByPrismId(prismId);
+  if (!agent) return;
+  const policy = agent.policy || { groups: [], grant: [], deny: [] };
+  const newGroups = (policy.groups || []).filter(g => g !== groupName);
+  updateAgentPolicy(prismId, newGroups, policy.grant || [], policy.deny || []);
+}
+
+function addGrantToAgent(prismId) {
+  const scope = prompt('Grant scope:');
+  if (!scope || !scope.trim()) return;
+  const agent = getAgentByPrismId(prismId);
+  if (!agent) return;
+  const policy = agent.policy || { groups: [], grant: [], deny: [] };
+  const newGrant = [...(policy.grant || []), scope.trim()];
+  updateAgentPolicy(prismId, policy.groups || [], newGrant, policy.deny || []);
+}
+
+function addDenyToAgent(prismId) {
+  const scope = prompt('Deny scope:');
+  if (!scope || !scope.trim()) return;
+  const agent = getAgentByPrismId(prismId);
+  if (!agent) return;
+  const policy = agent.policy || { groups: [], grant: [], deny: [] };
+  const newDeny = [...(policy.deny || []), scope.trim()];
+  updateAgentPolicy(prismId, policy.groups || [], policy.grant || [], newDeny);
+}
+
+// --- Event delegation for agent rows ---
+// Attached once to #agents-body. Survives any DOM rebuild because the <tbody> element persists.
+$('#agents-body').addEventListener('click', (e) => {
+  // Don't interfere with buttons (remove, copy-id)
+  if (e.target.closest('.remove-btn') || e.target.closest('.copy-id')) return;
+
+  // Handle breakdown panel interactions (inside expanded rows)
+  const breakdownRow = e.target.closest('.breakdown-row');
+  if (breakdownRow) {
+    // Group chip removal
+    const groupChip = e.target.closest('.group-chip');
+    if (groupChip) {
+      removeGroupFromAgent(groupChip.dataset.prism, groupChip.dataset.group);
+      return;
+    }
+    // Add group
+    const addGroupBtn = e.target.closest('[data-add-group]');
+    if (addGroupBtn) { addGroupToAgent(addGroupBtn.dataset.addGroup); return; }
+    // Add grant
+    const addGrantBtn = e.target.closest('[data-add-grant]');
+    if (addGrantBtn) { addGrantToAgent(addGrantBtn.dataset.addGrant); return; }
+    // Add deny
+    const addDenyBtn = e.target.closest('[data-add-deny]');
+    if (addDenyBtn) { addDenyToAgent(addDenyBtn.dataset.addDeny); return; }
+    // Don't collapse when clicking inside breakdown
+    return;
+  }
+
+  // Click on agent row → expand/collapse
+  const row = e.target.closest('tr[data-prism-id]');
+  if (row && row.dataset.prismId) {
+    toggleAgentExpand(row.dataset.prismId);
+  }
+});
+
+// Close editor on outside click
+document.addEventListener('mousedown', (e) => {
+  if (editState && !editState.td.contains(e.target)) {
+    saveScopeEdit();
+  }
+});
+
+// --- Global defaults editor ---
+
+async function refreshDefaults() {
+  if (defaultsEditState) return; // never touch DOM while editing
+  try {
+    const data = await fetchJSON('/defaults');
+    const scopes = (data.default_scopes || []).filter(s => s !== 'mcp:connect');
+    const hash = JSON.stringify(scopes);
+    if (hash === prevDefaultsHash) return;
+    prevDefaultsHash = hash;
+    globalDefaults = scopes;
+    renderGlobalScopes();
+  } catch {}
+}
+
+function renderGlobalScopes() {
+  const container = $('#global-scopes');
+  if (!container) return;
+
+  if (globalDefaults.length === 0) {
+    container.innerHTML = `<span class="scope-add-cta" id="defaults-add-cta">+ add default scopes</span>`;
+  } else {
+    container.innerHTML = `<div class="scope-list editable" id="defaults-scope-list">${
+      globalDefaults.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('')
+    }</div>`;
+  }
+}
+
+function startDefaultsEdit() {
+  if (defaultsEditState) return;
+
+  const container = $('#global-scopes');
+  defaultsEditState = {
+    scopes: [...globalDefaults],
+    original: [...globalDefaults],
+    container
+  };
+  renderDefaultsEditor();
+}
+
+function renderDefaultsEditor() {
+  if (!defaultsEditState) return;
+  const { scopes, container } = defaultsEditState;
+
+  container.innerHTML = `
+    <div class="scope-editor">
+      ${scopes.map(s =>
+        `<span class="scope-pill">${esc(s)}<span class="x" data-dscope="${esc(s)}">x</span></span>`
+      ).join('')}
+      <input class="scope-input" type="text" placeholder="+ scope" spellcheck="false" autocomplete="off">
+      <div class="scope-suggest"></div>
+    </div>
+  `;
+
+  const input = container.querySelector('.scope-input');
+  const suggest = container.querySelector('.scope-suggest');
+  let selectedIdx = -1;
+
+  input.focus();
+
+  container.querySelectorAll('.x').forEach(x => {
+    x.addEventListener('click', (e) => {
+      e.stopPropagation();
+      defaultsEditState.scopes = defaultsEditState.scopes.filter(s => s !== x.dataset.dscope);
+      renderDefaultsEditor();
+    });
+  });
+
+  input.addEventListener('input', () => {
+    selectedIdx = -1;
+    const val = input.value.toLowerCase();
+    suggest.innerHTML = '';
+    if (!val) return;
+    const hints = getScopeHints().filter(h =>
+      h.toLowerCase().includes(val) && !defaultsEditState.scopes.includes(h)
+    );
+    if (val.includes(':') && !hints.includes(val) && !defaultsEditState.scopes.includes(val)) {
+      hints.unshift(val);
+    }
+    hints.slice(0, 6).forEach(h => {
+      const div = document.createElement('div');
+      div.className = 'scope-suggest-item';
+      div.dataset.scope = h;
+      div.textContent = h;
+      div.addEventListener('mousedown', (e) => { e.preventDefault(); addDefaultScope(h); });
+      suggest.appendChild(div);
+    });
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const items = suggest.querySelectorAll('.scope-suggest-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIdx = Math.min(selectedIdx + 1, items.length - 1);
+      items.forEach((it, i) => it.classList.toggle('selected', i === selectedIdx));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIdx = Math.max(selectedIdx - 1, -1);
+      items.forEach((it, i) => it.classList.toggle('selected', i === selectedIdx));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (selectedIdx >= 0 && items[selectedIdx]) addDefaultScope(items[selectedIdx].dataset.scope);
+      else if (input.value.trim()) addDefaultScope(input.value.trim());
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelDefaultsEdit();
+    } else if (e.key === 'Backspace' && !input.value && defaultsEditState.scopes.length) {
+      defaultsEditState.scopes.pop();
+      renderDefaultsEditor();
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (defaultsEditState && !defaultsEditState.container.contains(document.activeElement)) {
+        saveGlobalDefaults();
+      }
+    }, 200);
+  });
+}
+
+function addDefaultScope(scope) {
+  if (!defaultsEditState || defaultsEditState.scopes.includes(scope)) return;
+  defaultsEditState.scopes.push(scope);
+  defaultsEditState.scopes.sort();
+  renderDefaultsEditor();
+}
+
+function cancelDefaultsEdit() {
+  if (!defaultsEditState) return;
+  defaultsEditState = null;
+  renderGlobalScopes();
+}
+
+async function saveGlobalDefaults() {
+  if (!defaultsEditState) return;
+  const { scopes, original } = defaultsEditState;
+
+  if (JSON.stringify(scopes) === JSON.stringify(original)) {
+    cancelDefaultsEdit();
+    return;
+  }
+
+  const savingScopes = [...scopes];
+  defaultsEditState = null;
+
+  // Show saving state
+  const container = $('#global-scopes');
+  container.innerHTML = `<div class="scope-list">${
+    savingScopes.map(s => `<span class="scope-tag">${esc(s)}</span>`).join('')
+  }<span class="scope-saving">saving...</span></div>`;
+
+  try {
+    await fetch('/defaults', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({default_scopes: savingScopes})
+    });
+    prevDefaultsHash = '';
+    refreshDefaults();
+    // Force agent refresh since effective scopes may have changed
+    prevAgentHash = '';
+    refreshAgents();
+  } catch {
+    const saving = container.querySelector('.scope-saving');
+    if (saving) { saving.textContent = 'error'; saving.style.color = 'var(--denied)'; }
+    setTimeout(() => { prevDefaultsHash = ''; refreshDefaults(); }, 1500);
+  }
+}
+
+// Event delegation for global scopes editing
+$('#global-scopes').addEventListener('click', (e) => {
+  const target = e.target.closest('#defaults-scope-list') || e.target.closest('#defaults-add-cta');
+  if (target) startDefaultsEdit();
+});
+
+// Close defaults editor on outside click
+document.addEventListener('mousedown', (e) => {
+  if (defaultsEditState && !defaultsEditState.container.contains(e.target)) {
+    saveGlobalDefaults();
+  }
+});
+
+// --- Init ---
 refreshInfo();
+refreshDefaults();
 refreshAgents();
 refreshBackends();
 refreshEvents();
+refreshGroups();
 setInterval(refreshInfo, 5000);
+setInterval(refreshDefaults, 5000);
 setInterval(refreshAgents, 5000);
 setInterval(refreshBackends, 10000);
 setInterval(refreshEvents, 3000);
+setInterval(refreshGroups, 5000);
 </script>
 </body>
 </html>

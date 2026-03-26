@@ -94,6 +94,7 @@ type Server struct {
 	logger  *slog.Logger
 	mu      sync.RWMutex
 	clients map[string]*ClientConfig
+	groups  map[string]GroupConfig // group definitions from config, used for policy resolution
 	scopes  []string
 	oauth   *oauthStore
 }
@@ -145,7 +146,8 @@ func (km *KeyManager) JWKS() []byte { return km.jwks }
 
 // NewServer constructs a Server from the provided config, key manager, and KV store.
 // If kv is nil, state is not persisted (in-memory only).
-func NewServer(cfg *Config, km *KeyManager, kv kvStore, logger *slog.Logger) *Server {
+// groups may be nil — when non-nil, they are used for PrismID-based policy resolution.
+func NewServer(cfg *Config, km *KeyManager, kv kvStore, logger *slog.Logger, groups ...map[string]GroupConfig) *Server {
 	clientMap := make(map[string]*ClientConfig, len(cfg.Clients))
 	scopeSet := make(map[string]struct{})
 
@@ -166,12 +168,18 @@ func NewServer(cfg *Config, km *KeyManager, kv kvStore, logger *slog.Logger) *Se
 		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 
+	var groupDefs map[string]GroupConfig
+	if len(groups) > 0 && groups[0] != nil {
+		groupDefs = groups[0]
+	}
+
 	srv := &Server{
 		cfg:     cfg,
 		km:      km,
 		store:   kv,
 		logger:  logger,
 		clients: clientMap,
+		groups:  groupDefs,
 		scopes:  scopes,
 		oauth:   newOAuthStore(),
 	}
@@ -200,16 +208,108 @@ func (s *Server) IsEphemeralKey() bool {
 	return s.cfg.SigningKey.Path == ""
 }
 
+// ReloadPolicy hot-swaps the static client set, group definitions, and default
+// scopes while preserving dynamic (DCR) clients and their refresh tokens.
+// Dynamic clients' scopes are re-resolved against the fresh group definitions
+// using their KV-stored policy assignments.
+func (s *Server) ReloadPolicy(staticClients []ClientConfig, groups map[string]GroupConfig, defaultScopes []string) {
+	// Build the new static client map.
+	newClients := make(map[string]*ClientConfig, len(staticClients))
+	scopeSet := make(map[string]struct{})
+	for i := range staticClients {
+		c := &staticClients[i]
+		newClients[c.ClientID] = c
+		for _, sc := range c.AllowedScopes {
+			scopeSet[sc] = struct{}{}
+		}
+	}
+
+	// Update groups and default scopes first so that ResolveScopesByPrismID
+	// (called below for each dynamic client) sees the fresh definitions.
+	// Merge KV-stored (dynamic) groups into the config groups so policy
+	// resolution sees both after a reload.
+	mergedGroups := make(map[string]GroupConfig)
+	for k, v := range groups {
+		mergedGroups[k] = v
+	}
+	if s.store != nil {
+		if keys, err := s.store.List(groupKeyPrefix); err == nil {
+			for _, key := range keys {
+				name := strings.TrimPrefix(key, groupKeyPrefix)
+				if data, getErr := s.store.Get(key); getErr == nil {
+					var g GroupConfig
+					if json.Unmarshal(data, &g) == nil {
+						mergedGroups[name] = g // KV wins on conflict
+					}
+				}
+			}
+		}
+	}
+	s.mu.Lock()
+	s.groups = mergedGroups
+	s.cfg.DefaultScopes = defaultScopes
+	// Snapshot existing client entries for dynamic clients -- we need their
+	// stored secrets (already hashed for KV-restored clients).
+	oldClients := s.clients
+	s.mu.Unlock()
+
+	// Merge dynamic clients into the new map, re-resolving their scopes
+	// from the (now-updated) group definitions + KV policy.
+	s.oauth.mu.Lock()
+	for clientID, dc := range s.oauth.dynamics {
+		var scopes []string
+		if dc.PrismID != "" {
+			scopes = s.ResolveScopesByPrismID(dc.PrismID)
+		} else {
+			scopes = s.defaultScopes()
+		}
+		dc.Scopes = scopes
+
+		// Preserve the existing client entry's secret (already stored as
+		// SHA-256 hash for persisted clients, or hash from initial DCR).
+		secret := ""
+		if old, ok := oldClients[clientID]; ok {
+			secret = old.ClientSecret
+		}
+		newClients[clientID] = &ClientConfig{
+			ClientID:      dc.ClientID,
+			ClientSecret:  secret,
+			AllowedScopes: scopes,
+			Description:   dc.ClientName,
+		}
+	}
+	s.oauth.mu.Unlock()
+
+	// Swap the client map atomically.
+	newScopes := make([]string, 0, len(scopeSet))
+	for sc := range scopeSet {
+		newScopes = append(newScopes, sc)
+	}
+
+	s.mu.Lock()
+	s.clients = newClients
+	s.scopes = newScopes
+	s.mu.Unlock()
+
+	s.logger.Info("policy reloaded",
+		"static_clients", len(staticClients),
+		"dynamic_clients", len(s.oauth.dynamics),
+		"groups", len(groups),
+	)
+}
+
 // AgentInfo is a summary of an agent for the admin API.
 type AgentInfo struct {
-	ClientID    string   `json:"client_id"`
-	PrismID     string   `json:"prism_id,omitempty"`
-	Label       string   `json:"label,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Scopes      []string `json:"scopes"`
-	Dynamic     bool     `json:"dynamic"`
-	CreatedAt   string   `json:"created_at,omitempty"`
-	LastUsedAt  string   `json:"last_used_at,omitempty"`
+	ClientID    string           `json:"client_id"`
+	PrismID     string           `json:"prism_id,omitempty"`
+	Label       string           `json:"label,omitempty"`
+	Description string           `json:"description,omitempty"`
+	Scopes      []string         `json:"scopes"`
+	Dynamic     bool             `json:"dynamic"`
+	CreatedAt   string           `json:"created_at,omitempty"`
+	LastUsedAt  string           `json:"last_used_at,omitempty"`
+	Policy      *AgentPolicy     `json:"policy,omitempty"`
+	Breakdown   *PolicyBreakdown `json:"breakdown,omitempty"`
 }
 
 // ListAgents returns info about all registered agents (static + DCR).
@@ -234,24 +334,56 @@ func (s *Server) ListAgents() []AgentInfo {
 			ai.Label = dc.Label
 			ai.CreatedAt = dc.CreatedAt
 			ai.LastUsedAt = dc.LastUsedAt
+			// Include KV policy and resolve effective scopes.
+			if dc.PrismID != "" {
+				var policy *AgentPolicy
+				if p, err := s.GetAgentPolicy(dc.PrismID); err == nil && p != nil {
+					policy = p
+					ai.Policy = policy
+				}
+				// Show effective scopes (what agent gets on next token refresh),
+				// not stale AllowedScopes from registration time.
+				ai.Scopes = s.ResolveScopesByPrismID(dc.PrismID)
+				ai.Breakdown = s.BuildBreakdown(policy, ai.Scopes)
+			}
 		}
 		agents = append(agents, ai)
 	}
 	return agents
 }
 
-// UpdateAgentScopes replaces the allowed scopes for an agent.
-// Returns false if the agent doesn't exist.
-func (s *Server) UpdateAgentScopes(clientID string, scopes []string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// GetAgentByPrismID returns agent info for a specific PrismID, or nil if not found.
+func (s *Server) GetAgentByPrismID(prismID string) *AgentInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	client, ok := s.clients[clientID]
-	if !ok {
-		return false
+	for _, c := range s.clients {
+		s.oauth.mu.Lock()
+		dc, isDynamic := s.oauth.dynamics[c.ClientID]
+		s.oauth.mu.Unlock()
+
+		if isDynamic && dc != nil && dc.PrismID == prismID {
+			scopes := s.ResolveScopesByPrismID(dc.PrismID)
+			var policy *AgentPolicy
+			if p, err := s.GetAgentPolicy(dc.PrismID); err == nil && p != nil {
+				policy = p
+			}
+			ai := &AgentInfo{
+				ClientID:    c.ClientID,
+				PrismID:     dc.PrismID,
+				Label:       dc.Label,
+				Description: c.Description,
+				Scopes:      scopes,
+				Dynamic:     true,
+				CreatedAt:   dc.CreatedAt,
+				LastUsedAt:  dc.LastUsedAt,
+				Policy:      policy,
+				Breakdown:   s.BuildBreakdown(policy, scopes),
+			}
+			return ai
+		}
 	}
-	client.AllowedScopes = scopes
-	return true
+	return nil
 }
 
 // RemoveAgent deletes a dynamic agent by client_id.
@@ -457,7 +589,9 @@ func resolveScopes(client *ClientConfig, requested []string) ([]string, error) {
 	return requested, nil
 }
 
-func (s *Server) mintToken(clientID string, scopes []string) (string, error) {
+// mintToken creates a signed JWT. If prismID is non-empty, it is included as a
+// custom claim for audit enrichment (the gateway MUST ignore it).
+func (s *Server) mintToken(clientID string, scopes []string, prismID ...string) (string, error) {
 	now := time.Now()
 
 	jti, err := generateJTI()
@@ -474,6 +608,14 @@ func (s *Server) mintToken(clientID string, scopes []string) (string, error) {
 		"jti":       jti,
 		"scope":     strings.Join(scopes, " "),
 		"client_id": clientID,
+	}
+
+	// Embed the token generation counter so the gateway can detect stale tokens.
+	claims["token_gen"] = s.GetTokenGeneration(clientID)
+
+	// Add prism_id for audit enrichment when available.
+	if len(prismID) > 0 && prismID[0] != "" {
+		claims["prism_id"] = prismID[0]
 	}
 
 	t := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)

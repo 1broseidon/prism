@@ -4,15 +4,64 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// memKV is an in-memory kvStore for testing.
+type memKV struct {
+	mu   sync.Mutex
+	data map[string][]byte
+}
+
+func newMemKV() *memKV {
+	return &memKV{data: make(map[string][]byte)}
+}
+
+func (m *memKV) Get(key string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.data[key]
+	if !ok {
+		return nil, fmt.Errorf("not found: %s", key)
+	}
+	return v, nil
+}
+
+func (m *memKV) Set(key string, value []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data[key] = value
+	return nil
+}
+
+func (m *memKV) Delete(key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.data, key)
+	return nil
+}
+
+func (m *memKV) List(prefix string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var keys []string
+	for k := range m.data {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
 
 const testIssuer = "http://localhost:9100"
 
@@ -400,5 +449,294 @@ func TestEndToEnd_TokenValidation(t *testing.T) {
 	}
 	if claims["jti"] == "" {
 		t.Error("jti claim is missing")
+	}
+}
+
+// --- ReloadPolicy tests ---
+
+// newTestServerWithKV creates a Server with a KV store and optional groups.
+func newTestServerWithKV(t *testing.T, kv kvStore, clients []ClientConfig, groups map[string]GroupConfig, defaultScopes []string) *Server {
+	t.Helper()
+
+	km, err := NewKeyManager("")
+	if err != nil {
+		t.Fatalf("NewKeyManager: %v", err)
+	}
+
+	cfg := &Config{
+		ListenAddr:      ":9100",
+		Issuer:          testIssuer,
+		TokenTTLSeconds: 3600,
+		Clients:         clients,
+		DefaultScopes:   defaultScopes,
+	}
+
+	return NewServer(cfg, km, kv, nil, groups)
+}
+
+func TestReloadPolicy_StaticClientsUpdated(t *testing.T) {
+	initial := []ClientConfig{
+		{ClientID: "agent-a", ClientSecret: "secret-a", AllowedScopes: []string{"mcp:connect", "tools:read"}},
+	}
+	srv := newTestServerWithKV(t, nil, initial, nil, nil)
+
+	// Verify initial state.
+	srv.mu.RLock()
+	if _, ok := srv.clients["agent-a"]; !ok {
+		t.Fatal("agent-a should exist before reload")
+	}
+	srv.mu.RUnlock()
+
+	// Reload with different clients.
+	newClients := []ClientConfig{
+		{ClientID: "agent-b", ClientSecret: "secret-b", AllowedScopes: []string{"mcp:connect", "tools:write"}},
+		{ClientID: "agent-c", ClientSecret: "secret-c", AllowedScopes: []string{"mcp:connect"}},
+	}
+	srv.ReloadPolicy(newClients, nil, nil)
+
+	// agent-a should be gone, agent-b and agent-c should exist.
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+
+	if _, ok := srv.clients["agent-a"]; ok {
+		t.Error("agent-a should not exist after reload")
+	}
+	if c, ok := srv.clients["agent-b"]; !ok {
+		t.Error("agent-b should exist after reload")
+	} else {
+		if c.ClientSecret != "secret-b" {
+			t.Errorf("agent-b secret = %q, want secret-b", c.ClientSecret)
+		}
+		sort.Strings(c.AllowedScopes)
+		want := []string{"mcp:connect", "tools:write"}
+		sort.Strings(want)
+		if strings.Join(c.AllowedScopes, ",") != strings.Join(want, ",") {
+			t.Errorf("agent-b scopes = %v, want %v", c.AllowedScopes, want)
+		}
+	}
+	if _, ok := srv.clients["agent-c"]; !ok {
+		t.Error("agent-c should exist after reload")
+	}
+}
+
+func TestReloadPolicy_DynamicClientsSurvive(t *testing.T) {
+	kv := newMemKV()
+	initial := []ClientConfig{
+		{ClientID: "static-1", ClientSecret: "s1", AllowedScopes: []string{"mcp:connect"}},
+	}
+	srv := newTestServerWithKV(t, kv, initial, nil, []string{"tools:default"})
+
+	// Simulate a DCR registration by injecting a dynamic client directly.
+	secretHash := sha256Hash("dyn-secret-123")
+	srv.mu.Lock()
+	srv.clients["dyn-client"] = &ClientConfig{
+		ClientID:      "dyn-client",
+		ClientSecret:  secretHash,
+		AllowedScopes: []string{"mcp:connect", "tools:default"},
+		Description:   "My Agent",
+	}
+	srv.mu.Unlock()
+
+	srv.oauth.mu.Lock()
+	srv.oauth.dynamics["dyn-client"] = &dynamicClient{
+		ClientID:   "dyn-client",
+		ClientName: "My Agent",
+		Scopes:     []string{"mcp:connect", "tools:default"},
+		PrismID:    "prism-uuid-1",
+	}
+	srv.oauth.mu.Unlock()
+
+	// Also inject a refresh token.
+	srv.oauth.mu.Lock()
+	srv.oauth.refresh["refresh-hash-abc"] = &refreshToken{clientID: "dyn-client"}
+	srv.oauth.mu.Unlock()
+
+	// Reload with different static clients.
+	newClients := []ClientConfig{
+		{ClientID: "static-2", ClientSecret: "s2", AllowedScopes: []string{"mcp:connect", "tools:new"}},
+	}
+	srv.ReloadPolicy(newClients, nil, []string{"tools:default"})
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+
+	// static-1 should be gone, static-2 present.
+	if _, ok := srv.clients["static-1"]; ok {
+		t.Error("static-1 should not exist after reload")
+	}
+	if _, ok := srv.clients["static-2"]; !ok {
+		t.Error("static-2 should exist after reload")
+	}
+
+	// Dynamic client should survive.
+	dc, ok := srv.clients["dyn-client"]
+	if !ok {
+		t.Fatal("dyn-client should survive reload")
+	}
+
+	// Secret should be preserved (the hash, not re-hashed).
+	if dc.ClientSecret != secretHash {
+		t.Errorf("dyn-client secret changed after reload: got %q, want %q", dc.ClientSecret, secretHash)
+	}
+
+	// Refresh token should survive.
+	srv.oauth.mu.Lock()
+	_, hasRefresh := srv.oauth.refresh["refresh-hash-abc"]
+	srv.oauth.mu.Unlock()
+	if !hasRefresh {
+		t.Error("refresh token should survive reload")
+	}
+
+	// oauth.dynamics should still have the entry.
+	srv.oauth.mu.Lock()
+	_, hasDynamic := srv.oauth.dynamics["dyn-client"]
+	srv.oauth.mu.Unlock()
+	if !hasDynamic {
+		t.Error("oauth.dynamics entry should survive reload")
+	}
+}
+
+func TestReloadPolicy_GroupChangesPropagateToScopes(t *testing.T) {
+	kv := newMemKV()
+
+	groups := map[string]GroupConfig{
+		"readers": {Scopes: []string{"tools:read", "mcp:connect"}},
+	}
+	srv := newTestServerWithKV(t, kv, nil, groups, nil)
+
+	// Set up a dynamic client with a PrismID and a KV policy referencing "readers".
+	srv.mu.Lock()
+	srv.clients["dyn-1"] = &ClientConfig{
+		ClientID:      "dyn-1",
+		ClientSecret:  "hash-1",
+		AllowedScopes: []string{"mcp:connect", "tools:read"},
+	}
+	srv.mu.Unlock()
+
+	srv.oauth.mu.Lock()
+	srv.oauth.dynamics["dyn-1"] = &dynamicClient{
+		ClientID:   "dyn-1",
+		ClientName: "Reader Agent",
+		Scopes:     []string{"mcp:connect", "tools:read"},
+		PrismID:    "prism-reader-1",
+	}
+	srv.oauth.mu.Unlock()
+
+	// Store a KV policy: this agent is in group "readers".
+	policy := AgentPolicy{Groups: []string{"readers"}}
+	policyData, _ := json.Marshal(policy)
+	_ = kv.Set(policyKeyPrefix+"prism-reader-1", policyData)
+
+	// Reload with an expanded "readers" group.
+	newGroups := map[string]GroupConfig{
+		"readers": {Scopes: []string{"tools:read", "tools:list", "mcp:connect"}},
+	}
+	srv.ReloadPolicy(nil, newGroups, nil)
+
+	srv.mu.RLock()
+	dc, ok := srv.clients["dyn-1"]
+	srv.mu.RUnlock()
+	if !ok {
+		t.Fatal("dyn-1 should survive reload")
+	}
+
+	// The dynamic client should now have the expanded scopes.
+	scopeSet := make(map[string]struct{})
+	for _, s := range dc.AllowedScopes {
+		scopeSet[s] = struct{}{}
+	}
+	for _, want := range []string{"mcp:connect", "tools:read", "tools:list"} {
+		if _, ok := scopeSet[want]; !ok {
+			t.Errorf("missing expected scope %q after reload, got %v", want, dc.AllowedScopes)
+		}
+	}
+}
+
+func TestReloadPolicy_RemovedGroupContributesNoScopes(t *testing.T) {
+	kv := newMemKV()
+
+	groups := map[string]GroupConfig{
+		"writers": {Scopes: []string{"tools:write", "mcp:connect"}},
+	}
+	srv := newTestServerWithKV(t, kv, nil, groups, nil)
+
+	// Dynamic client referencing "writers" group.
+	srv.mu.Lock()
+	srv.clients["dyn-w"] = &ClientConfig{
+		ClientID:      "dyn-w",
+		ClientSecret:  "hash-w",
+		AllowedScopes: []string{"mcp:connect", "tools:write"},
+	}
+	srv.mu.Unlock()
+
+	srv.oauth.mu.Lock()
+	srv.oauth.dynamics["dyn-w"] = &dynamicClient{
+		ClientID:   "dyn-w",
+		ClientName: "Writer Agent",
+		PrismID:    "prism-writer-1",
+	}
+	srv.oauth.mu.Unlock()
+
+	policy := AgentPolicy{Groups: []string{"writers"}}
+	policyData, _ := json.Marshal(policy)
+	_ = kv.Set(policyKeyPrefix+"prism-writer-1", policyData)
+
+	// Reload with "writers" group REMOVED from config.
+	srv.ReloadPolicy(nil, nil, nil)
+
+	srv.mu.RLock()
+	dc, ok := srv.clients["dyn-w"]
+	srv.mu.RUnlock()
+	if !ok {
+		t.Fatal("dyn-w should survive reload even with removed group")
+	}
+
+	// The agent's policy references "writers" but that group no longer exists.
+	// The only scope should be mcp:connect (always included).
+	if len(dc.AllowedScopes) != 1 || dc.AllowedScopes[0] != "mcp:connect" {
+		t.Errorf("expected only mcp:connect when group removed, got %v", dc.AllowedScopes)
+	}
+}
+
+func TestReloadPolicy_DefaultScopesChange(t *testing.T) {
+	kv := newMemKV()
+	srv := newTestServerWithKV(t, kv, nil, nil, []string{"tools:basic"})
+
+	// Dynamic client with no custom policy -- should get default scopes.
+	srv.mu.Lock()
+	srv.clients["dyn-d"] = &ClientConfig{
+		ClientID:      "dyn-d",
+		ClientSecret:  "hash-d",
+		AllowedScopes: []string{"mcp:connect", "tools:basic"},
+	}
+	srv.mu.Unlock()
+
+	srv.oauth.mu.Lock()
+	srv.oauth.dynamics["dyn-d"] = &dynamicClient{
+		ClientID:   "dyn-d",
+		ClientName: "Default Agent",
+		PrismID:    "prism-default-1",
+	}
+	srv.oauth.mu.Unlock()
+	// No KV policy -- will fall back to default scopes.
+
+	// Reload with new default scopes.
+	srv.ReloadPolicy(nil, nil, []string{"tools:basic", "tools:extra"})
+
+	srv.mu.RLock()
+	dc, ok := srv.clients["dyn-d"]
+	srv.mu.RUnlock()
+	if !ok {
+		t.Fatal("dyn-d should survive reload")
+	}
+
+	scopeSet := make(map[string]struct{})
+	for _, s := range dc.AllowedScopes {
+		scopeSet[s] = struct{}{}
+	}
+	for _, want := range []string{"mcp:connect", "tools:basic", "tools:extra"} {
+		if _, ok := scopeSet[want]; !ok {
+			t.Errorf("missing expected scope %q after default_scopes change, got %v", want, dc.AllowedScopes)
+		}
 	}
 }

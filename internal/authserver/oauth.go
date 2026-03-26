@@ -452,8 +452,27 @@ func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Re-resolve scopes for DCR agents with a PrismID.
+	var prismID string
+	s.oauth.mu.Lock()
+	dc, isDynamic := s.oauth.dynamics[ac.clientID]
+	if isDynamic && dc != nil {
+		prismID = dc.PrismID
+	}
+	s.oauth.mu.Unlock()
+
+	if isDynamic && prismID != "" {
+		resolved := s.ResolveScopesByPrismID(prismID)
+		client = &ClientConfig{
+			ClientID:      client.ClientID,
+			ClientSecret:  client.ClientSecret,
+			AllowedScopes: resolved,
+			Description:   client.Description,
+		}
+	}
+
 	s.updateLastUsed(ac.clientID)
-	s.issueTokenWithRefresh(w, client)
+	s.issueTokenWithRefresh(w, client, prismID)
 }
 
 // handleRefreshToken exchanges a refresh_token for a new access_token + refresh_token.
@@ -488,13 +507,38 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Re-resolve scopes for DCR agents with a PrismID.
+	var prismID string
+	s.oauth.mu.Lock()
+	dc, isDynamic := s.oauth.dynamics[rt.clientID]
+	if isDynamic && dc != nil {
+		prismID = dc.PrismID
+	}
+	s.oauth.mu.Unlock()
+
+	if isDynamic && prismID != "" {
+		resolved := s.ResolveScopesByPrismID(prismID)
+		client = &ClientConfig{
+			ClientID:      client.ClientID,
+			ClientSecret:  client.ClientSecret,
+			AllowedScopes: resolved,
+			Description:   client.Description,
+		}
+	}
+
 	s.updateLastUsed(rt.clientID)
-	s.issueTokenWithRefresh(w, client)
+	s.issueTokenWithRefresh(w, client, prismID)
 }
 
 // issueTokenWithRefresh mints an access_token + refresh_token for the given client.
-func (s *Server) issueTokenWithRefresh(w http.ResponseWriter, client *ClientConfig) {
-	token, err := s.mintToken(client.ClientID, client.AllowedScopes)
+// prismID is optional — when present, it is included in the JWT for audit enrichment.
+func (s *Server) issueTokenWithRefresh(w http.ResponseWriter, client *ClientConfig, prismID ...string) {
+	var pid string
+	if len(prismID) > 0 {
+		pid = prismID[0]
+	}
+
+	token, err := s.mintToken(client.ClientID, client.AllowedScopes, pid)
 	if err != nil {
 		s.logger.Error("failed to mint token", "client_id", client.ClientID, "error", err)
 		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to issue token")

@@ -26,8 +26,10 @@ import (
 	"github.com/1broseidon/prism/internal/authserver"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/gateway"
+	"github.com/1broseidon/prism/internal/metrics"
 	"github.com/1broseidon/prism/internal/middleware"
 	"github.com/1broseidon/prism/internal/store"
+	"github.com/1broseidon/prism/internal/telemetry"
 )
 
 func main() {
@@ -50,6 +52,11 @@ func runServe() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	shutdownTracer := telemetry.Init("prism", logger)
+	defer func() { _ = shutdownTracer(context.Background()) }()
+
+	metrics.Init()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -88,7 +95,7 @@ func runServe() {
 	}
 	authSrv, authJWKS := setupEmbeddedAuth(cfg, kvStore, logger)
 
-	handler := buildHandler(cfg, gw, authJWKS, logger)
+	handler := buildHandler(cfg, gw, authJWKS, authSrv, logger)
 	mainMux := buildMux(cfg, handler, authSrv, logger)
 
 	mainServer := &http.Server{
@@ -99,6 +106,11 @@ func runServe() {
 	auditor := buildAuditLogger(cfg, logger)
 	gw.SetAuditLogger(auditor)
 
+	// Live policy resolver: scope enforcement reads from KV store on every tool call,
+	// bypassing stale MCP session context. Cached 5 seconds to limit KV reads.
+	policyResolver := auth.NewCachedPolicyResolver(authSrv, 5*time.Second)
+	gw.SetPolicyResolver(policyResolver)
+
 	// Build admin API with agent/audit adapters.
 	agentsFn := func() []any {
 		agents := authSrv.ListAgents()
@@ -107,9 +119,6 @@ func runServe() {
 			result[i] = agents[i]
 		}
 		return result
-	}
-	updateFn := func(id string, scopes []string) bool {
-		return authSrv.UpdateAgentScopes(id, scopes)
 	}
 	eventsFn := func() []any {
 		entries := auditor.Recent()
@@ -125,7 +134,9 @@ func runServe() {
 	removeStaleFn := func() int {
 		return authSrv.RemoveStaleAgents(7 * 24 * time.Hour)
 	}
-	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, updateFn, removeFn, removeStaleFn, eventsFn)
+	agentMgr := &authServerAgentManager{srv: authSrv}
+	groupMgr := &authServerGroupManager{srv: authSrv}
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -134,7 +145,7 @@ func runServe() {
 	errCh := make(chan error, 2)
 	startServers(cfg, mainServer, adminServer, logger, errCh)
 	printStartupBanner(cfg, gw, logger)
-	waitForShutdown(cfg, *configPath, mainServer, adminServer, gw, logger, errCh)
+	waitForShutdown(cfg, *configPath, mainServer, adminServer, gw, authSrv, logger, errCh)
 }
 
 // setupGateway creates the gateway and connects backends.
@@ -178,6 +189,15 @@ func setupEmbeddedAuth(cfg *config.Loaded, kvStore store.Store, logger *slog.Log
 		DefaultScopes:   ea.DefaultScopes,
 	}
 
+	// Convert config group definitions into authserver GroupConfig for policy resolution.
+	var groups map[string]authserver.GroupConfig
+	if ea.Groups != nil {
+		groups = make(map[string]authserver.GroupConfig, len(ea.Groups))
+		for name, g := range ea.Groups {
+			groups[name] = authserver.GroupConfig{Scopes: g.Scopes}
+		}
+	}
+
 	keyPath := ensureSigningKey(logger)
 	km, err := authserver.NewKeyManager(keyPath)
 	if err != nil {
@@ -185,7 +205,7 @@ func setupEmbeddedAuth(cfg *config.Loaded, kvStore store.Store, logger *slog.Log
 		os.Exit(1)
 	}
 
-	srv = authserver.NewServer(authCfg, km, kvStore, logger)
+	srv = authserver.NewServer(authCfg, km, kvStore, logger, groups)
 	jwksData = km.JWKS()
 
 	logger.Info("embedded auth server enabled",
@@ -196,16 +216,112 @@ func setupEmbeddedAuth(cfg *config.Loaded, kvStore store.Store, logger *slog.Log
 	return srv, jwksData
 }
 
+// authServerAgentManager adapts authserver.Server to the admin.AgentManager interface.
+type authServerAgentManager struct {
+	srv *authserver.Server
+}
+
+func (m *authServerAgentManager) ListAgents() []any {
+	agents := m.srv.ListAgents()
+	result := make([]any, len(agents))
+	for i := range agents {
+		result[i] = agents[i]
+	}
+	return result
+}
+
+func (m *authServerAgentManager) GetAgentByPrismID(prismID string) any {
+	return m.srv.GetAgentByPrismID(prismID)
+}
+
+func (m *authServerAgentManager) SetAgentPolicy(prismID string, groups []string, grant []string, deny []string) error {
+	return m.srv.SetAgentPolicy(prismID, &authserver.AgentPolicy{
+		Groups: groups,
+		Grant:  grant,
+		Deny:   deny,
+	})
+}
+
+func (m *authServerAgentManager) DeleteAgentPolicy(prismID string) error {
+	return m.srv.DeleteAgentPolicy(prismID)
+}
+
+func (m *authServerAgentManager) RemoveAgent(clientID string) bool {
+	return m.srv.RemoveAgent(clientID)
+}
+
+func (m *authServerAgentManager) RemoveStaleAgents() int {
+	return m.srv.RemoveStaleAgents(7 * 24 * time.Hour)
+}
+
+// authServerGroupManager adapts authserver.Server to the admin.GroupManager interface.
+type authServerGroupManager struct {
+	srv *authserver.Server
+}
+
+func (m *authServerGroupManager) ListGroups() []admin.GroupInfo {
+	serverGroups := m.srv.ListGroups()
+	result := make([]admin.GroupInfo, len(serverGroups))
+	for i, g := range serverGroups {
+		result[i] = admin.GroupInfo{
+			Name:   g.Name,
+			Scopes: g.Scopes,
+			Source: g.Source,
+		}
+	}
+	return result
+}
+
+func (m *authServerGroupManager) GetGroup(name string) *admin.GroupInfo {
+	groups := m.srv.ListGroups()
+	for _, g := range groups {
+		if g.Name == name {
+			return &admin.GroupInfo{
+				Name:   g.Name,
+				Scopes: g.Scopes,
+				Source: g.Source,
+			}
+		}
+	}
+	return nil
+}
+
+func (m *authServerGroupManager) SetGroup(name string, scopes []string) error {
+	// Reject edits to config-defined groups.
+	if m.srv.IsConfigGroup(name) {
+		return fmt.Errorf("cannot modify config-defined group %q", name)
+	}
+	return m.srv.SetGroup(name, &authserver.GroupConfig{Scopes: scopes})
+}
+
+func (m *authServerGroupManager) DeleteGroup(name string) error {
+	// Reject deletion of config-defined groups.
+	if m.srv.IsConfigGroup(name) {
+		return fmt.Errorf("cannot delete config-defined group %q", name)
+	}
+	return m.srv.DeleteGroup(name)
+}
+
+func (m *authServerGroupManager) DefaultScopes() []string {
+	return m.srv.DefaultScopes()
+}
+
+func (m *authServerGroupManager) SetDefaultScopes(scopes []string) error {
+	return m.srv.SetDefaultScopes(scopes)
+}
+
 // buildHandler wraps the gateway handler with auth and rate-limit middleware.
-func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, logger *slog.Logger) http.Handler {
+func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, authSrv *authserver.Server, logger *slog.Logger) http.Handler {
 	var middlewares []middleware.Middleware
 
 	ea := cfg.EmbeddedAuth
+	genChecker := auth.NewCachedGenerationChecker(authSrv, 5*time.Second)
 	validator := auth.NewTokenValidator(&auth.TokenValidatorConfig{
-		IssuerURL:      ea.Issuer,
-		Audience:       ea.Issuer,
-		StaticJWKS:     authJWKS,
-		RequiredScopes: ea.RequiredScopes,
+		IssuerURL:         ea.Issuer,
+		Audience:          ea.Issuer,
+		StaticJWKS:        authJWKS,
+		RequiredScopes:    ea.RequiredScopes,
+		GenerationChecker: genChecker,
 	})
 
 	logger.Info("OAuth 2.1 token validation enabled", "issuer", ea.Issuer)
@@ -330,7 +446,7 @@ func printStartupBanner(cfg *config.Loaded, gw *gateway.Gateway, logger *slog.Lo
 
 // waitForShutdown blocks until a signal or server error, then gracefully shuts down.
 // On SIGHUP, reloads config and hot-adds/removes backends.
-func waitForShutdown(cfg *config.Loaded, configPath string, mainServer, adminServer *http.Server, gw *gateway.Gateway, logger *slog.Logger, errCh <-chan error) {
+func waitForShutdown(cfg *config.Loaded, configPath string, mainServer, adminServer *http.Server, gw *gateway.Gateway, authSrv *authserver.Server, logger *slog.Logger, errCh <-chan error) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
@@ -339,7 +455,7 @@ func waitForShutdown(cfg *config.Loaded, configPath string, mainServer, adminSer
 		case sig := <-sigCh:
 			if sig == syscall.SIGHUP {
 				logger.Info("SIGHUP received — reloading config")
-				reloadConfig(configPath, gw, logger)
+				reloadConfig(configPath, gw, authSrv, logger)
 				continue
 			}
 			logger.Info("received signal", "signal", sig)
@@ -369,13 +485,43 @@ func waitForShutdown(cfg *config.Loaded, configPath string, mainServer, adminSer
 	logger.Info("shutdown complete")
 }
 
-// reloadConfig re-reads the config file, diffs mcpServers, and hot-adds/removes backends.
-func reloadConfig(configPath string, gw *gateway.Gateway, logger *slog.Logger) {
+// reloadConfig re-reads the config file, reloads policy (static clients, groups,
+// default_scopes) on the auth server, and diffs mcpServers for backend add/remove.
+// Dynamic (DCR) clients and refresh tokens are preserved across reloads.
+func reloadConfig(configPath string, gw *gateway.Gateway, authSrv *authserver.Server, logger *slog.Logger) {
 	newCfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error("reload failed — keeping current config", "error", err)
 		return
 	}
+
+	// --- Reload policy on the auth server ---
+	if newCfg.EmbeddedAuth != nil && authSrv != nil {
+		ea := newCfg.EmbeddedAuth
+
+		// Convert embedded clients to authserver clients (same as setupEmbeddedAuth).
+		staticClients := make([]authserver.ClientConfig, len(ea.Clients))
+		for i, c := range ea.Clients {
+			staticClients[i] = authserver.ClientConfig{
+				ClientID:      c.ClientID,
+				ClientSecret:  c.ClientSecret,
+				AllowedScopes: c.AllowedScopes,
+			}
+		}
+
+		// Convert config group definitions to authserver GroupConfig.
+		var groups map[string]authserver.GroupConfig
+		if ea.Groups != nil {
+			groups = make(map[string]authserver.GroupConfig, len(ea.Groups))
+			for name, g := range ea.Groups {
+				groups[name] = authserver.GroupConfig{Scopes: g.Scopes}
+			}
+		}
+
+		authSrv.ReloadPolicy(staticClients, groups, ea.DefaultScopes)
+	}
+
+	// --- Diff mcpServers for backend add/remove ---
 
 	// Build sets of current and new backend IDs.
 	currentIDs := make(map[string]struct{})
