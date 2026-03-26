@@ -103,8 +103,8 @@ func runServe() {
 	agentsFn := func() []any {
 		agents := authSrv.ListAgents()
 		result := make([]any, len(agents))
-		for i, a := range agents {
-			result[i] = a
+		for i := range agents {
+			result[i] = agents[i]
 		}
 		return result
 	}
@@ -119,7 +119,13 @@ func runServe() {
 		}
 		return result
 	}
-	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, updateFn, eventsFn)
+	removeFn := func(id string) bool {
+		return authSrv.RemoveAgent(id)
+	}
+	removeStaleFn := func() int {
+		return authSrv.RemoveStaleAgents(7 * 24 * time.Hour)
+	}
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, updateFn, removeFn, removeStaleFn, eventsFn)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -229,6 +235,7 @@ func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Serv
 		authRoutes := authSrv.Routes()
 		mux.Handle("POST /token", authRoutes)
 		mux.Handle("GET /authorize", authRoutes)
+		mux.Handle("POST /authorize", authRoutes)
 		mux.Handle("POST /register", authRoutes)
 		mux.Handle("GET /.well-known/jwks.json", authRoutes)
 		mux.Handle("GET /.well-known/oauth-authorization-server", authRoutes)

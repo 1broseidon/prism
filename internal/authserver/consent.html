@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism — Authorize Agent</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    background: #000; color: #e0e0e0;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh;
+  }
+  .card {
+    background: #111; border: 1px solid #222; border-radius: 12px;
+    padding: 32px; max-width: 420px; width: 100%;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 24px; }
+  .agent-name {
+    font-family: 'SF Mono', monospace; font-size: 14px;
+    color: #6af; background: #0a0a1a; border: 1px solid #1a1a3a;
+    padding: 8px 12px; border-radius: 6px; margin-bottom: 20px;
+  }
+  label { font-size: 13px; color: #888; display: block; margin-bottom: 6px; }
+  input[type="text"] {
+    width: 100%; padding: 10px 12px; background: #0a0a0a; color: #fff;
+    border: 1px solid #333; border-radius: 6px; font-size: 14px;
+    font-family: inherit; outline: none;
+  }
+  input[type="text"]:focus { border-color: #4a4aff; }
+  .help { font-size: 11px; color: #555; margin-top: 4px; }
+  .actions { margin-top: 24px; display: flex; gap: 12px; }
+  button {
+    flex: 1; padding: 10px; border-radius: 6px; font-size: 14px;
+    font-family: inherit; cursor: pointer; border: none;
+  }
+  .approve {
+    background: #2a5; color: #fff; font-weight: 600;
+  }
+  .approve:hover { background: #3b6; }
+  .deny {
+    background: #1a1a1a; color: #888; border: 1px solid #333;
+  }
+  .deny:hover { background: #222; color: #fff; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Authorize Agent</h1>
+  <p class="subtitle">An agent wants to connect to Prism</p>
+  <div class="agent-name">{{.ClientName}}</div>
+  <form method="POST" action="/authorize">
+    <input type="hidden" name="client_id" value="{{.ClientID}}">
+    <input type="hidden" name="response_type" value="{{.ResponseType}}">
+    <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+    <input type="hidden" name="state" value="{{.State}}">
+    <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+    <input type="hidden" name="code_challenge_method" value="{{.ChallengeMethod}}">
+    <label for="label">Name this agent</label>
+    <input type="text" id="label" name="label" value="{{.ClientName}}" autofocus>
+    <p class="help">A label to identify this agent in the admin dashboard</p>
+    <div class="actions">
+      <button type="button" class="deny" onclick="deny()">Deny</button>
+      <button type="submit" class="approve">Approve</button>
+    </div>
+  </form>
+</div>
+<script>
+function deny() {
+  const uri = document.querySelector('input[name=redirect_uri]').value;
+  const state = document.querySelector('input[name=state]').value;
+  const u = new URL(uri);
+  u.searchParams.set('error', 'access_denied');
+  if (state) u.searchParams.set('state', state);
+  window.location = u.toString();
+}
+</script>
+</body>
+</html>

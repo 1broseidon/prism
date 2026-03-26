@@ -64,3 +64,29 @@ func (a *API) handleEvents(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, a.eventsFn())
 }
+
+func (a *API) handleRemoveAgent(w http.ResponseWriter, r *http.Request) {
+	if a.removeFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent management not available"})
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/agents/")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent id required"})
+		return
+	}
+	if !a.removeFn(id) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found or is static"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "removed": id})
+}
+
+func (a *API) handleRemoveStaleAgents(w http.ResponseWriter, _ *http.Request) {
+	if a.removeStaleFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent management not available"})
+		return
+	}
+	count := a.removeStaleFn()
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "removed": count})
+}

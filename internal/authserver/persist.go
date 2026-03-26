@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 // Key prefixes for the KV store.
@@ -14,14 +15,18 @@ const (
 )
 
 // persistedClient is the on-disk representation of a DCR client.
-// Secrets are stored as bcrypt hashes — never plaintext.
+// Secrets are stored as SHA-256 hashes — never plaintext.
 type persistedClient struct {
 	ClientID     string   `json:"client_id"`
 	ClientName   string   `json:"client_name"`
-	SecretHash   string   `json:"secret_hash"` // bcrypt hash of client_secret
+	PrismID      string   `json:"prism_id"`    // Prism-generated stable UUID
+	Label        string   `json:"label"`       // Operator-assigned label from consent page
+	SecretHash   string   `json:"secret_hash"` // SHA-256 hash of client_secret
 	Scopes       []string `json:"scopes"`
 	RedirectURIs []string `json:"redirect_uris"`
 	Dynamic      bool     `json:"dynamic"`
+	CreatedAt    string   `json:"created_at,omitempty"`   // RFC 3339
+	LastUsedAt   string   `json:"last_used_at,omitempty"` // RFC 3339, updated on refresh
 }
 
 // persistClient saves a DCR client to the KV store.
@@ -42,6 +47,7 @@ func (s *Server) persistClient(clientID, clientSecret, clientName string, scopes
 		Scopes:       scopes,
 		RedirectURIs: redirectURIs,
 		Dynamic:      true,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 
 	data, err := json.Marshal(pc)
@@ -53,6 +59,55 @@ func (s *Server) persistClient(clientID, clientSecret, clientName string, scopes
 	if err := s.store.Set(clientKeyPrefix+clientID, data); err != nil {
 		s.logger.Warn("failed to persist client", "client_id", clientID, "error", err)
 	}
+}
+
+// updateClientIdentity sets the PrismID and Label on a persisted client.
+func (s *Server) updateClientIdentity(clientID, prismID, label string) {
+	if s.store == nil {
+		return
+	}
+	data, getErr := s.store.Get(clientKeyPrefix + clientID)
+	if getErr != nil {
+		return
+	}
+	var pc persistedClient
+	if getErr = json.Unmarshal(data, &pc); getErr != nil {
+		return
+	}
+	pc.PrismID = prismID
+	pc.Label = label
+	updated, _ := json.Marshal(pc)
+	if err := s.store.Set(clientKeyPrefix+clientID, updated); err != nil {
+		s.logger.Warn("failed to persist client identity", "client_id", clientID, "error", err)
+	}
+}
+
+// updateLastUsed updates the LastUsedAt timestamp on a dynamic client.
+func (s *Server) updateLastUsed(clientID string) {
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	// Update in-memory.
+	s.oauth.mu.Lock()
+	if dc, ok := s.oauth.dynamics[clientID]; ok {
+		dc.LastUsedAt = nowStr
+	}
+	s.oauth.mu.Unlock()
+
+	// Update in KV store.
+	if s.store == nil {
+		return
+	}
+	data, getErr := s.store.Get(clientKeyPrefix + clientID)
+	if getErr != nil {
+		return
+	}
+	var pc persistedClient
+	if getErr = json.Unmarshal(data, &pc); getErr != nil {
+		return
+	}
+	pc.LastUsedAt = nowStr
+	updated, _ := json.Marshal(pc)
+	_ = s.store.Set(clientKeyPrefix+clientID, updated)
 }
 
 // persistRefreshToken saves a refresh token → client_id mapping.
@@ -116,9 +171,17 @@ func (s *Server) loadPersistedState() {
 			ClientName:   pc.ClientName,
 			Scopes:       pc.Scopes,
 			RedirectURIs: pc.RedirectURIs,
+			PrismID:      pc.PrismID,
+			Label:        pc.Label,
+			CreatedAt:    pc.CreatedAt,
+			LastUsedAt:   pc.LastUsedAt,
 		}
 
-		s.logger.Info("restored persisted client", "client_id", pc.ClientID, "name", pc.ClientName)
+		displayName := pc.Label
+		if displayName == "" {
+			displayName = pc.ClientName
+		}
+		s.logger.Info("restored persisted client", "client_id", pc.ClientID, "name", displayName, "prism_id", pc.PrismID)
 	}
 
 	// Load refresh tokens.

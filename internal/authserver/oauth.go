@@ -34,6 +34,11 @@ type dynamicClient struct {
 	Scopes                []string
 	RegistrationToken     string
 	RegistrationClientURI string
+	// Identity fields — populated at consent time, restored from KV store.
+	PrismID    string // Stable UUID, generated at operator consent. Policy target.
+	Label      string // Operator-assigned name from consent page.
+	CreatedAt  string // RFC 3339, set at DCR registration.
+	LastUsedAt string // RFC 3339, updated on refresh token exchange.
 }
 
 // refreshToken maps a refresh token string to the client_id it was issued for.
@@ -124,6 +129,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	base := strings.TrimRight(s.cfg.Issuer, "/")
 	regURI := base + "/register/" + clientID
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	dc := &dynamicClient{
 		ClientID:              clientID,
 		ClientSecret:          clientSecret,
@@ -132,6 +138,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Scopes:                scopes,
 		RegistrationToken:     regToken,
 		RegistrationClientURI: regURI,
+		CreatedAt:             now,
 	}
 
 	// Store dynamic client and also register it as a regular client for token issuance.
@@ -176,79 +183,92 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 // --- Authorization endpoint (OAuth 2.1 Authorization Code + PKCE) ---
 
-func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+// authorizeParams holds validated OAuth authorize request parameters.
+type authorizeParams struct {
+	clientID        string
+	redirectURI     string
+	state           string
+	codeChallenge   string
+	challengeMethod string
+}
 
-	responseType := q.Get("response_type")
-	clientID := q.Get("client_id")
-	redirectURI := q.Get("redirect_uri")
-	state := q.Get("state")
-	codeChallenge := q.Get("code_challenge")
-	challengeMethod := q.Get("code_challenge_method")
-	// RFC 8707 resource parameter — acknowledged, not enforced yet.
-
+// validateAuthorizeParams validates the OAuth authorization request parameters.
+// Returns nil and writes an error response if validation fails.
+func (s *Server) validateAuthorizeParams(w http.ResponseWriter, vals url.Values) *authorizeParams {
+	responseType := vals.Get("response_type")
 	if responseType != "code" {
 		s.writeOAuthError(w, http.StatusBadRequest, "unsupported_response_type",
 			"only response_type=code is supported")
-		return
+		return nil
 	}
 
+	clientID := vals.Get("client_id")
 	if clientID == "" {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
-		return
+		return nil
 	}
 
-	// Look up client (supports both static and dynamic clients).
 	s.mu.RLock()
 	_, clientExists := s.clients[clientID]
 	s.mu.RUnlock()
 	if !clientExists {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "unknown client_id")
-		return
+		return nil
 	}
 
+	redirectURI := vals.Get("redirect_uri")
 	if redirectURI == "" {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "redirect_uri is required")
-		return
+		return nil
 	}
 
+	codeChallenge := vals.Get("code_challenge")
 	if codeChallenge == "" {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "code_challenge is required (PKCE)")
-		return
+		return nil
 	}
+
+	challengeMethod := vals.Get("code_challenge_method")
 	if challengeMethod == "" {
 		challengeMethod = "S256"
 	}
 	if challengeMethod != "S256" {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request",
 			"only code_challenge_method=S256 is supported")
-		return
+		return nil
 	}
 
-	// Generate authorization code.
+	return &authorizeParams{
+		clientID:        clientID,
+		redirectURI:     redirectURI,
+		state:           vals.Get("state"),
+		codeChallenge:   codeChallenge,
+		challengeMethod: challengeMethod,
+	}
+}
+
+// issueAuthCode generates an authorization code, stores it, and redirects.
+func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, p *authorizeParams) {
 	code, err := generateRandomString(32)
 	if err != nil {
 		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to generate code")
 		return
 	}
 
-	// Store the code with PKCE challenge for verification at token exchange.
 	s.oauth.mu.Lock()
 	s.oauth.codes[code] = &authCode{
 		code:        code,
-		clientID:    clientID,
-		redirectURI: redirectURI,
-		challenge:   codeChallenge,
-		method:      challengeMethod,
+		clientID:    p.clientID,
+		redirectURI: p.redirectURI,
+		challenge:   p.codeChallenge,
+		method:      p.challengeMethod,
 		expiresAt:   time.Now().Add(10 * time.Minute),
 	}
 	s.oauth.mu.Unlock()
 
-	s.logger.Info("authorization code issued", "client_id", clientID)
+	s.logger.Info("authorization code issued", "client_id", p.clientID)
 
-	// Auto-approve: redirect immediately with the authorization code.
-	// In production, this could show a consent page.
-	redirectURL, err := url.Parse(redirectURI)
+	redirectURL, err := url.Parse(p.redirectURI)
 	if err != nil {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid redirect_uri")
 		return
@@ -256,12 +276,116 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	rq := redirectURL.Query()
 	rq.Set("code", code)
-	if state != "" {
-		rq.Set("state", state)
+	if p.state != "" {
+		rq.Set("state", p.state)
 	}
 	redirectURL.RawQuery = rq.Encode()
 
 	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
+}
+
+// handleAuthorize handles GET /authorize.
+// If the agent has already been consented (has a PrismID), auto-approve.
+// Otherwise, show the consent page for the operator to name the agent.
+func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	p := s.validateAuthorizeParams(w, r.URL.Query())
+	if p == nil {
+		return
+	}
+
+	// Check if this client already has consent (PrismID set).
+	s.oauth.mu.Lock()
+	dc, hasDynamic := s.oauth.dynamics[p.clientID]
+	s.oauth.mu.Unlock()
+
+	if hasDynamic && dc.PrismID != "" {
+		// Already consented — auto-approve silently.
+		s.issueAuthCode(w, r, p)
+		return
+	}
+
+	// First time — show consent page.
+	clientName := ""
+	if hasDynamic {
+		clientName = dc.ClientName
+	}
+	if clientName == "" {
+		clientName = p.clientID
+	}
+
+	s.renderConsent(w, &consentData{
+		ClientName:      clientName,
+		ClientID:        p.clientID,
+		ResponseType:    "code",
+		RedirectURI:     p.redirectURI,
+		State:           p.state,
+		CodeChallenge:   p.codeChallenge,
+		ChallengeMethod: p.challengeMethod,
+	})
+}
+
+// handleAuthorizePost processes the consent form submission.
+// Generates a PrismID (UUID), stores the operator label, then issues the auth code.
+func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	if err := r.ParseForm(); err != nil {
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "failed to parse form")
+		return
+	}
+
+	p := s.validateAuthorizeParams(w, r.Form)
+	if p == nil {
+		return
+	}
+
+	label := r.FormValue("label")
+	if label == "" {
+		label = p.clientID
+	}
+
+	// Generate Prism UUID for this agent.
+	prismID, err := generateUUID()
+	if err != nil {
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to generate agent ID")
+		return
+	}
+
+	// Update in-memory dynamic client.
+	s.oauth.mu.Lock()
+	dc, ok := s.oauth.dynamics[p.clientID]
+	if ok {
+		// Only set if not already consented (race protection).
+		if dc.PrismID == "" {
+			dc.PrismID = prismID
+			dc.Label = label
+		} else {
+			prismID = dc.PrismID // use existing
+		}
+	}
+	s.oauth.mu.Unlock()
+
+	// Persist identity to KV store.
+	s.updateClientIdentity(p.clientID, prismID, label)
+
+	s.logger.Info("agent consented",
+		"client_id", p.clientID,
+		"prism_id", prismID,
+		"label", label,
+	)
+
+	s.issueAuthCode(w, r, p)
+}
+
+// generateUUID generates a UUIDv4 string using crypto/rand.
+func generateUUID() (string, error) {
+	var uuid [16]byte
+	if _, err := rand.Read(uuid[:]); err != nil {
+		return "", err
+	}
+	uuid[6] = (uuid[6] & 0x0f) | 0x40 // version 4
+	uuid[8] = (uuid[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16]), nil
 }
 
 // --- Authorization code exchange in token endpoint ---
@@ -328,6 +452,7 @@ func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	s.updateLastUsed(ac.clientID)
 	s.issueTokenWithRefresh(w, client)
 }
 
@@ -363,6 +488,7 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.updateLastUsed(rt.clientID)
 	s.issueTokenWithRefresh(w, client)
 }
 

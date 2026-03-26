@@ -70,9 +70,9 @@
 </header>
 <div class="grid">
   <div class="panel" id="agents-panel">
-    <h2>Agents <span class="count" id="agent-count"></span></h2>
+    <h2>Agents <span class="count" id="agent-count"></span> <button onclick="cleanStale()" style="float:right;font-size:11px">Clean stale</button></h2>
     <table>
-      <thead><tr><th>Agent</th><th>Type</th><th>Scopes</th></tr></thead>
+      <thead><tr><th>Agent</th><th>Prism ID</th><th>Status</th><th>Scopes</th><th></th></tr></thead>
       <tbody id="agents-body"></tbody>
     </table>
     <div class="empty" id="agents-empty">No agents registered yet. Agents self-register via OAuth DCR.</div>
@@ -122,17 +122,18 @@ async function refreshAgents() {
     $('#agent-count').textContent = `(${agents.length})`;
     agentNames = {};
     agents.forEach(a => {
-      if (a.description) agentNames[a.client_id] = a.description;
+      const displayName = a.label || a.description || a.client_id;
+      agentNames[a.client_id] = displayName;
       const tr = document.createElement('tr');
       const scopes = (a.scopes || []).map(s =>
         `<span class="tag scope">${esc(s)}</span>`
       ).join('');
-      const type = a.dynamic
-        ? '<span class="tag dynamic">dcr</span>'
-        : '<span class="tag static">static</span>';
-      const name = a.description || a.client_id;
-      const idShort = a.client_id.substring(0, 12);
-      tr.innerHTML = `<td>${esc(name)}<br><span class="tag static">${esc(idShort)}…</span></td><td>${type}</td><td>${scopes}</td>`;
+      const prismID = a.prism_id ? a.prism_id.substring(0, 8) + '...' : '--';
+      const status = getAgentStatus(a);
+      const removeBtn = a.dynamic
+        ? `<button onclick="removeAgent('${esc(a.client_id)}')" style="font-size:11px">remove</button>`
+        : '';
+      tr.innerHTML = `<td>${esc(displayName)}<br><span class="tag static">${esc(a.client_id.substring(0,8))}…</span></td><td><span class="tag static">${esc(prismID)}</span></td><td>${status}</td><td>${scopes}</td><td>${removeBtn}</td>`;
       body.appendChild(tr);
     });
   } catch {}
@@ -180,6 +181,28 @@ async function refreshEvents() {
       body.appendChild(tr);
     });
   } catch {}
+}
+
+function getAgentStatus(a) {
+  const ts = a.last_used_at || a.created_at;
+  if (!ts) return '<span class="tag dynamic">new</span>';
+  const age = Date.now() - new Date(ts).getTime();
+  const days = Math.floor(age / 86400000);
+  const hours = Math.floor(age / 3600000);
+  if (days > 7) return `<span class="tag denied">stale (${days}d)</span>`;
+  if (hours > 0) return `<span class="tag allowed">active (${hours}h ago)</span>`;
+  return '<span class="tag allowed">active (now)</span>';
+}
+
+async function removeAgent(id) {
+  await fetch('/agents/' + id, { method: 'DELETE' });
+  refreshAgents();
+}
+
+async function cleanStale() {
+  const r = await fetch('/agents/stale', { method: 'DELETE' });
+  const d = await r.json();
+  refreshAgents();
 }
 
 function esc(s) {

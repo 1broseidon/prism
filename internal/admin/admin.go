@@ -10,23 +10,27 @@ import (
 
 // API exposes admin endpoints.
 type API struct {
-	statusFn   func() any
-	agentsFn   func() []any
-	updateFn   func(string, []string) bool
-	eventsFn   func() []any
-	backendMgr BackendManager
-	startedAt  time.Time
+	statusFn      func() any
+	agentsFn      func() []any
+	updateFn      func(string, []string) bool
+	removeFn      func(string) bool
+	removeStaleFn func() int
+	eventsFn      func() []any
+	backendMgr    BackendManager
+	startedAt     time.Time
 }
 
 // NewAPI creates an admin API.
-func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, updateFn func(string, []string) bool, eventsFn func() []any) *API {
+func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, updateFn func(string, []string) bool, removeFn func(string) bool, removeStaleFn func() int, eventsFn func() []any) *API {
 	return &API{
-		statusFn:   statusFn,
-		agentsFn:   agentsFn,
-		updateFn:   updateFn,
-		eventsFn:   eventsFn,
-		backendMgr: backendMgr,
-		startedAt:  time.Now(),
+		statusFn:      statusFn,
+		agentsFn:      agentsFn,
+		updateFn:      updateFn,
+		removeFn:      removeFn,
+		removeStaleFn: removeStaleFn,
+		eventsFn:      eventsFn,
+		backendMgr:    backendMgr,
+		startedAt:     time.Now(),
 	}
 }
 
@@ -39,6 +43,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /info", a.handleInfo)
 	mux.HandleFunc("GET /agents", a.handleAgents)
 	mux.HandleFunc("PUT /agents/", a.handleUpdateAgent)
+	mux.HandleFunc("DELETE /agents/stale", a.handleRemoveStaleAgents)
+	mux.HandleFunc("DELETE /agents/", a.handleRemoveAgent)
 	mux.HandleFunc("GET /events", a.handleEvents)
 	mux.HandleFunc("POST /backends/", a.handleAddBackend)
 	mux.HandleFunc("DELETE /backends/", a.handleRemoveBackend)

@@ -187,6 +187,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /token", s.handleToken)
 	mux.HandleFunc("GET /authorize", s.handleAuthorize)
+	mux.HandleFunc("POST /authorize", s.handleAuthorizePost)
 	mux.HandleFunc("POST /register", s.handleRegister)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleDiscovery)
@@ -202,9 +203,13 @@ func (s *Server) IsEphemeralKey() bool {
 // AgentInfo is a summary of an agent for the admin API.
 type AgentInfo struct {
 	ClientID    string   `json:"client_id"`
+	PrismID     string   `json:"prism_id,omitempty"`
+	Label       string   `json:"label,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Scopes      []string `json:"scopes"`
 	Dynamic     bool     `json:"dynamic"`
+	CreatedAt   string   `json:"created_at,omitempty"`
+	LastUsedAt  string   `json:"last_used_at,omitempty"`
 }
 
 // ListAgents returns info about all registered agents (static + DCR).
@@ -214,17 +219,23 @@ func (s *Server) ListAgents() []AgentInfo {
 
 	agents := make([]AgentInfo, 0, len(s.clients))
 	for _, c := range s.clients {
-		isDynamic := false
 		s.oauth.mu.Lock()
-		_, isDynamic = s.oauth.dynamics[c.ClientID]
+		dc, isDynamic := s.oauth.dynamics[c.ClientID]
 		s.oauth.mu.Unlock()
 
-		agents = append(agents, AgentInfo{
+		ai := AgentInfo{
 			ClientID:    c.ClientID,
 			Description: c.Description,
 			Scopes:      c.AllowedScopes,
 			Dynamic:     isDynamic,
-		})
+		}
+		if isDynamic && dc != nil {
+			ai.PrismID = dc.PrismID
+			ai.Label = dc.Label
+			ai.CreatedAt = dc.CreatedAt
+			ai.LastUsedAt = dc.LastUsedAt
+		}
+		agents = append(agents, ai)
 	}
 	return agents
 }
@@ -241,6 +252,61 @@ func (s *Server) UpdateAgentScopes(clientID string, scopes []string) bool {
 	}
 	client.AllowedScopes = scopes
 	return true
+}
+
+// RemoveAgent deletes a dynamic agent by client_id.
+func (s *Server) RemoveAgent(clientID string) bool {
+	s.oauth.mu.Lock()
+	_, isDynamic := s.oauth.dynamics[clientID]
+	if isDynamic {
+		delete(s.oauth.dynamics, clientID)
+	}
+	s.oauth.mu.Unlock()
+
+	if !isDynamic {
+		return false
+	}
+
+	s.mu.Lock()
+	delete(s.clients, clientID)
+	s.mu.Unlock()
+
+	if s.store != nil {
+		_ = s.store.Delete(clientKeyPrefix + clientID)
+	}
+	s.logger.Info("agent removed", "client_id", clientID)
+	return true
+}
+
+// RemoveStaleAgents deletes dynamic agents not used in the given duration.
+func (s *Server) RemoveStaleAgents(maxAge time.Duration) int {
+	cutoff := time.Now().Add(-maxAge)
+	agents := s.ListAgents()
+	removed := 0
+
+	for i := range agents {
+		a := &agents[i]
+		if !a.Dynamic {
+			continue
+		}
+		ts := a.LastUsedAt
+		if ts == "" {
+			ts = a.CreatedAt
+		}
+		if ts == "" {
+			continue
+		}
+		t, parseErr := time.Parse(time.RFC3339, ts)
+		if parseErr != nil {
+			continue
+		}
+		if t.Before(cutoff) {
+			if s.RemoveAgent(a.ClientID) {
+				removed++
+			}
+		}
+	}
+	return removed
 }
 
 // --- Token endpoint ---
