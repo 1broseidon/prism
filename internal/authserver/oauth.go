@@ -36,17 +36,24 @@ type dynamicClient struct {
 	RegistrationClientURI string
 }
 
-// oauthStore holds in-memory state for DCR and authorization codes.
+// refreshToken maps a refresh token string to the client_id it was issued for.
+type refreshToken struct {
+	clientID string
+}
+
+// oauthStore holds in-memory state for DCR, authorization codes, and refresh tokens.
 type oauthStore struct {
 	mu       sync.Mutex
 	codes    map[string]*authCode      // keyed by code
 	dynamics map[string]*dynamicClient // keyed by client_id
+	refresh  map[string]*refreshToken  // keyed by refresh token string
 }
 
 func newOAuthStore() *oauthStore {
 	return &oauthStore{
 		codes:    make(map[string]*authCode),
 		dynamics: make(map[string]*dynamicClient),
+		refresh:  make(map[string]*refreshToken),
 	}
 }
 
@@ -316,7 +323,42 @@ func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Mint token with client's allowed scopes.
+	s.issueTokenWithRefresh(w, client)
+}
+
+// handleRefreshToken exchanges a refresh_token for a new access_token + refresh_token.
+func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
+	rtValue := r.FormValue("refresh_token") //nolint:gosec // body limited by caller
+	if rtValue == "" {
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required")
+		return
+	}
+
+	s.oauth.mu.Lock()
+	rt, ok := s.oauth.refresh[rtValue]
+	if ok {
+		delete(s.oauth.refresh, rtValue) // single use — rotate on each refresh
+	}
+	s.oauth.mu.Unlock()
+
+	if !ok {
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token not found or already used")
+		return
+	}
+
+	s.mu.RLock()
+	client, clientOK := s.clients[rt.clientID]
+	s.mu.RUnlock()
+	if !clientOK {
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client no longer exists")
+		return
+	}
+
+	s.issueTokenWithRefresh(w, client)
+}
+
+// issueTokenWithRefresh mints an access_token + refresh_token for the given client.
+func (s *Server) issueTokenWithRefresh(w http.ResponseWriter, client *ClientConfig) {
 	token, err := s.mintToken(client.ClientID, client.AllowedScopes)
 	if err != nil {
 		s.logger.Error("failed to mint token", "client_id", client.ClientID, "error", err)
@@ -324,11 +366,22 @@ func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	rt, err := generateRandomString(32)
+	if err != nil {
+		s.writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to generate refresh token")
+		return
+	}
+
+	s.oauth.mu.Lock()
+	s.oauth.refresh[rt] = &refreshToken{clientID: client.ClientID}
+	s.oauth.mu.Unlock()
+
 	s.writeJSON(w, http.StatusOK, TokenResponse{
-		AccessToken: token,
-		TokenType:   "Bearer",
-		ExpiresIn:   s.cfg.TokenTTLSeconds,
-		Scope:       strings.Join(client.AllowedScopes, " "),
+		AccessToken:  token,
+		TokenType:    "Bearer",
+		ExpiresIn:    s.cfg.TokenTTLSeconds,
+		Scope:        strings.Join(client.AllowedScopes, " "),
+		RefreshToken: rt,
 	})
 }
 

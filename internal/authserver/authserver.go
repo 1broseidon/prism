@@ -230,10 +230,11 @@ func (s *Server) UpdateAgentScopes(clientID string, scopes []string) bool {
 
 // TokenResponse is the successful token endpoint JSON response (RFC 6749 §5.1).
 type TokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
-	Scope       string `json:"scope"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	Scope        string `json:"scope"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // OAuthError is an OAuth 2.1 error response (RFC 6749 §5.2).
@@ -263,9 +264,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthCodeExchange(w, r)
 	case "client_credentials":
 		s.handleClientCredentials(w, r)
+	case "refresh_token":
+		s.handleRefreshToken(w, r)
 	default:
 		s.writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
-			"supported: client_credentials, authorization_code")
+			"supported: authorization_code, client_credentials, refresh_token")
 	}
 }
 
@@ -430,7 +433,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		JWKsURI:                           base + "/.well-known/jwks.json",
 		ScopesSupported:                   s.scopes,
 		ResponseTypesSupported:            []string{"code"},
-		GrantTypesSupported:               []string{"authorization_code", "client_credentials"},
+		GrantTypesSupported:               []string{"authorization_code", "client_credentials", "refresh_token"},
 		TokenEndpointAuthMethodsSupported: []string{"client_secret_post", "none"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
 	}
