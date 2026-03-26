@@ -43,7 +43,7 @@ func newTestServer(t *testing.T) *Server {
 		},
 	}
 
-	return NewServer(cfg, km, nil)
+	return NewServer(cfg, km, nil, nil)
 }
 
 func postToken(t *testing.T, srv *Server, form url.Values) *httptest.ResponseRecorder {

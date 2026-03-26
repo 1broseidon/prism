@@ -90,11 +90,21 @@ type JWKSet struct {
 type Server struct {
 	cfg     *Config
 	km      *KeyManager
+	store   kvStore
 	logger  *slog.Logger
 	mu      sync.RWMutex
 	clients map[string]*ClientConfig
 	scopes  []string
 	oauth   *oauthStore
+}
+
+// kvStore is the subset of store.Store that authserver needs.
+// Defined here to avoid a circular import.
+type kvStore interface {
+	Get(key string) ([]byte, error)
+	Set(key string, value []byte) error
+	Delete(key string) error
+	List(prefix string) ([]string, error)
 }
 
 // --- Construction ---
@@ -133,8 +143,9 @@ func NewKeyManager(path string) (*KeyManager, error) {
 // JWKS returns the pre-serialized JWKS JSON for pre-seeding token validators.
 func (km *KeyManager) JWKS() []byte { return km.jwks }
 
-// NewServer constructs a Server from the provided config and key manager.
-func NewServer(cfg *Config, km *KeyManager, logger *slog.Logger) *Server {
+// NewServer constructs a Server from the provided config, key manager, and KV store.
+// If kv is nil, state is not persisted (in-memory only).
+func NewServer(cfg *Config, km *KeyManager, kv kvStore, logger *slog.Logger) *Server {
 	clientMap := make(map[string]*ClientConfig, len(cfg.Clients))
 	scopeSet := make(map[string]struct{})
 
@@ -155,14 +166,20 @@ func NewServer(cfg *Config, km *KeyManager, logger *slog.Logger) *Server {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 
-	return &Server{
+	srv := &Server{
 		cfg:     cfg,
 		km:      km,
+		store:   kv,
 		logger:  logger,
 		clients: clientMap,
 		scopes:  scopes,
 		oauth:   newOAuthStore(),
 	}
+
+	// Restore persisted DCR clients and refresh tokens from the KV store.
+	srv.loadPersistedState()
+
+	return srv
 }
 
 // Routes returns an http.Handler with all prism-auth endpoints registered.
@@ -342,10 +359,18 @@ func (s *Server) authenticateClient(clientID, secret string) (*ClientConfig, boo
 		_ = subtle.ConstantTimeCompare([]byte(secret), []byte(""))
 		return nil, false
 	}
-	if subtle.ConstantTimeCompare([]byte(secret), []byte(client.ClientSecret)) != 1 {
-		return nil, false
+	// ClientSecret is stored as SHA-256 hash for DCR clients.
+	// Static clients from config store plaintext — hash the presented secret
+	// and try both comparisons.
+	presentedHash := sha256Hash(secret)
+	if subtle.ConstantTimeCompare([]byte(presentedHash), []byte(client.ClientSecret)) == 1 {
+		return client, true
 	}
-	return client, true
+	// Fallback: direct comparison for static config clients.
+	if subtle.ConstantTimeCompare([]byte(secret), []byte(client.ClientSecret)) == 1 {
+		return client, true
+	}
+	return nil, false
 }
 
 func resolveScopes(client *ClientConfig, requested []string) ([]string, error) {

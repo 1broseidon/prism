@@ -38,7 +38,7 @@ func main() {
 		logger.Warn("using ephemeral signing key (dev mode) — tokens become invalid after restart")
 	}
 
-	srv := authserver.NewServer(cfg, km, logger)
+	srv := authserver.NewServer(cfg, km, nil, logger)
 
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,

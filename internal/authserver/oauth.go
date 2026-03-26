@@ -139,14 +139,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.oauth.dynamics[clientID] = dc
 	s.oauth.mu.Unlock()
 
+	// Store the hashed secret — never plaintext.
+	secretHash := sha256Hash(clientSecret)
 	s.mu.Lock()
 	s.clients[clientID] = &ClientConfig{
 		ClientID:      clientID,
-		ClientSecret:  clientSecret,
+		ClientSecret:  secretHash,
 		AllowedScopes: scopes,
 		Description:   clientName,
 	}
 	s.mu.Unlock()
+
+	// Persist to KV store.
+	s.persistClient(clientID, clientSecret, clientName, scopes, req.RedirectURIs)
 
 	s.logger.Info("dynamic client registered", "client_id", clientID, "name", clientName)
 
@@ -334,12 +339,16 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rtHash := sha256Hash(rtValue)
 	s.oauth.mu.Lock()
-	rt, ok := s.oauth.refresh[rtValue]
+	rt, ok := s.oauth.refresh[rtHash]
 	if ok {
-		delete(s.oauth.refresh, rtValue) // single use — rotate on each refresh
+		delete(s.oauth.refresh, rtHash) // single use — rotate on each refresh
 	}
 	s.oauth.mu.Unlock()
+
+	// Remove from persistent store too.
+	s.deleteRefreshToken(rtValue)
 
 	if !ok {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token not found or already used")
@@ -372,9 +381,13 @@ func (s *Server) issueTokenWithRefresh(w http.ResponseWriter, client *ClientConf
 		return
 	}
 
+	rtHash := sha256Hash(rt)
 	s.oauth.mu.Lock()
-	s.oauth.refresh[rt] = &refreshToken{clientID: client.ClientID}
+	s.oauth.refresh[rtHash] = &refreshToken{clientID: client.ClientID}
 	s.oauth.mu.Unlock()
+
+	// Persist refresh token (hashed) to KV store.
+	s.persistRefreshToken(rt, client.ClientID)
 
 	s.writeJSON(w, http.StatusOK, TokenResponse{
 		AccessToken:  token,

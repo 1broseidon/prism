@@ -38,12 +38,26 @@ type Config struct {
 	// RateLimit sets global rate limiting. Per-server overrides are also supported.
 	RateLimit *RateLimitConfig `json:"rate_limit,omitempty"`
 
+	// Store configures the key-value backend for persisting state (DCR clients,
+	// refresh tokens). Default: bbolt at ~/.prism/prism.db.
+	Store *StoreConfig `json:"store,omitempty"`
+
 	// TLS enables HTTPS on the gateway listener.
 	// When set, the gateway serves TLS directly — no reverse proxy needed.
 	TLS *TLSConfig `json:"tls,omitempty"`
 
 	// ShutdownTimeout is the graceful shutdown duration. Default: "10s".
 	ShutdownTimeout Duration `json:"shutdown_timeout,omitempty"`
+}
+
+// StoreConfig configures the key-value backend.
+type StoreConfig struct {
+	// Type is "bbolt" (default) or "redis".
+	Type string `json:"type,omitempty"`
+	// URL is the Redis connection URL. Only used when type is "redis".
+	URL string `json:"url,omitempty"`
+	// Path overrides the bbolt file path. Default: ~/.prism/prism.db.
+	Path string `json:"path,omitempty"`
 }
 
 // TLSConfig enables direct TLS termination on the gateway.
@@ -267,6 +281,7 @@ type Loaded struct {
 	Admin           string
 	Servers         []ServerConfig
 	EmbeddedAuth    *EmbeddedAuthConfig
+	Store           *StoreConfig
 	TLS             *TLSConfig
 	Audit           *AuditConfig
 	RateLimit       *RateLimitConfig
@@ -417,6 +432,7 @@ func expand(cfg *Config) (*Loaded, error) {
 	loaded := &Loaded{
 		Listen:          cfg.Listen,
 		Admin:           cfg.Admin,
+		Store:           cfg.Store,
 		TLS:             cfg.TLS,
 		Audit:           cfg.Audit,
 		RateLimit:       cfg.RateLimit,

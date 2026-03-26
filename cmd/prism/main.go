@@ -27,6 +27,7 @@ import (
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/gateway"
 	"github.com/1broseidon/prism/internal/middleware"
+	"github.com/1broseidon/prism/internal/store"
 )
 
 func main() {
@@ -74,6 +75,10 @@ func runServe() {
 	gw := setupGateway(ctx, cfg, logger)
 	defer gw.Close()
 
+	// Open the KV store for persisting DCR clients and refresh tokens.
+	kvStore := openStore(cfg, logger)
+	defer func() { _ = kvStore.Close() }()
+
 	// Always start the embedded auth server — agents connect via OAuth DCR.
 	if cfg.EmbeddedAuth == nil {
 		cfg.EmbeddedAuth = &config.EmbeddedAuthConfig{
@@ -81,7 +86,7 @@ func runServe() {
 			RequiredScopes:  []string{"mcp:connect"},
 		}
 	}
-	authSrv, authJWKS := setupEmbeddedAuth(cfg, logger)
+	authSrv, authJWKS := setupEmbeddedAuth(cfg, kvStore, logger)
 
 	handler := buildHandler(cfg, gw, authJWKS, logger)
 	mainMux := buildMux(cfg, handler, authSrv, logger)
@@ -143,7 +148,7 @@ func setupGateway(ctx context.Context, cfg *config.Loaded, logger *slog.Logger) 
 // setupEmbeddedAuth creates an in-process OAuth 2.1 authorization server
 // from the policy.agents config. Returns the server and its JWKS bytes
 // (for pre-seeding the token validator).
-func setupEmbeddedAuth(cfg *config.Loaded, logger *slog.Logger) (srv *authserver.Server, jwksData []byte) {
+func setupEmbeddedAuth(cfg *config.Loaded, kvStore store.Store, logger *slog.Logger) (srv *authserver.Server, jwksData []byte) {
 	ea := cfg.EmbeddedAuth
 
 	// Derive issuer from listen address.
@@ -174,7 +179,7 @@ func setupEmbeddedAuth(cfg *config.Loaded, logger *slog.Logger) (srv *authserver
 		os.Exit(1)
 	}
 
-	srv = authserver.NewServer(authCfg, km, logger)
+	srv = authserver.NewServer(authCfg, km, kvStore, logger)
 	jwksData = km.JWKS()
 
 	logger.Info("embedded auth server enabled",
@@ -428,6 +433,48 @@ func buildAuditLogger(cfg *config.Loaded, logger *slog.Logger) *audit.Logger {
 
 	logger.Info("audit logging enabled", "output", output)
 	return audit.New(io.MultiWriter(f, os.Stderr))
+}
+
+// openStore initializes the KV store based on config.
+// Defaults to bbolt at ~/.prism/prism.db. Falls back to in-memory on error.
+func openStore(cfg *config.Loaded, logger *slog.Logger) store.Store {
+	sc := cfg.Store
+	if sc == nil {
+		sc = &config.StoreConfig{}
+	}
+
+	switch sc.Type {
+	case "redis":
+		if sc.URL == "" {
+			logger.Error("store.type=redis requires store.url")
+			os.Exit(1)
+		}
+		s, err := store.NewRedisStore(sc.URL)
+		if err != nil {
+			logger.Error("failed to connect to Redis", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("store: redis", "url", sc.URL)
+		return s
+
+	default: // "bbolt" or empty
+		path := sc.Path
+		if path == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				logger.Warn("cannot determine home dir for store — using temp dir", "error", err)
+				home = os.TempDir()
+			}
+			path = filepath.Join(home, ".prism", "prism.db")
+		}
+		s, err := store.NewBoltStore(path)
+		if err != nil {
+			logger.Warn("failed to open bbolt store — state will not persist", "error", err, "path", path)
+			return store.NewMemoryStore()
+		}
+		logger.Info("store: bbolt", "path", path)
+		return s
+	}
 }
 
 // ensureSigningKey returns the path to a persistent RSA signing key.
