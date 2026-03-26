@@ -135,7 +135,18 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	}
 
 	// Discover protected resource metadata (RFC 9728).
+	// The resource URL may differ from the backend URL (e.g. base URL vs /sse endpoint).
+	// Try the metadata URL's declared resource first, then fall back to base URL.
 	prm, err := oauthex.GetProtectedResourceMetadata(ctx, metadataURL, backendURL, nil)
+	if err != nil {
+		// Resource mismatch — try with the base URL (strip path).
+		baseURL, parseErr := url.Parse(backendURL)
+		if parseErr == nil {
+			baseURL.Path = ""
+			baseURL.RawQuery = ""
+			prm, err = oauthex.GetProtectedResourceMetadata(ctx, metadataURL, baseURL.String(), nil)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get protected resource metadata: %w", err)
 	}
