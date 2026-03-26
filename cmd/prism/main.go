@@ -106,21 +106,15 @@ func runServe() {
 	updateFn := func(id string, scopes []string) bool {
 		return authSrv.UpdateAgentScopes(id, scopes)
 	}
-	auditSub := admin.NewAuditSub(
-		func() chan any {
-			entryCh := auditor.Subscribe()
-			anyCh := make(chan any, 64)
-			go func() {
-				for e := range entryCh {
-					anyCh <- e
-				}
-				close(anyCh)
-			}()
-			return anyCh
-		},
-		func(_ chan any) {},
-	)
-	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, updateFn, auditSub)
+	eventsFn := func() []any {
+		entries := auditor.Recent()
+		result := make([]any, len(entries))
+		for i := range entries {
+			result[i] = entries[i]
+		}
+		return result
+	}
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, updateFn, eventsFn)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

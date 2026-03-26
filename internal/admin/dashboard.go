@@ -3,7 +3,6 @@ package admin
 import (
 	"embed"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 )
@@ -58,40 +57,10 @@ func (a *API) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "agent": id})
 }
 
-func (a *API) handleEvents(w http.ResponseWriter, r *http.Request) {
-	if a.auditor == nil {
-		http.Error(w, "audit not enabled", http.StatusServiceUnavailable)
+func (a *API) handleEvents(w http.ResponseWriter, _ *http.Request) {
+	if a.eventsFn == nil {
+		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	ch := a.auditor.subFn()
-	defer a.auditor.unsubFn(ch)
-
-	for {
-		select {
-		case entry, ok := <-ch:
-			if !ok {
-				return
-			}
-			data, err := json.Marshal(entry)
-			if err != nil {
-				continue
-			}
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
+	writeJSON(w, http.StatusOK, a.eventsFn())
 }

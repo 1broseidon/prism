@@ -95,8 +95,6 @@
 </div>
 <script>
 const $ = s => document.querySelector(s);
-const MAX_EVENTS = 200;
-let eventCount = 0;
 
 async function fetchJSON(path) {
   const r = await fetch(path);
@@ -152,50 +150,31 @@ async function refreshBackends() {
   } catch {}
 }
 
-function connectEvents() {
-  const es = new EventSource('/events');
-  es.onmessage = e => {
-    try {
-      const entry = JSON.parse(e.data);
-      addEvent(entry);
-    } catch {}
-  };
-  es.onerror = () => {
-    setTimeout(() => connectEvents(), 3000);
-  };
-}
-
-function addEvent(e) {
-  $('#events-empty').style.display = 'none';
-  eventCount++;
-  $('#event-count').textContent = `(${eventCount})`;
-
-  const body = $('#events-body');
-  const tr = document.createElement('tr');
-  tr.className = 'event-row';
-
-  const ts = e.ts ? e.ts.split('T')[1].replace('Z','') : '';
-  const status = e.allowed
-    ? '<span class="tag allowed">allowed</span>'
-    : '<span class="tag denied">denied</span>';
-  const latency = e.allowed ? `${e.latency_ms}ms` : '-';
-
-  tr.innerHTML = `
-    <td class="ts">${esc(ts)}</td>
-    <td class="agent">${esc(e.client_id || 'anonymous')}</td>
-    <td class="tool">${esc(e.namespace)}__${esc(e.tool)}</td>
-    <td>${status}</td>
-    <td class="latency">${latency}</td>
-  `;
-  body.insertBefore(tr, body.firstChild);
-
-  // Cap at MAX_EVENTS rows.
-  while (body.children.length > MAX_EVENTS) {
-    body.removeChild(body.lastChild);
-  }
-
-  // Refresh agents on new events (agent might be new).
-  refreshAgents();
+async function refreshEvents() {
+  try {
+    const events = await fetchJSON('/events');
+    const body = $('#events-body');
+    body.innerHTML = '';
+    $('#events-empty').style.display = events.length ? 'none' : 'block';
+    $('#event-count').textContent = `(${events.length})`;
+    events.forEach(e => {
+      const tr = document.createElement('tr');
+      tr.className = 'event-row';
+      const ts = e.ts ? e.ts.split('T')[1].replace('Z','') : '';
+      const status = e.allowed
+        ? '<span class="tag allowed">allowed</span>'
+        : '<span class="tag denied">denied</span>';
+      const latency = e.allowed ? `${e.latency_ms}ms` : '-';
+      tr.innerHTML = `
+        <td class="ts">${esc(ts)}</td>
+        <td class="agent">${esc(e.client_id || 'anonymous')}</td>
+        <td class="tool">${esc(e.namespace)}__${esc(e.tool)}</td>
+        <td>${status}</td>
+        <td class="latency">${latency}</td>
+      `;
+      body.appendChild(tr);
+    });
+  } catch {}
 }
 
 function esc(s) {
@@ -208,9 +187,11 @@ function esc(s) {
 refreshInfo();
 refreshAgents();
 refreshBackends();
-connectEvents();
+refreshEvents();
 setInterval(refreshInfo, 5000);
+setInterval(refreshAgents, 5000);
 setInterval(refreshBackends, 10000);
+setInterval(refreshEvents, 3000);
 </script>
 </body>
 </html>

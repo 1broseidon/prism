@@ -41,13 +41,15 @@ type Entry struct {
 	CredInjected bool `json:"cred_injected"`
 }
 
+const recentCap = 500
+
 // Logger writes structured JSON audit log entries, one per line.
-// It also supports fan-out to subscribers (e.g. SSE handlers).
+// Keeps the most recent entries in memory for the admin dashboard.
 // All methods are safe for concurrent use.
 type Logger struct {
-	mu          sync.Mutex
-	out         io.Writer
-	subscribers map[chan Entry]struct{}
+	mu     sync.Mutex
+	out    io.Writer
+	recent []Entry
 }
 
 // New returns an audit Logger that writes to w.
@@ -56,31 +58,25 @@ func New(w io.Writer) *Logger {
 	if w == nil {
 		w = os.Stderr
 	}
-	return &Logger{out: w, subscribers: make(map[chan Entry]struct{})}
+	return &Logger{out: w, recent: make([]Entry, 0, recentCap)}
 }
 
 // Noop returns a Logger that discards all entries.
 // Use this when audit logging is disabled so call-sites need no nil checks.
 func Noop() *Logger {
-	return &Logger{out: io.Discard, subscribers: make(map[chan Entry]struct{})}
+	return &Logger{out: io.Discard, recent: make([]Entry, 0, recentCap)}
 }
 
-// Subscribe returns a channel that receives a copy of every audit entry.
-// The caller must eventually call Unsubscribe to avoid leaking the channel.
-func (l *Logger) Subscribe() chan Entry {
-	ch := make(chan Entry, 64)
+// Recent returns the most recent audit entries (up to 500), newest first.
+func (l *Logger) Recent() []Entry {
 	l.mu.Lock()
-	l.subscribers[ch] = struct{}{}
-	l.mu.Unlock()
-	return ch
-}
-
-// Unsubscribe removes a subscriber channel and closes it.
-func (l *Logger) Unsubscribe(ch chan Entry) {
-	l.mu.Lock()
-	delete(l.subscribers, ch)
-	l.mu.Unlock()
-	close(ch)
+	defer l.mu.Unlock()
+	// Return a reversed copy.
+	out := make([]Entry, len(l.recent))
+	for i := range l.recent {
+		out[len(l.recent)-1-i] = l.recent[i]
+	}
+	return out
 }
 
 // LogCall records the outcome of a single tool call.
@@ -124,13 +120,12 @@ func (l *Logger) LogCall(ctx context.Context, namespace, tool, backend string, a
 
 	l.mu.Lock()
 	_, _ = l.out.Write(data)
-	// Fan out to SSE subscribers (non-blocking).
-	for ch := range l.subscribers {
-		select {
-		case ch <- entry:
-		default:
-			// Subscriber is slow — drop the entry rather than blocking.
-		}
+	// Ring buffer: keep last recentCap entries for the admin dashboard.
+	if len(l.recent) >= recentCap {
+		copy(l.recent, l.recent[1:])
+		l.recent[len(l.recent)-1] = entry
+	} else {
+		l.recent = append(l.recent, entry)
 	}
 	l.mu.Unlock()
 }

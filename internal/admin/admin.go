@@ -8,54 +8,26 @@ import (
 	"time"
 )
 
-// StatusProvider provides backend status info.
-type StatusProvider interface {
-	Status() []any
-}
-
-// AgentProvider lists and manages agents.
-type AgentProvider interface {
-	ListAgents() []any
-	UpdateAgentScopes(clientID string, scopes []string) bool
-}
-
-// AuditSubscriber provides live audit event streams.
-type AuditSubscriber interface {
-	Subscribe() chan any
-	Unsubscribe(ch chan any)
-}
-
 // API exposes admin endpoints.
 type API struct {
 	statusFn   func() any
 	agentsFn   func() []any
 	updateFn   func(string, []string) bool
-	auditor    *AuditSub
+	eventsFn   func() []any
 	backendMgr BackendManager
 	startedAt  time.Time
 }
 
-// AuditSub wraps the audit logger's subscribe/unsubscribe for type erasure.
-type AuditSub struct {
-	subFn   func() chan any
-	unsubFn func(chan any)
-}
-
 // NewAPI creates an admin API.
-func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, updateFn func(string, []string) bool, auditor *AuditSub) *API {
+func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, updateFn func(string, []string) bool, eventsFn func() []any) *API {
 	return &API{
 		statusFn:   statusFn,
 		agentsFn:   agentsFn,
 		updateFn:   updateFn,
-		auditor:    auditor,
+		eventsFn:   eventsFn,
 		backendMgr: backendMgr,
 		startedAt:  time.Now(),
 	}
-}
-
-// NewAuditSub creates an audit subscriber adapter.
-func NewAuditSub(subFn func() chan any, unsubFn func(chan any)) *AuditSub {
-	return &AuditSub{subFn: subFn, unsubFn: unsubFn}
 }
 
 // Handler returns the admin HTTP handler.
