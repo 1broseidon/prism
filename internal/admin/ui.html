@@ -95,6 +95,7 @@
 </div>
 <script>
 const $ = s => document.querySelector(s);
+let agentNames = {}; // client_id → description cache
 
 async function fetchJSON(path) {
   const r = await fetch(path);
@@ -119,7 +120,9 @@ async function refreshAgents() {
     body.innerHTML = '';
     $('#agents-empty').style.display = agents.length ? 'none' : 'block';
     $('#agent-count').textContent = `(${agents.length})`;
+    agentNames = {};
     agents.forEach(a => {
+      if (a.description) agentNames[a.client_id] = a.description;
       const tr = document.createElement('tr');
       const scopes = (a.scopes || []).map(s =>
         `<span class="tag scope">${esc(s)}</span>`
@@ -127,7 +130,9 @@ async function refreshAgents() {
       const type = a.dynamic
         ? '<span class="tag dynamic">dcr</span>'
         : '<span class="tag static">static</span>';
-      tr.innerHTML = `<td>${esc(a.client_id)}</td><td>${type}</td><td>${scopes}</td>`;
+      const name = a.description || a.client_id;
+      const idShort = a.client_id.substring(0, 12);
+      tr.innerHTML = `<td>${esc(name)}<br><span class="tag static">${esc(idShort)}…</span></td><td>${type}</td><td>${scopes}</td>`;
       body.appendChild(tr);
     });
   } catch {}
@@ -167,7 +172,7 @@ async function refreshEvents() {
       const latency = e.allowed ? `${e.latency_ms}ms` : '-';
       tr.innerHTML = `
         <td class="ts">${esc(ts)}</td>
-        <td class="agent">${esc(e.client_id || 'anonymous')}</td>
+        <td class="agent">${esc(agentNames[e.client_id] || e.client_id || 'anonymous')}</td>
         <td class="tool">${esc(e.namespace)}__${esc(e.tool)}</td>
         <td>${status}</td>
         <td class="latency">${latency}</td>
