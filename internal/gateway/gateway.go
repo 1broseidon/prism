@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/1broseidon/prism/internal/credentials"
 	"github.com/1broseidon/prism/internal/metrics"
 	"github.com/1broseidon/prism/internal/middleware"
+	"github.com/1broseidon/prism/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -46,6 +48,7 @@ type Gateway struct {
 	logger         *slog.Logger
 	auditor        *audit.Logger
 	credStore      *credentials.Store
+	kvStore        store.Store         // optional KV store for persisting runtime credential configs
 	policyResolver auth.PolicyResolver // live policy resolution, bypasses stale session context
 }
 
@@ -105,6 +108,102 @@ func (g *Gateway) SetAuditLogger(al *audit.Logger) {
 		al = audit.Noop()
 	}
 	g.auditor = al
+}
+
+// SetStore sets the KV store used for persisting runtime credential configs.
+// Call this before serving any requests. When set, runtime-added credentials
+// survive process restarts.
+func (g *Gateway) SetStore(s store.Store) {
+	g.kvStore = s
+}
+
+// credKVPrefix is the KV key prefix for persisted credential configs.
+const credKVPrefix = "backend/cred/"
+
+// persistedCredential is the JSON representation stored in KV.
+type persistedCredential struct {
+	Type    string `json:"type"`
+	Header  string `json:"header,omitempty"`
+	Value   string `json:"value,omitempty"`
+	Env     string `json:"env,omitempty"`
+	Command string `json:"command,omitempty"`
+}
+
+// persistCredential saves a credential config to KV for restart persistence.
+func (g *Gateway) persistCredential(backendID string, pc *persistedCredential) {
+	if g.kvStore == nil {
+		return
+	}
+	data, err := json.Marshal(pc)
+	if err != nil {
+		g.logger.Warn("failed to marshal credential for persistence", "id", backendID, "error", err)
+		return
+	}
+	if err := g.kvStore.Set(credKVPrefix+backendID, data); err != nil {
+		g.logger.Warn("failed to persist credential", "id", backendID, "error", err)
+	}
+}
+
+// deletePersistedCredential removes a credential config from KV.
+func (g *Gateway) deletePersistedCredential(backendID string) {
+	if g.kvStore == nil {
+		return
+	}
+	if err := g.kvStore.Delete(credKVPrefix + backendID); err != nil {
+		g.logger.Warn("failed to delete persisted credential", "id", backendID, "error", err)
+	}
+}
+
+// LoadPersistedCredentials restores runtime-added credentials from KV.
+// Call this after SetStore and before serving requests.
+func (g *Gateway) LoadPersistedCredentials() {
+	if g.kvStore == nil {
+		return
+	}
+	keys, err := g.kvStore.List(credKVPrefix)
+	if err != nil {
+		g.logger.Warn("failed to list persisted credentials", "error", err)
+		return
+	}
+
+	for _, key := range keys {
+		backendID := strings.TrimPrefix(key, credKVPrefix)
+		data, err := g.kvStore.Get(key)
+		if err != nil {
+			g.logger.Warn("failed to read persisted credential", "key", key, "error", err)
+			continue
+		}
+
+		var pc persistedCredential
+		if err := json.Unmarshal(data, &pc); err != nil {
+			g.logger.Warn("failed to unmarshal persisted credential", "key", key, "error", err)
+			continue
+		}
+
+		cred := buildCredentialFromPersisted(&pc)
+		if cred != nil {
+			g.credStore.Register(backendID, cred)
+			g.logger.Info("restored persisted credential", "id", backendID, "type", pc.Type)
+		}
+	}
+}
+
+// buildCredentialFromPersisted converts a persisted credential into a Credential.
+func buildCredentialFromPersisted(pc *persistedCredential) credentials.Credential {
+	header := pc.Header
+	if header == "" {
+		header = "Authorization"
+	}
+	switch pc.Type {
+	case "static":
+		return &credentials.Static{Header: header, Value: pc.Value}
+	case "env":
+		return &credentials.Env{Header: header, EnvVar: pc.Env}
+	case "command":
+		return &credentials.Command{Header: header, Cmd: pc.Command}
+	default:
+		return nil
+	}
 }
 
 // scopeFilterMiddleware returns an MCP receiving middleware that intercepts
@@ -433,6 +532,10 @@ func (g *Gateway) DisconnectBackend(id string) error {
 	// Remove tools registered under this backend's namespace
 	g.removeBackendTools(b)
 
+	// Remove credential registration and persisted credential config
+	g.credStore.Unregister(id)
+	g.deletePersistedCredential(id)
+
 	if b.Session != nil {
 		_ = b.Session.Close()
 	}
@@ -477,12 +580,48 @@ func (g *Gateway) BackendIDs() []string {
 	return ids
 }
 
+// BackendCredentialInfo is the obfuscated credential metadata returned in status.
+type BackendCredentialInfo struct {
+	Type       string `json:"type"`              // "static", "env", "command", "none"
+	Header     string `json:"header,omitempty"`  // which header is set
+	Env        string `json:"env,omitempty"`     // env var name (env type only)
+	Command    string `json:"command,omitempty"` // shell command (command type only)
+	Configured bool   `json:"configured"`        // true if a credential is registered
+}
+
 // BackendStatus returns connection info for a backend.
 type BackendStatus struct {
-	ID             string `json:"id"`
-	Namespace      string `json:"namespace"`
-	URL            string `json:"url"`
-	CircuitBreaker string `json:"circuit_breaker,omitempty"`
+	ID             string                 `json:"id"`
+	Namespace      string                 `json:"namespace"`
+	URL            string                 `json:"url"`
+	CircuitBreaker string                 `json:"circuit_breaker,omitempty"`
+	Credential     *BackendCredentialInfo `json:"credential,omitempty"`
+}
+
+// RegisterCredential registers a credential for a backend in the credential store.
+func (g *Gateway) RegisterCredential(backendID string, cred credentials.Credential) {
+	g.credStore.Register(backendID, cred)
+}
+
+// UnregisterCredential removes a credential for a backend from the credential store.
+func (g *Gateway) UnregisterCredential(backendID string) {
+	g.credStore.Unregister(backendID)
+}
+
+// CredentialInfo returns non-secret metadata about a backend's credential.
+// Returns nil if no credential is registered.
+func (g *Gateway) CredentialInfo(backendID string) *BackendCredentialInfo {
+	info := g.credStore.Info(backendID)
+	if info == nil {
+		return nil
+	}
+	return &BackendCredentialInfo{
+		Type:       info.Type,
+		Header:     info.Header,
+		Env:        info.Env,
+		Command:    info.Command,
+		Configured: true,
+	}
 }
 
 // Status returns status info for all backends.
@@ -500,6 +639,7 @@ func (g *Gateway) Status() []BackendStatus {
 		if b.CB != nil {
 			s.CircuitBreaker = b.CB.State().String()
 		}
+		s.Credential = g.CredentialInfo(b.Config.ID)
 		statuses = append(statuses, s)
 	}
 	return statuses

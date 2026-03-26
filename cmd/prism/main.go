@@ -86,6 +86,10 @@ func runServe() {
 	kvStore := openStore(cfg, logger)
 	defer func() { _ = kvStore.Close() }()
 
+	// Give the gateway access to the KV store for persisting runtime credentials.
+	gw.SetStore(kvStore)
+	gw.LoadPersistedCredentials()
+
 	// Always start the embedded auth server — agents connect via OAuth DCR.
 	if cfg.EmbeddedAuth == nil {
 		cfg.EmbeddedAuth = &config.EmbeddedAuthConfig{

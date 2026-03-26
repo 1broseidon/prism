@@ -129,6 +129,15 @@ func (c *Command) Resolve(ctx context.Context) (header, value string, err error)
 
 // ─── Store ───────────────────────────────────────────────────────────────────
 
+// CredentialInfo holds non-secret metadata about a registered credential.
+// Use this to display credential status without exposing resolved values.
+type CredentialInfo struct {
+	Type    string `json:"type"`              // "static", "env", "command", "file"
+	Header  string `json:"header"`            // which HTTP header is set
+	Env     string `json:"env,omitempty"`     // env var name (env type only)
+	Command string `json:"command,omitempty"` // shell command (command type only)
+}
+
 // Store maps backend IDs to their Credential implementations.
 // All methods are safe for concurrent use.
 type Store struct {
@@ -147,6 +156,49 @@ func (s *Store) Register(backendID string, cred Credential) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.creds[backendID] = cred
+}
+
+// Unregister removes the credential for a backend ID.
+func (s *Store) Unregister(backendID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.creds, backendID)
+}
+
+// Info returns non-secret metadata about a registered credential.
+// Returns nil if no credential is registered for backendID.
+func (s *Store) Info(backendID string) *CredentialInfo {
+	s.mu.RLock()
+	cred, ok := s.creds[backendID]
+	s.mu.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	info := &CredentialInfo{}
+	switch c := cred.(type) {
+	case *Static:
+		info.Type = "static"
+		info.Header = c.Header
+	case *Env:
+		info.Type = "env"
+		info.Header = c.Header
+		info.Env = c.EnvVar
+	case *File:
+		info.Type = "file"
+		info.Header = c.Header
+	case *Command:
+		info.Type = "command"
+		info.Header = c.Header
+		info.Command = c.Cmd
+	default:
+		info.Type = "unknown"
+	}
+	if info.Header == "" {
+		info.Header = "Authorization"
+	}
+	return info
 }
 
 // Resolve returns the header name and value for the given backend.

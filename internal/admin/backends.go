@@ -14,6 +14,33 @@ type BackendConfig struct {
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	URL     string            `json:"url,omitempty"`
+	// Credential config for backend authentication
+	Credential *CredentialConfig `json:"credential,omitempty"`
+}
+
+// CredentialConfig specifies how to authenticate with a backend.
+// Write-only: the API accepts this on POST but never returns secret values.
+type CredentialConfig struct {
+	// Type: "none", "static", "env", "command"
+	Type string `json:"type"`
+	// Header to set. Default: "Authorization"
+	Header string `json:"header,omitempty"`
+	// Value is the literal secret (static type only). Write-only — never returned by the API.
+	Value string `json:"value,omitempty"`
+	// Env is the environment variable name (env type).
+	Env string `json:"env,omitempty"`
+	// Command is the shell command to execute (command type).
+	Command string `json:"command,omitempty"`
+}
+
+// BackendCredentialInfo is the obfuscated credential metadata returned by GET /backends.
+// Secret values are never included.
+type BackendCredentialInfo struct {
+	Type       string `json:"type"`                // "static", "env", "command", "none"
+	Header     string `json:"header,omitempty"`    // which header is set
+	Env        string `json:"env,omitempty"`       // env var name (env type only)
+	Command    string `json:"command,omitempty"`   // shell command (command type only)
+	Configured bool   `json:"configured"`          // true if a credential is registered
 }
 
 // BackendManager is the interface the admin API uses to mutate backends.

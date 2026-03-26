@@ -123,6 +123,7 @@
   }
   th.right { text-align: right; }
   tbody tr { border-bottom: 1px solid var(--line); }
+  tbody tr:last-child { border-bottom: none; }
   tbody tr:hover { background: var(--hover); }
   td { padding: 12px 0; padding-right: 16px; vertical-align: middle; }
   td.right { text-align: right; padding-right: 0; }
@@ -184,6 +185,50 @@
   .policy-summary {
     font-family: var(--font-mono); font-size: 11px;
     color: var(--muted);
+  }
+
+  /* Inline forms */
+  .inline-form {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 0;
+  }
+  .inline-form input {
+    font-family: var(--font-mono); font-size: 11px;
+    background: var(--tag-bg); color: var(--fg);
+    border: 1px solid var(--line); padding: 3px 6px;
+    outline: none;
+  }
+  .inline-form input:focus { border-color: var(--active); }
+  .inline-form input::placeholder { color: var(--muted); opacity: 0.5; }
+  .inline-form .save-btn {
+    font-family: var(--font-mono); font-size: 10px;
+    background: transparent; color: var(--active);
+    border: 1px solid var(--active); padding: 2px 8px;
+    cursor: pointer;
+  }
+  .inline-form .save-btn:hover { background: var(--active); color: var(--bg); }
+  .inline-form .cancel-btn {
+    font-family: var(--font-mono); font-size: 10px;
+    background: transparent; color: var(--muted);
+    border: none; padding: 2px 4px; cursor: pointer;
+  }
+  .inline-form .cancel-btn:hover { color: var(--fg); }
+  .cred-select {
+    font-family: var(--font-mono); font-size: 11px;
+    background: var(--tag-bg); color: var(--fg);
+    border: 1px solid var(--line); padding: 3px 6px;
+    outline: none;
+  }
+  .cred-fields {
+    display: flex; gap: 6px; align-items: center;
+  }
+  .cred-hint {
+    font-size: 9px; color: var(--muted); opacity: 0.6;
+    font-style: italic;
+  }
+  .cred-badge {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--muted); margin-left: 8px;
   }
   .scope-pending {
     font-family: var(--font-mono); font-size: 9px;
@@ -266,7 +311,7 @@
     color: var(--muted);
   }
   .backends-summary .expand-arrow {
-    font-size: 10px; color: var(--muted); margin-left: auto;
+    font-size: 10px; color: var(--muted); margin-left: 8px;
   }
 
   /* Global policy */
@@ -446,6 +491,7 @@
         <div class="backends-summary" onclick="toggleBackends()">
           <span class="section-title">Backends <span id="backend-count"></span></span>
           <span class="names" id="backend-names"></span>
+          <button class="section-btn" onclick="event.stopPropagation(); addBackend()" style="margin-left:auto">+ Connect</button>
           <span class="expand-arrow" id="backends-arrow">&#9656;</span>
         </div>
         <div id="backends-detail" style="display:none">
@@ -949,9 +995,16 @@ async function refreshBackends() {
         const tr = document.createElement('tr');
         const nsSuffix = (b.namespace && b.namespace !== b.id)
           ? `<span class="backend-ns-suffix">(${esc(b.namespace)})</span>` : '';
+        let credBadge = '';
+        if (b.credential && b.credential.configured) {
+          const c = b.credential;
+          if (c.type === 'static') credBadge = '<span class="cred-badge">api-key &#8226;&#8226;&#8226;&#8226;</span>';
+          else if (c.type === 'env') credBadge = `<span class="cred-badge">env: ${esc(c.env || '')}</span>`;
+          else if (c.type === 'command') credBadge = `<span class="cred-badge">cmd: ${esc((c.command || '').substring(0, 30))}${(c.command || '').length > 30 ? '...' : ''}</span>`;
+        }
         tr.innerHTML = `
           <td><span class="backend-name">${esc(b.id)}</span>${nsSuffix}</td>
-          <td><span class="backend-transport">${esc(b.url || 'stdio')}</span></td>
+          <td><span class="backend-transport">${esc(b.url || 'stdio')}</span>${credBadge}</td>
         `;
         body.appendChild(tr);
       });
@@ -974,6 +1027,96 @@ function toggleBackends() {
     detail.style.display = 'none';
     arrow.textContent = '\u25B8';
   }
+}
+
+function addBackend() {
+  // Show inline form at the bottom of the backends detail
+  if (!backendsExpanded) toggleBackends();
+  const detail = $('#backends-detail');
+  // Remove existing form if any
+  const existing = detail.querySelector('.inline-form');
+  if (existing) { existing.remove(); return; }
+
+  const form = document.createElement('div');
+  form.className = 'inline-form';
+  form.style.flexWrap = 'wrap';
+  form.innerHTML = `
+    <input type="text" placeholder="name" style="width:100px" data-field="name" spellcheck="false">
+    <input type="text" placeholder="command or URL" style="flex:1" data-field="cmd" spellcheck="false">
+    <select class="cred-select" data-field="cred-type">
+      <option value="none">no credential</option>
+      <option value="static">API Key</option>
+      <option value="env">Env Var</option>
+      <option value="command">Command</option>
+    </select>
+    <div class="cred-fields" data-field="cred-fields" style="display:none"></div>
+    <div style="display:flex;gap:6px;align-items:center;width:100%;margin-top:2px">
+      <button class="save-btn">connect</button>
+      <button class="cancel-btn">cancel</button>
+    </div>
+  `;
+  detail.appendChild(form);
+
+  const nameInput = form.querySelector('[data-field="name"]');
+  const cmdInput = form.querySelector('[data-field="cmd"]');
+  const credType = form.querySelector('[data-field="cred-type"]');
+  const credFields = form.querySelector('[data-field="cred-fields"]');
+  nameInput.focus();
+
+  function updateCredFields() {
+    const type = credType.value;
+    credFields.innerHTML = '';
+    if (type === 'none') { credFields.style.display = 'none'; return; }
+    credFields.style.display = 'flex';
+    const headerInput = '<input type="text" placeholder="header" value="Authorization" style="width:100px" data-field="cred-header" spellcheck="false">';
+    if (type === 'static') {
+      credFields.innerHTML = headerInput +
+        '<input type="password" placeholder="value" style="flex:1" data-field="cred-value" spellcheck="false">' +
+        '<span class="cred-hint">Stored on server. Use Env Var for production.</span>';
+    } else if (type === 'env') {
+      credFields.innerHTML = headerInput +
+        '<input type="text" placeholder="ENV_VAR_NAME" style="flex:1" data-field="cred-env" spellcheck="false">';
+    } else if (type === 'command') {
+      credFields.innerHTML = headerInput +
+        '<input type="text" placeholder="vault kv get -field=token secret/api" style="flex:1" data-field="cred-cmd" spellcheck="false">';
+    }
+  }
+  credType.addEventListener('change', updateCredFields);
+
+  async function submit() {
+    const name = nameInput.value.trim();
+    const cmd = cmdInput.value.trim();
+    if (!name || !cmd) return;
+    const isUrl = cmd.startsWith('http');
+    const body = isUrl ? { url: cmd } : { command: cmd };
+
+    // Build credential config
+    const ct = credType.value;
+    if (ct !== 'none') {
+      const header = (form.querySelector('[data-field="cred-header"]') || {}).value || 'Authorization';
+      const cred = { type: ct, header: header };
+      if (ct === 'static') cred.value = (form.querySelector('[data-field="cred-value"]') || {}).value || '';
+      if (ct === 'env') cred.env = (form.querySelector('[data-field="cred-env"]') || {}).value || '';
+      if (ct === 'command') cred.command = (form.querySelector('[data-field="cred-cmd"]') || {}).value || '';
+      body.credential = cred;
+    }
+
+    try {
+      const r = await fetch(`/backends/${name}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) { const d = await r.json(); nameInput.style.borderColor = 'var(--denied)'; return; }
+      form.remove();
+      refreshBackends();
+    } catch {}
+  }
+
+  form.querySelector('.save-btn').addEventListener('click', submit);
+  form.querySelector('.cancel-btn').addEventListener('click', () => form.remove());
+  cmdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') form.remove(); });
+  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') cmdInput.focus(); if (e.key === 'Escape') form.remove(); });
 }
 
 async function refreshEvents() {
@@ -1060,18 +1203,41 @@ async function refreshGroups() {
   } catch {}
 }
 
-async function addGroup() {
-  const name = prompt('Group name:');
-  if (!name || !name.trim()) return;
-  try {
-    await fetch(`/groups/${encodeURIComponent(name.trim())}`, {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({scopes: []})
-    });
-    prevGroupHash = '';
-    refreshGroups();
-  } catch {}
+function addGroup() {
+  const list = $('#groups-list');
+  const existing = list.querySelector('.inline-form');
+  if (existing) { existing.remove(); return; }
+
+  const form = document.createElement('div');
+  form.className = 'inline-form';
+  form.innerHTML = `
+    <input type="text" placeholder="group name" style="width:140px" spellcheck="false">
+    <button class="save-btn">create</button>
+    <button class="cancel-btn">cancel</button>
+  `;
+  list.appendChild(form);
+
+  const input = form.querySelector('input');
+  input.focus();
+
+  async function submit() {
+    const name = input.value.trim();
+    if (!name) return;
+    try {
+      await fetch(`/groups/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({scopes: []})
+      });
+      form.remove();
+      prevGroupHash = '';
+      refreshGroups();
+    } catch {}
+  }
+
+  form.querySelector('.save-btn').addEventListener('click', submit);
+  form.querySelector('.cancel-btn').addEventListener('click', () => form.remove());
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') form.remove(); });
 }
 
 async function deleteGroup(name) {
@@ -1239,24 +1405,54 @@ function removeGroupFromAgent(prismId, groupName) {
   updateAgentPolicy(prismId, newGroups, policy.grant || [], policy.deny || []);
 }
 
+function inlineScopeInput(btn, onSubmit) {
+  // Replace the button with an inline input
+  const parent = btn.parentElement;
+  const form = document.createElement('span');
+  form.className = 'inline-form';
+  form.style.display = 'inline-flex';
+  form.innerHTML = `<input type="text" placeholder="scope" style="width:120px" spellcheck="false" autocomplete="off">`;
+  btn.style.display = 'none';
+  parent.appendChild(form);
+
+  const input = form.querySelector('input');
+  input.focus();
+
+  function finish(value) {
+    form.remove();
+    btn.style.display = '';
+    if (value) onSubmit(value);
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && input.value.trim()) finish(input.value.trim());
+    if (e.key === 'Escape') finish(null);
+  });
+  input.addEventListener('blur', () => setTimeout(() => { if (form.parentElement) finish(null); }, 150));
+}
+
 function addGrantToAgent(prismId) {
-  const scope = prompt('Grant scope:');
-  if (!scope || !scope.trim()) return;
-  const agent = getAgentByPrismId(prismId);
-  if (!agent) return;
-  const policy = agent.policy || { groups: [], grant: [], deny: [] };
-  const newGrant = [...(policy.grant || []), scope.trim()];
-  updateAgentPolicy(prismId, policy.groups || [], newGrant, policy.deny || []);
+  const btn = document.querySelector(`[data-add-grant="${prismId}"]`);
+  if (!btn) return;
+  inlineScopeInput(btn, (scope) => {
+    const agent = getAgentByPrismId(prismId);
+    if (!agent) return;
+    const policy = agent.policy || { groups: [], grant: [], deny: [] };
+    const newGrant = [...(policy.grant || []), scope];
+    updateAgentPolicy(prismId, policy.groups || [], newGrant, policy.deny || []);
+  });
 }
 
 function addDenyToAgent(prismId) {
-  const scope = prompt('Deny scope:');
-  if (!scope || !scope.trim()) return;
-  const agent = getAgentByPrismId(prismId);
-  if (!agent) return;
-  const policy = agent.policy || { groups: [], grant: [], deny: [] };
-  const newDeny = [...(policy.deny || []), scope.trim()];
-  updateAgentPolicy(prismId, policy.groups || [], policy.grant || [], newDeny);
+  const btn = document.querySelector(`[data-add-deny="${prismId}"]`);
+  if (!btn) return;
+  inlineScopeInput(btn, (scope) => {
+    const agent = getAgentByPrismId(prismId);
+    if (!agent) return;
+    const policy = agent.policy || { groups: [], grant: [], deny: [] };
+    const newDeny = [...(policy.deny || []), scope];
+    updateAgentPolicy(prismId, policy.groups || [], policy.grant || [], newDeny);
+  });
 }
 
 // --- Event delegation for agent rows ---
