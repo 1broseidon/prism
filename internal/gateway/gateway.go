@@ -50,7 +50,7 @@ type Gateway struct {
 	credStore      *credentials.Store
 	kvStore        store.Store         // optional KV store for persisting runtime credential configs
 	policyResolver auth.PolicyResolver // live policy resolution, bypasses stale session context
-	authFlows      any                 // *authFlowManager when OAuth support is compiled in
+	authFlows      any                 //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
 }
 
 // New creates a new Gateway.
@@ -120,7 +120,7 @@ func (g *Gateway) SetStore(s store.Store) {
 }
 
 // KV key prefixes for backend persistence.
-const credKVPrefix = "backend/cred/"
+const credKVPrefix = "backend/cred/" //nolint:gosec // not a credential, just a KV key prefix
 const backendKVPrefix = "backend/config/"
 
 // persistedBackend is the JSON representation of a runtime-added backend stored in KV.
@@ -322,7 +322,7 @@ func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
 				return result, nil
 			}
 
-			ctx, span := tracer.Start(ctx, "prism.gateway.scope_filter",
+			_, span := tracer.Start(ctx, "prism.gateway.scope_filter",
 				trace.WithSpanKind(trace.SpanKindInternal),
 			)
 			defer span.End()

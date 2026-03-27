@@ -61,7 +61,7 @@ func runServe() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
-		os.Exit(1)
+		return
 	}
 
 	// Write PID file for service management.
@@ -257,7 +257,7 @@ func (m *authServerAgentManager) GetAgentByPrismID(prismID string) any {
 	return m.srv.GetAgentByPrismID(prismID)
 }
 
-func (m *authServerAgentManager) SetAgentPolicy(prismID string, groups []string, grant []string, deny []string) error {
+func (m *authServerAgentManager) SetAgentPolicy(prismID string, groups, grant, deny []string) error {
 	return m.srv.SetAgentPolicy(prismID, &authserver.AgentPolicy{
 		Groups: groups,
 		Grant:  grant,

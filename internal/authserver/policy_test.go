@@ -211,8 +211,8 @@ func TestGetSetDeleteAgentPolicy(t *testing.T) {
 		Grant:  []string{"extra:tool"},
 		Deny:   []string{"bad:tool"},
 	}
-	if err := srv.SetAgentPolicy(prismID, policy); err != nil {
-		t.Fatalf("SetAgentPolicy: %v", err)
+	if setErr := srv.SetAgentPolicy(prismID, policy); setErr != nil {
+		t.Fatalf("SetAgentPolicy: %v", setErr)
 	}
 
 	// Read it back.
@@ -234,8 +234,8 @@ func TestGetSetDeleteAgentPolicy(t *testing.T) {
 	}
 
 	// Delete policy.
-	if err := srv.DeleteAgentPolicy(prismID); err != nil {
-		t.Fatalf("DeleteAgentPolicy: %v", err)
+	if delErr := srv.DeleteAgentPolicy(prismID); delErr != nil {
+		t.Fatalf("DeleteAgentPolicy: %v", delErr)
 	}
 
 	// Should be nil again.
