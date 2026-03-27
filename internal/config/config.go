@@ -192,8 +192,9 @@ type CircuitBreakerConfig struct {
 
 // AuditConfig configures structured JSON audit logging for tool calls.
 type AuditConfig struct {
-	Enabled bool   `json:"enabled"`
-	Output  string `json:"output,omitempty"` // "stderr" (default), "stdout", or file path
+	Enabled       bool   `json:"enabled"`
+	Output        string `json:"output,omitempty"`         // "stderr" (default), "stdout", or file path
+	RetentionDays int    `json:"retention_days,omitempty"` // days to keep audit entries in KV. Default: 30
 }
 
 // --- Duration type ---

@@ -115,6 +115,18 @@ func runServe() {
 	}
 
 	auditor := buildAuditLogger(cfg, logger)
+	auditor.SetStore(kvStore)
+	if cfg.Audit != nil && cfg.Audit.RetentionDays > 0 {
+		auditor.SetRetention(time.Duration(cfg.Audit.RetentionDays) * 24 * time.Hour)
+	}
+	auditor.LoadPersistedEntries()
+	auditor.Cleanup() // clean up old entries on startup
+	// Run cleanup every hour in the background.
+	go func() {
+		for range time.Tick(1 * time.Hour) {
+			auditor.Cleanup()
+		}
+	}()
 	gw.SetAuditLogger(auditor)
 
 	// Live policy resolver: scope enforcement reads from KV store on every tool call,
