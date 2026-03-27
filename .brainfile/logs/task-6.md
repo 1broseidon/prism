@@ -1,8 +1,6 @@
 ---
 id: task-6
 title: OAuth client flow for upstream MCP server authentication
-column: review
-position: 0
 description: |-
   Prism needs to act as an OAuth client when connecting to upstream MCP servers that require OAuth 2.1 authentication. Today Prism only supports static credentials (API keys, env vars, commands). OAuth-protected backends require the full authorization code + PKCE flow.
 
@@ -181,7 +179,8 @@ contract:
     reworkCount: 0
     deliveredAt: "2026-03-26T23:12:10.783Z"
     duration: 821
-updatedAt: "2026-03-26T23:12:10.783Z"
+updatedAt: "2026-03-26T23:13:56.374Z"
+completedAt: "2026-03-26T23:13:56.374Z"
 ---
 
 ## Description

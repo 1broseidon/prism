@@ -99,6 +99,7 @@ func (g *Gateway) NotifyToolsChanged() {
 	sentinel := &mcp.Tool{Name: "__prism_policy_refresh"}
 	g.server.AddTool(sentinel, nil)
 	g.server.RemoveTools(sentinel.Name)
+	g.logger.Info("sent tools/list_changed notification to all sessions")
 }
 
 // SetAuditLogger replaces the audit logger used by the gateway.
