@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -432,7 +433,7 @@ func (g *Gateway) OAuthCallbackHandler() http.HandlerFunc {
 			g.logger.Error("OAuth callback failed", "error", err)
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, `<html><body><h3>Authentication failed</h3><p>%s</p><script>setTimeout(function(){window.close()},3000)</script></body></html>`, err.Error())
+			fmt.Fprintf(w, `<html><body><h3>Authentication failed</h3><p>%s</p><script>setTimeout(function(){window.close()},3000)</script></body></html>`, html.EscapeString(err.Error()))
 			return
 		}
 
@@ -459,7 +460,7 @@ type persistedOAuthToken struct {
 	Scopes       []string  `json:"scopes,omitempty"`
 }
 
-// persistOAuthTokens saves OAuth tokens and client config to KV.
+// persistOAuthTokens saves OAuth tokens and client config to KV (encrypted at rest).
 func (g *Gateway) persistOAuthTokens(backendID string, cfg *oauth2.Config, token *oauth2.Token) {
 	if g.kvStore == nil {
 		return
@@ -483,7 +484,20 @@ func (g *Gateway) persistOAuthTokens(backendID string, cfg *oauth2.Config, token
 		g.logger.Warn("failed to marshal OAuth tokens for persistence", "id", backendID, "error", err)
 		return
 	}
-	if err := g.kvStore.Set(oauthKVPrefix+backendID, data); err != nil {
+
+	// Encrypt before writing to KV store.
+	encKey, err := kvEncryptionKey()
+	if err != nil {
+		g.logger.Warn("failed to obtain encryption key, skipping token persistence", "id", backendID, "error", err)
+		return
+	}
+	encrypted, err := encryptAESGCM(encKey, data)
+	if err != nil {
+		g.logger.Warn("failed to encrypt OAuth tokens for persistence", "id", backendID, "error", err)
+		return
+	}
+
+	if err := g.kvStore.Set(oauthKVPrefix+backendID, encrypted); err != nil {
 		g.logger.Warn("failed to persist OAuth tokens", "id", backendID, "error", err)
 	}
 }
@@ -510,6 +524,8 @@ func (g *Gateway) LoadPersistedOAuthCredentials() {
 		return
 	}
 
+	encKey, encKeyErr := kvEncryptionKey()
+
 	for _, key := range keys {
 		backendID := strings.TrimPrefix(key, oauthKVPrefix)
 		data, err := g.kvStore.Get(key)
@@ -518,8 +534,23 @@ func (g *Gateway) LoadPersistedOAuthCredentials() {
 			continue
 		}
 
+		// Decrypt if we have an encryption key.
+		plaintext := data
+		if encKeyErr == nil {
+			decrypted, decErr := decryptAESGCM(encKey, data)
+			if decErr != nil {
+				// Fallback: try as unencrypted JSON (pre-encryption migration).
+				if !json.Valid(data) {
+					g.logger.Warn("failed to decrypt persisted OAuth token", "key", key, "error", decErr)
+					continue
+				}
+			} else {
+				plaintext = decrypted
+			}
+		}
+
 		var pt persistedOAuthToken
-		if err := json.Unmarshal(data, &pt); err != nil {
+		if err := json.Unmarshal(plaintext, &pt); err != nil {
 			g.logger.Warn("failed to unmarshal persisted OAuth token", "key", key, "error", err)
 			continue
 		}
