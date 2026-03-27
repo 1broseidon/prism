@@ -3,6 +3,7 @@ package authserver
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -222,6 +223,25 @@ func (s *Server) validateAuthorizeParams(w http.ResponseWriter, vals url.Values)
 		return nil
 	}
 
+	// OAuth 2.1 §4.1.3: redirect_uri MUST exactly match a registered URI.
+	s.oauth.mu.Lock()
+	dc, hasDC := s.oauth.dynamics[clientID]
+	s.oauth.mu.Unlock()
+	if hasDC && len(dc.RedirectURIs) > 0 {
+		matched := false
+		for _, allowed := range dc.RedirectURIs {
+			if allowed == redirectURI {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			s.writeOAuthError(w, http.StatusBadRequest, "invalid_request",
+				"redirect_uri does not match any registered redirect URI")
+			return nil
+		}
+	}
+
 	codeChallenge := vals.Get("code_challenge")
 	if codeChallenge == "" {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "code_challenge is required (PKCE)")
@@ -439,6 +459,16 @@ func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Lock order: s.oauth.mu before s.mu.
+	// Read PrismID from dynamic client first.
+	var prismID string
+	s.oauth.mu.Lock()
+	dc, isDynamic := s.oauth.dynamics[ac.clientID]
+	if isDynamic && dc != nil {
+		prismID = dc.PrismID
+	}
+	s.oauth.mu.Unlock()
+
 	// Look up client to get allowed scopes.
 	s.mu.RLock()
 	client, clientOK := s.clients[ac.clientID]
@@ -449,14 +479,6 @@ func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Re-resolve scopes for DCR agents with a PrismID.
-	var prismID string
-	s.oauth.mu.Lock()
-	dc, isDynamic := s.oauth.dynamics[ac.clientID]
-	if isDynamic && dc != nil {
-		prismID = dc.PrismID
-	}
-	s.oauth.mu.Unlock()
-
 	if isDynamic && prismID != "" {
 		resolved := s.ResolveScopesByPrismID(prismID)
 		client = &ClientConfig{
@@ -495,6 +517,15 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lock order: s.oauth.mu before s.mu.
+	var prismID string
+	s.oauth.mu.Lock()
+	dc, isDynamic := s.oauth.dynamics[rt.clientID]
+	if isDynamic && dc != nil {
+		prismID = dc.PrismID
+	}
+	s.oauth.mu.Unlock()
+
 	s.mu.RLock()
 	client, clientOK := s.clients[rt.clientID]
 	s.mu.RUnlock()
@@ -504,14 +535,6 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-resolve scopes for DCR agents with a PrismID.
-	var prismID string
-	s.oauth.mu.Lock()
-	dc, isDynamic := s.oauth.dynamics[rt.clientID]
-	if isDynamic && dc != nil {
-		prismID = dc.PrismID
-	}
-	s.oauth.mu.Unlock()
-
 	if isDynamic && prismID != "" {
 		resolved := s.ResolveScopesByPrismID(prismID)
 		client = &ClientConfig{
@@ -573,7 +596,7 @@ func verifyPKCE(challenge, method, verifier string) bool {
 	}
 	h := sha256.Sum256([]byte(verifier))
 	computed := base64.RawURLEncoding.EncodeToString(h[:])
-	return computed == challenge
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
 // --- Random string helper ---

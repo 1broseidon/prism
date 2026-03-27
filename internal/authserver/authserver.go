@@ -314,14 +314,19 @@ type AgentInfo struct {
 
 // ListAgents returns info about all registered agents (static + DCR).
 func (s *Server) ListAgents() []AgentInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// Lock order: s.oauth.mu before s.mu (consistent with handleRegister et al.).
+	// Snapshot dynamic clients first, then read the client map.
+	s.oauth.mu.Lock()
+	dynamicSnap := make(map[string]*dynamicClient, len(s.oauth.dynamics))
+	for k, v := range s.oauth.dynamics {
+		dynamicSnap[k] = v
+	}
+	s.oauth.mu.Unlock()
 
+	s.mu.RLock()
 	agents := make([]AgentInfo, 0, len(s.clients))
 	for _, c := range s.clients {
-		s.oauth.mu.Lock()
-		dc, isDynamic := s.oauth.dynamics[c.ClientID]
-		s.oauth.mu.Unlock()
+		dc, isDynamic := dynamicSnap[c.ClientID]
 
 		ai := AgentInfo{
 			ClientID:    c.ClientID,
@@ -349,41 +354,53 @@ func (s *Server) ListAgents() []AgentInfo {
 		}
 		agents = append(agents, ai)
 	}
+	s.mu.RUnlock()
 	return agents
 }
 
 // GetAgentByPrismID returns agent info for a specific PrismID, or nil if not found.
 func (s *Server) GetAgentByPrismID(prismID string) *AgentInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for _, c := range s.clients {
-		s.oauth.mu.Lock()
-		dc, isDynamic := s.oauth.dynamics[c.ClientID]
-		s.oauth.mu.Unlock()
-
-		if isDynamic && dc != nil && dc.PrismID == prismID {
-			scopes := s.ResolveScopesByPrismID(dc.PrismID)
-			var policy *AgentPolicy
-			if p, err := s.GetAgentPolicy(dc.PrismID); err == nil && p != nil {
-				policy = p
-			}
-			ai := &AgentInfo{
-				ClientID:    c.ClientID,
-				PrismID:     dc.PrismID,
-				Label:       dc.Label,
-				Description: c.Description,
-				Scopes:      scopes,
-				Dynamic:     true,
-				CreatedAt:   dc.CreatedAt,
-				LastUsedAt:  dc.LastUsedAt,
-				Policy:      policy,
-				Breakdown:   s.BuildBreakdown(policy, scopes),
-			}
-			return ai
+	// Lock order: s.oauth.mu before s.mu.
+	s.oauth.mu.Lock()
+	var matchedClientID string
+	var matchedDC *dynamicClient
+	for cid, dc := range s.oauth.dynamics {
+		if dc != nil && dc.PrismID == prismID {
+			matchedClientID = cid
+			matchedDC = dc
+			break
 		}
 	}
-	return nil
+	s.oauth.mu.Unlock()
+
+	if matchedDC == nil {
+		return nil
+	}
+
+	s.mu.RLock()
+	c, ok := s.clients[matchedClientID]
+	s.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+
+	scopes := s.ResolveScopesByPrismID(matchedDC.PrismID)
+	var policy *AgentPolicy
+	if p, err := s.GetAgentPolicy(matchedDC.PrismID); err == nil && p != nil {
+		policy = p
+	}
+	return &AgentInfo{
+		ClientID:    c.ClientID,
+		PrismID:     matchedDC.PrismID,
+		Label:       matchedDC.Label,
+		Description: c.Description,
+		Scopes:      scopes,
+		Dynamic:     true,
+		CreatedAt:   matchedDC.CreatedAt,
+		LastUsedAt:  matchedDC.LastUsedAt,
+		Policy:      policy,
+		Breakdown:   s.BuildBreakdown(policy, scopes),
+	}
 }
 
 // RemoveAgent deletes a dynamic agent by client_id.
