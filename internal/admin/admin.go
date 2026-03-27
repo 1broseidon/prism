@@ -116,7 +116,7 @@ func (a *API) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 func isPolicyPath(path string) bool {
 	// Path: /agents/{prism_id}/policy
 	trimmed := path
-	if len(trimmed) > 0 && trimmed[len(trimmed)-1] == '/' {
+	if trimmed != "" && trimmed[len(trimmed)-1] == '/' {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
 	return len(trimmed) > len("/agents/") && hasSuffix(trimmed, "/policy")

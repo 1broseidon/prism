@@ -30,13 +30,13 @@ func main() {
 	cfg, err := authserver.LoadConfig(*configPath)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
-		os.Exit(1)
+		return
 	}
 
 	km, err := authserver.NewKeyManager(cfg.SigningKey.Path)
 	if err != nil {
 		logger.Error("failed to initialize signing key", "error", err)
-		os.Exit(1)
+		return
 	}
 
 	if cfg.SigningKey.Path == "" {
@@ -59,6 +59,5 @@ func main() {
 
 	if err := httpServer.ListenAndServe(); err != nil {
 		logger.Error("server stopped", "error", err)
-		os.Exit(1)
 	}
 }

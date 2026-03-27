@@ -390,20 +390,13 @@ func generateUUID() (string, error) {
 
 // --- Authorization code exchange in token endpoint ---
 
-// handleAuthCodeExchange handles grant_type=authorization_code with PKCE verification.
-// Body size is already limited by handleToken's MaxBytesReader.
-func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) {
-	code := r.FormValue("code")                  //nolint:gosec // body limited by caller
-	redirectURI := r.FormValue("redirect_uri")   //nolint:gosec // body limited by caller
-	codeVerifier := r.FormValue("code_verifier") //nolint:gosec // body limited by caller
-	clientID := r.FormValue("client_id")         //nolint:gosec // body limited by caller
-
+// validateAuthCode consumes and validates an authorization code, returning the
+// associated authCode record or an error string suitable for an OAuth error response.
+func (s *Server) validateAuthCode(code, clientID, redirectURI, codeVerifier string) (ac *authCode, errCode, errDesc string) {
 	if code == "" {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "code is required")
-		return
+		return nil, "invalid_request", "code is required"
 	}
 
-	// Look up and consume the authorization code.
 	s.oauth.mu.Lock()
 	ac, ok := s.oauth.codes[code]
 	if ok {
@@ -412,34 +405,37 @@ func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) 
 	s.oauth.mu.Unlock()
 
 	if !ok {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code not found or already used")
-		return
+		return nil, "invalid_grant", "authorization code not found or already used"
 	}
-
 	if time.Now().After(ac.expiresAt) {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code expired")
-		return
+		return nil, "invalid_grant", "authorization code expired"
 	}
-
-	// Verify client_id matches.
 	if clientID != "" && clientID != ac.clientID {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
-		return
+		return nil, "invalid_grant", "client_id mismatch"
 	}
-
-	// Verify redirect_uri matches.
 	if redirectURI != "" && redirectURI != ac.redirectURI {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
-		return
+		return nil, "invalid_grant", "redirect_uri mismatch"
 	}
-
-	// Verify PKCE code_verifier.
 	if codeVerifier == "" {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_request", "code_verifier is required (PKCE)")
-		return
+		return nil, "invalid_request", "code_verifier is required (PKCE)"
 	}
 	if !verifyPKCE(ac.challenge, ac.method, codeVerifier) {
-		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		return nil, "invalid_grant", "PKCE verification failed"
+	}
+	return ac, "", ""
+}
+
+// handleAuthCodeExchange handles grant_type=authorization_code with PKCE verification.
+// Body size is already limited by handleToken's MaxBytesReader.
+func (s *Server) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) {
+	code := r.FormValue("code")                  //nolint:gosec // body limited by caller
+	redirectURI := r.FormValue("redirect_uri")   //nolint:gosec // body limited by caller
+	codeVerifier := r.FormValue("code_verifier") //nolint:gosec // body limited by caller
+	clientID := r.FormValue("client_id")         //nolint:gosec // body limited by caller
+
+	ac, errCode, errDesc := s.validateAuthCode(code, clientID, redirectURI, codeVerifier)
+	if ac == nil {
+		s.writeOAuthError(w, http.StatusBadRequest, errCode, errDesc)
 		return
 	}
 

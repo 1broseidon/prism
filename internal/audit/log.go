@@ -60,8 +60,8 @@ type Entry struct {
 }
 
 const (
-	recentCap      = 500
-	auditKVPrefix  = "audit/"
+	recentCap        = 500
+	auditKVPrefix    = "audit/"
 	defaultRetention = 30 * 24 * time.Hour // 30 days
 )
 
