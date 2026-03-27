@@ -1,4 +1,4 @@
-.PHONY: all build test lint fmt vet check clean
+.PHONY: all build test lint fmt vet check clean hooks
 
 # Build tags required for OAuth client support (upstream MCP server auth).
 TAGS := -tags mcp_go_client_oauth
@@ -34,6 +34,12 @@ check: fmt-check vet lint test
 # Verify formatting without modifying files (CI-friendly)
 fmt-check:
 	@test -z "$$(gofmt -s -l .)" || (echo "Files not formatted:"; gofmt -s -l .; exit 1)
+
+# Install git hooks
+hooks:
+	cp scripts/pre-commit .git/hooks/pre-commit
+	chmod +x .git/hooks/pre-commit
+	@echo "pre-commit hook installed"
 
 # Clean build artifacts
 clean:

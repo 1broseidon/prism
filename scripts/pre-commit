@@ -1,0 +1,27 @@
+#!/bin/sh
+# Prism pre-commit hook: format, vet, lint, test
+# Install: make hooks
+
+set -e
+
+echo "pre-commit: checking formatting..."
+if [ -n "$(gofmt -s -l .)" ]; then
+    echo "ERROR: files not formatted. Run 'gofmt -s -w .'"
+    gofmt -s -l .
+    exit 1
+fi
+
+echo "pre-commit: running go vet..."
+go vet ./...
+
+echo "pre-commit: running golangci-lint..."
+if command -v golangci-lint >/dev/null 2>&1; then
+    golangci-lint run ./...
+else
+    echo "WARN: golangci-lint not installed, skipping"
+fi
+
+echo "pre-commit: running tests..."
+go test -count=1 -tags mcp_go_client_oauth ./...
+
+echo "pre-commit: all checks passed"
