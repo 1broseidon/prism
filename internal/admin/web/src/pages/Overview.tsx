@@ -51,11 +51,6 @@ export function Overview() {
           <div class="tile-value">{gr.length}</div>
           <div class="tile-sub">{gr.length === 0 ? "no groups" : ""}</div>
         </div>
-        <div class="tile">
-          <div class="tile-label">Goroutines</div>
-          <div class="tile-value">{i?.goroutines ?? "—"}</div>
-          <div class="tile-sub">runtime</div>
-        </div>
       </div>
 
       <div class="section">

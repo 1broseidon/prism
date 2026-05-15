@@ -35,7 +35,6 @@ export function Layout({ children }: Props) {
         <div class="shell-meta">
           {i ? <span>v{i.version}</span> : null}
           {i ? <span>up {fmtUptime(i.uptime)}</span> : null}
-          {i ? <span>{i.goroutines} goroutines</span> : null}
         </div>
       </header>
 
