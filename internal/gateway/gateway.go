@@ -37,7 +37,17 @@ type Backend struct {
 	Client    *mcp.Client
 	Session   *mcp.ClientSession
 	CB        *middleware.CircuitBreaker
-	ToolNames []string // namespaced tool names registered on the gateway
+	ToolNames []string          // namespaced tool names registered on the gateway
+	Tools     []BackendToolInfo // tool metadata captured at registration
+}
+
+// BackendToolInfo is the per-tool metadata returned in BackendStatus.
+// Schemas are intentionally excluded — they can be large and aren't useful
+// in a list/detail UI without rendering. Name uses the namespaced form
+// (e.g. "github__create_issue") so callers can map directly to audit events.
+type BackendToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // Gateway aggregates multiple MCP backends behind a single server.
@@ -466,6 +476,7 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 	}
 
 	names := make([]string, 0, len(result.Tools))
+	infos := make([]BackendToolInfo, 0, len(result.Tools))
 	for _, tool := range result.Tools {
 		namespacedName := b.Config.Namespace + namespaceSeparator + tool.Name
 
@@ -485,10 +496,12 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 
 		g.server.AddTool(namespacedTool, handler)
 		names = append(names, namespacedName)
+		infos = append(infos, BackendToolInfo{Name: namespacedName, Description: tool.Description})
 	}
 
 	// Track tool names so we can remove them when the backend disconnects.
 	b.ToolNames = names
+	b.Tools = infos
 
 	g.logger.Info("registered tools from backend", "id", b.Config.ID, "count", len(result.Tools))
 	return nil
@@ -688,6 +701,7 @@ type BackendStatus struct {
 	URL            string                 `json:"url"`
 	CircuitBreaker string                 `json:"circuit_breaker,omitempty"`
 	Credential     *BackendCredentialInfo `json:"credential,omitempty"`
+	Tools          []BackendToolInfo      `json:"tools,omitempty"`
 }
 
 // RegisterCredential registers a credential for a backend in the credential store.
@@ -727,6 +741,7 @@ func (g *Gateway) Status() []BackendStatus {
 			ID:        b.Config.ID,
 			Namespace: b.Config.Namespace,
 			URL:       b.Config.URL,
+			Tools:     b.Tools,
 		}
 		if b.CB != nil {
 			s.CircuitBreaker = b.CB.State().String()

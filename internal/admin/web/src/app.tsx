@@ -2,7 +2,9 @@ import { LocationProvider, Router, Route } from "preact-iso";
 import { Layout } from "./components/Layout";
 import { Overview } from "./pages/Overview";
 import { Servers } from "./pages/Servers";
+import { ServerDetail } from "./pages/ServerDetail";
 import { Identity } from "./pages/Identity";
+import { AgentDetail } from "./pages/AgentDetail";
 import { Audit } from "./pages/Audit";
 
 export function App() {
@@ -12,7 +14,9 @@ export function App() {
         <Router>
           <Route path="/" component={Overview} />
           <Route path="/servers" component={Servers} />
+          <Route path="/servers/:id" component={ServerDetail} />
           <Route path="/identity" component={Identity} />
+          <Route path="/identity/agents/:prismId" component={AgentDetail} />
           <Route path="/audit" component={Audit} />
           <Route default component={NotFound} />
         </Router>

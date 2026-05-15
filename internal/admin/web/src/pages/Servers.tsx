@@ -1,10 +1,7 @@
-import { useEffect, useRef, useState } from "preact/hooks";
-import { backends } from "../state";
-import {
-  deleteJSON,
-  getJSON,
-  postJSON,
-} from "../api/client";
+import { useEffect, useRef, useState, useMemo } from "preact/hooks";
+import { useLocation } from "preact-iso";
+import { backends, events } from "../state";
+import { getJSON, postJSON } from "../api/client";
 import type {
   AddBackendBody,
   AddBackendResponse,
@@ -12,6 +9,7 @@ import type {
   Backend,
   CredentialInput,
 } from "../api/types";
+import { fmtAge } from "../util/time";
 
 type CredType = "none" | "static" | "env" | "command";
 
@@ -42,41 +40,65 @@ function buildCredInput(s: CredFormState): CredentialInput | undefined {
   return c;
 }
 
-function credFromBackend(b: Backend): CredFormState {
-  const c = b.credential;
-  if (!c || !c.configured) return emptyCred();
-  return {
-    type: c.type,
-    header: c.header || "Authorization",
-    value: "",
-    env: c.env || "",
-    command: c.command || "",
-  };
-}
-
 export function Servers() {
   const list = (backends.data.value || []).slice().sort((a, b) =>
     a.id.localeCompare(b.id),
   );
   const [addingOpen, setAddingOpen] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const loc = useLocation();
+
+  const ev = events.data.value || [];
+  const lastCallByNs = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of ev) {
+      if (!m.has(e.namespace)) m.set(e.namespace, e.ts);
+    }
+    return m;
+  }, [ev]);
+
+  const totalTools = list.reduce(
+    (acc, b) => acc + (b.tools?.length ?? 0),
+    0,
+  );
+
+  const filtered = useMemo(() => {
+    const q = query.toLowerCase().trim();
+    if (!q) return list;
+    return list.filter(
+      (b) =>
+        b.id.toLowerCase().includes(q) ||
+        (b.namespace || "").toLowerCase().includes(q) ||
+        (b.url || "").toLowerCase().includes(q) ||
+        (b.tools || []).some((t) => t.name.toLowerCase().includes(q)),
+    );
+  }, [list, query]);
 
   return (
     <div>
       <div class="page-header">
         <div>
-          <div class="page-title">MCP Servers</div>
+          <div class="page-title">mcp servers</div>
           <div class="page-subtitle">
-            {list.length} backend{list.length === 1 ? "" : "s"} connected
+            {list.length} backend{list.length === 1 ? "" : "s"} ·{" "}
+            {totalTools} tool{totalTools === 1 ? "" : "s"}
           </div>
         </div>
-        <button
-          class="section-btn"
-          onClick={() => setAddingOpen((v) => !v)}
-        >
-          + Connect
-        </button>
+        <div class="page-header-actions">
+          <input
+            type="search"
+            class="search-input"
+            placeholder="search backends or tools…"
+            value={query}
+            onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+          />
+          <button
+            class="section-btn section-btn-primary"
+            onClick={() => setAddingOpen((v) => !v)}
+          >
+            + connect
+          </button>
+        </div>
       </div>
 
       {addingOpen && (
@@ -90,151 +112,89 @@ export function Servers() {
       )}
 
       {list.length === 0 && !addingOpen ? (
-        <div class="empty-state">
-          No backends connected. Use “+ Connect” to add one.
-        </div>
+        <EmptyServers onConnect={() => setAddingOpen(true)} />
+      ) : filtered.length === 0 ? (
+        <div class="empty-state">no backends match “{query}”.</div>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th style="width:50%">Transport</th>
-              <th style="width:10%" class="right">
-                {busy ? <span style="color:var(--muted)">…</span> : null}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.map((b) => (
-              <>
-                <tr
-                  key={b.id}
-                  style="cursor:pointer"
-                  onClick={() =>
-                    setEditingId(editingId === b.id ? null : b.id)
-                  }
-                >
-                  <td>
-                    <span class="backend-name">{b.id}</span>
-                    {b.namespace && b.namespace !== b.id && (
-                      <span class="backend-ns-suffix">({b.namespace})</span>
-                    )}
-                  </td>
-                  <td>
-                    <span class="backend-transport">
-                      {b.url || "stdio"}
-                    </span>
-                    <CredBadge b={b} />
-                  </td>
-                  <td class="right">
-                    <span style="font-size:10px;color:var(--muted)">
-                      {editingId === b.id ? "▾" : "▸"}
-                    </span>
-                  </td>
-                </tr>
-                {editingId === b.id && (
-                  <tr class="backend-edit-row" key={`${b.id}-edit`}>
-                    <td colspan={3} style="padding:0">
-                      <BackendEdit
-                        backend={b}
-                        onDone={() => {
-                          setEditingId(null);
-                          backends.refresh();
-                        }}
-                        onCancel={() => setEditingId(null)}
-                        onBusy={setBusy}
-                      />
-                    </td>
-                  </tr>
-                )}
-              </>
-            ))}
-          </tbody>
-        </table>
+        <div class="server-list">
+          {filtered.map((b) => (
+            <ServerRow
+              key={b.id}
+              backend={b}
+              lastCall={lastCallByNs.get(b.namespace || b.id)}
+              onClick={() => loc.route(`/servers/${encodeURIComponent(b.id)}`)}
+            />
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
-function CredBadge({ b }: { b: Backend }) {
-  const c = b.credential;
-  if (!c || !c.configured) return null;
-  if (c.type === "static") {
-    return <span class="cred-badge">api-key ••••</span>;
-  }
-  if (c.type === "env") {
-    return <span class="cred-badge">env: {c.env || ""}</span>;
-  }
-  if (c.type === "command") {
-    const cmd = c.command || "";
-    const short = cmd.length > 30 ? cmd.slice(0, 30) + "…" : cmd;
-    return <span class="cred-badge">cmd: {short}</span>;
-  }
-  return null;
+function EmptyServers({ onConnect }: { onConnect: () => void }) {
+  return (
+    <div class="empty-callout">
+      <div class="empty-callout-title">no backends connected yet</div>
+      <div class="empty-callout-body">
+        backends are the MCP servers behind the gateway. connect a stdio
+        process (e.g. <code>npx @modelcontextprotocol/server-github</code>)
+        or an http endpoint to start routing tool calls through prism.
+      </div>
+      <button class="save-btn" onClick={onConnect}>
+        connect a backend
+      </button>
+    </div>
+  );
 }
 
-function CredFields({
-  state,
-  onChange,
+function ServerRow({
+  backend,
+  lastCall,
+  onClick,
 }: {
-  state: CredFormState;
-  onChange: (next: CredFormState) => void;
+  backend: Backend;
+  lastCall: string | undefined;
+  onClick: () => void;
 }) {
-  if (state.type === "none") return null;
+  const transport = backend.url ? "http" : "stdio";
+  const toolCount = backend.tools?.length ?? 0;
+  const statusKind: "ok" | "warn" | "error" | "neutral" = (() => {
+    const cb = backend.circuit_breaker;
+    if (cb === "open") return "error";
+    if (cb === "half_open" || cb === "half-open") return "warn";
+    if (toolCount > 0) return "ok";
+    return "neutral";
+  })();
+
   return (
-    <div class="cred-fields">
-      <input
-        type="text"
-        placeholder="header"
-        value={state.header}
-        style="width:100px"
-        onInput={(e) =>
-          onChange({ ...state, header: (e.target as HTMLInputElement).value })
-        }
-      />
-      {state.type === "static" && (
-        <>
-          <input
-            type="password"
-            placeholder="secret value (write-only)"
-            value={state.value}
-            style="width:200px"
-            onInput={(e) =>
-              onChange({
-                ...state,
-                value: (e.target as HTMLInputElement).value,
-              })
-            }
-          />
-          <span class="cred-hint">write-only</span>
-        </>
-      )}
-      {state.type === "env" && (
-        <input
-          type="text"
-          placeholder="ENV_VAR_NAME"
-          value={state.env}
-          style="width:160px"
-          onInput={(e) =>
-            onChange({ ...state, env: (e.target as HTMLInputElement).value })
-          }
-        />
-      )}
-      {state.type === "command" && (
-        <input
-          type="text"
-          placeholder="vault kv get -field=token …"
-          value={state.command}
-          style="flex:1;min-width:240px"
-          onInput={(e) =>
-            onChange({
-              ...state,
-              command: (e.target as HTMLInputElement).value,
-            })
-          }
-        />
-      )}
-    </div>
+    <button class="server-row" onClick={onClick}>
+      <div class="server-row-main">
+        <div class="server-row-header">
+          <span class={`status-pip status-pip-${statusKind}`} />
+          <span class="server-row-name">{backend.id}</span>
+          {backend.namespace && backend.namespace !== backend.id && (
+            <span class="server-row-ns">/ {backend.namespace}</span>
+          )}
+          <span class="server-row-transport">{transport}</span>
+        </div>
+        <div class="server-row-meta">
+          <span class="server-row-url">{backend.url || "stdio process"}</span>
+        </div>
+      </div>
+      <div class="server-row-stats">
+        <div class="server-row-stat">
+          <div class="server-row-stat-value">{toolCount}</div>
+          <div class="server-row-stat-label">tool{toolCount === 1 ? "" : "s"}</div>
+        </div>
+        <div class="server-row-stat">
+          <div class="server-row-stat-value">
+            {lastCall ? fmtAge(lastCall) : "—"}
+          </div>
+          <div class="server-row-stat-label">last call</div>
+        </div>
+        <span class="server-row-chevron">›</span>
+      </div>
+    </button>
   );
 }
 
@@ -294,110 +254,30 @@ function AddBackend({
   }
 
   return (
-    <div
-      class="inline-form"
-      style="border:1px solid var(--line);padding:12px;margin-bottom:16px;background:var(--bg-elev)"
-    >
-      <input
-        type="text"
-        placeholder="name"
-        value={name}
-        autoFocus
-        spellcheck={false}
-        style="width:140px"
-        onInput={(e) => setName((e.target as HTMLInputElement).value)}
-      />
-      <input
-        type="text"
-        placeholder="command or http(s) URL"
-        value={cmd}
-        spellcheck={false}
-        style="flex:1;min-width:240px"
-        onInput={(e) => setCmd((e.target as HTMLInputElement).value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") submit();
-          if (e.key === "Escape") onCancel();
-        }}
-      />
-      <select
-        value={cred.type}
-        onChange={(e) =>
-          setCred({
-            ...cred,
-            type: (e.target as HTMLSelectElement).value as CredType,
-          })
-        }
-      >
-        <option value="none">no credential</option>
-        <option value="static">API Key</option>
-        <option value="env">Env Var</option>
-        <option value="command">Command</option>
-      </select>
-      <CredFields state={cred} onChange={setCred} />
-      <div style="display:flex;gap:6px;align-items:center;width:100%;margin-top:4px">
-        <button class="save-btn" onClick={submit}>
-          connect
-        </button>
-        <button class="cancel-btn" onClick={onCancel}>
-          cancel
-        </button>
-        {error && (
-          <span style="font-size:11px;color:var(--denied)">{error}</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function BackendEdit({
-  backend,
-  onDone,
-  onCancel,
-  onBusy,
-}: {
-  backend: Backend;
-  onDone: () => void;
-  onCancel: () => void;
-  onBusy: (id: string | null) => void;
-}) {
-  const [cred, setCred] = useState<CredFormState>(credFromBackend(backend));
-  const [error, setError] = useState<string | null>(null);
-
-  const save = async () => {
-    setError(null);
-    onBusy(backend.id);
-    try {
-      const body: AddBackendBody = { url: backend.url || "" };
-      const credInput = buildCredInput(cred);
-      body.credential = credInput ?? null;
-      await postJSON(`/backends/${encodeURIComponent(backend.id)}`, body);
-      onDone();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      onBusy(null);
-    }
-  };
-
-  const remove = async () => {
-    if (!confirm(`Remove backend "${backend.id}"?`)) return;
-    onBusy(backend.id);
-    try {
-      await deleteJSON(`/backends/${encodeURIComponent(backend.id)}`);
-      onDone();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      onBusy(null);
-    }
-  };
-
-  return (
-    <div class="backend-edit">
-      <div class="inline-form" style="padding:0 0 0 24px">
-        <span class="policy-label" style="width:auto">
-          credential
-        </span>
+    <div class="card form-card">
+      <div class="form-card-title">connect a backend</div>
+      <div class="inline-form">
+        <input
+          type="text"
+          placeholder="name"
+          value={name}
+          autoFocus
+          spellcheck={false}
+          style="width:160px"
+          onInput={(e) => setName((e.target as HTMLInputElement).value)}
+        />
+        <input
+          type="text"
+          placeholder="command or http(s) URL"
+          value={cmd}
+          spellcheck={false}
+          style="flex:1;min-width:260px"
+          onInput={(e) => setCmd((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+            if (e.key === "Escape") onCancel();
+          }}
+        />
         <select
           value={cred.type}
           onChange={(e) =>
@@ -407,29 +287,87 @@ function BackendEdit({
             })
           }
         >
-          <option value="none">none</option>
-          <option value="static">API Key</option>
-          <option value="env">Env Var</option>
-          <option value="command">Command</option>
+          <option value="none">no credential</option>
+          <option value="static">api key</option>
+          <option value="env">env var</option>
+          <option value="command">command</option>
         </select>
         <CredFields state={cred} onChange={setCred} />
-        <div style="display:flex;gap:6px;margin-left:auto;padding-right:24px">
-          <button class="save-btn" onClick={save}>
-            save
-          </button>
-          <button class="danger-btn" onClick={remove}>
-            remove
-          </button>
-          <button class="cancel-btn" onClick={onCancel}>
-            cancel
-          </button>
-        </div>
-        {error && (
-          <span style="font-size:11px;color:var(--denied);width:100%">
-            {error}
-          </span>
-        )}
       </div>
+      <div class="form-actions">
+        <button class="save-btn" onClick={submit}>
+          connect
+        </button>
+        <button class="cancel-btn" onClick={onCancel}>
+          cancel
+        </button>
+        {error && <span class="error-text">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function CredFields({
+  state,
+  onChange,
+}: {
+  state: CredFormState;
+  onChange: (next: CredFormState) => void;
+}) {
+  if (state.type === "none") return null;
+  return (
+    <div class="cred-fields">
+      <input
+        type="text"
+        placeholder="header"
+        value={state.header}
+        style="width:120px"
+        onInput={(e) =>
+          onChange({ ...state, header: (e.target as HTMLInputElement).value })
+        }
+      />
+      {state.type === "static" && (
+        <>
+          <input
+            type="password"
+            placeholder="secret value (write-only)"
+            value={state.value}
+            style="width:220px"
+            onInput={(e) =>
+              onChange({
+                ...state,
+                value: (e.target as HTMLInputElement).value,
+              })
+            }
+          />
+          <span class="cred-hint">write-only</span>
+        </>
+      )}
+      {state.type === "env" && (
+        <input
+          type="text"
+          placeholder="ENV_VAR_NAME"
+          value={state.env}
+          style="width:160px"
+          onInput={(e) =>
+            onChange({ ...state, env: (e.target as HTMLInputElement).value })
+          }
+        />
+      )}
+      {state.type === "command" && (
+        <input
+          type="text"
+          placeholder="vault kv get -field=token …"
+          value={state.command}
+          style="flex:1;min-width:240px"
+          onInput={(e) =>
+            onChange({
+              ...state,
+              command: (e.target as HTMLInputElement).value,
+            })
+          }
+        />
+      )}
     </div>
   );
 }
@@ -449,7 +387,7 @@ function OAuthFlow({
     "idle",
   );
   const [message, setMessage] = useState(
-    "Click Authenticate to open the provider in a popup.",
+    "click authenticate to open the provider in a popup.",
   );
   const pollRef = useRef<number | null>(null);
   const timeoutRef = useRef<number | null>(null);
@@ -470,7 +408,7 @@ function OAuthFlow({
   const start = () => {
     window.open(authUrl, "prism-auth", "width=600,height=700");
     setStatus("waiting");
-    setMessage("Authorization in progress…");
+    setMessage("authorization in progress…");
     pollRef.current = window.setInterval(async () => {
       try {
         const d = await getJSON<AuthStatus>(
@@ -482,7 +420,7 @@ function OAuthFlow({
         } else if (d.status.startsWith("failed")) {
           stop();
           setStatus("error");
-          setMessage("Failed: " + d.status.replace("failed:", ""));
+          setMessage("failed: " + d.status.replace("failed:", ""));
         }
       } catch {
         // keep polling
@@ -492,24 +430,22 @@ function OAuthFlow({
       () => {
         stop();
         setStatus("timeout");
-        setMessage("Authentication timed out.");
+        setMessage("authentication timed out.");
       },
       5 * 60 * 1000,
     );
   };
 
   return (
-    <div
-      class="inline-form"
-      style="border:1px solid var(--line);padding:12px;margin-bottom:16px;background:var(--bg-elev)"
-    >
+    <div class="card form-card">
+      <div class="form-card-title">authenticate with provider</div>
       <div class="oauth-flow">
         <button class="save-btn" onClick={start} disabled={status === "waiting"}>
           {status === "idle"
-            ? "Authenticate"
+            ? "authenticate"
             : status === "waiting"
-              ? "Waiting…"
-              : "Retry"}
+              ? "waiting…"
+              : "retry"}
         </button>
         <span
           class={

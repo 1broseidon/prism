@@ -41,11 +41,18 @@ export interface BackendCredentialInfo {
   configured: boolean;
 }
 
+export interface BackendTool {
+  name: string;
+  description?: string;
+}
+
 export interface Backend {
   id: string;
   namespace?: string;
   url?: string;
   credential?: BackendCredentialInfo;
+  tools?: BackendTool[];
+  circuit_breaker?: string;
 }
 
 export interface Group {

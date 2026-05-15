@@ -1,16 +1,55 @@
-import { useMemo, useState } from "preact/hooks";
+import { useMemo, useState, useEffect } from "preact/hooks";
+import { useLocation } from "preact-iso";
 import { events, agents } from "../state";
-import { fmtTimeOfDay, splitLabel } from "../util/time";
+import { fmtTimeOfDay, fmtAge, splitLabel } from "../util/time";
+import type { AuditEvent } from "../api/types";
+
+type Range = "5m" | "1h" | "6h" | "24h" | "all";
+type Status = "all" | "allowed" | "denied";
+
+const RANGE_LABELS: Record<Range, string> = {
+  "5m": "5 min",
+  "1h": "1 hour",
+  "6h": "6 hours",
+  "24h": "24 hours",
+  all: "all",
+};
+
+const RANGE_MS: Record<Range, number | null> = {
+  "5m": 5 * 60 * 1000,
+  "1h": 60 * 60 * 1000,
+  "6h": 6 * 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+  all: null,
+};
 
 export function Audit() {
   const ev = events.data.value || [];
   const ag = agents.data.value || [];
+  const loc = useLocation();
 
-  const [filterAgent, setFilterAgent] = useState("");
-  const [filterNamespace, setFilterNamespace] = useState("");
-  const [showDenied, setShowDenied] = useState<"all" | "allowed" | "denied">(
-    "all",
-  );
+  // Initial filter state from URL params (e.g. /audit?namespace=exa)
+  const initialAgent = loc.query?.agent || "";
+  const initialNamespace = loc.query?.namespace || "";
+
+  const [range, setRange] = useState<Range>("1h");
+  const [status, setStatus] = useState<Status>("all");
+  const [filterAgent, setFilterAgent] = useState(initialAgent);
+  const [filterNamespace, setFilterNamespace] = useState(initialNamespace);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<number | null>(null);
+
+  // Keep URL params in sync (only when filters change deliberately)
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (filterAgent) params.set("agent", filterAgent);
+    if (filterNamespace) params.set("namespace", filterNamespace);
+    const next = params.toString();
+    const url = next ? `/audit?${next}` : "/audit";
+    if (loc.path === "/audit" && loc.url !== url) {
+      window.history.replaceState(null, "", url);
+    }
+  }, [filterAgent, filterNamespace]);
 
   const nameCache = useMemo(() => {
     const m = new Map<string, string>();
@@ -20,147 +59,293 @@ export function Audit() {
     return m;
   }, [ag]);
 
-  const namespaces = useMemo(() => {
-    return Array.from(new Set(ev.map((e) => e.namespace).filter(Boolean)));
-  }, [ev]);
+  const namespaces = useMemo(
+    () => Array.from(new Set(ev.map((e) => e.namespace).filter(Boolean))).sort(),
+    [ev],
+  );
 
   const filtered = useMemo(() => {
+    const rangeMs = RANGE_MS[range];
+    const cutoff = rangeMs ? Date.now() - rangeMs : 0;
+    const q = query.toLowerCase().trim();
     return ev.filter((e) => {
+      if (rangeMs && new Date(e.ts).getTime() < cutoff) return false;
       if (filterAgent && e.client_id !== filterAgent) return false;
       if (filterNamespace && e.namespace !== filterNamespace) return false;
-      if (showDenied === "allowed" && !e.allowed) return false;
-      if (showDenied === "denied" && e.allowed) return false;
+      if (status === "allowed" && !e.allowed) return false;
+      if (status === "denied" && e.allowed) return false;
+      if (q) {
+        const haystack = `${e.tool} ${e.namespace} ${e.client_id} ${
+          nameCache.get(e.client_id) || ""
+        }`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
       return true;
     });
-  }, [ev, filterAgent, filterNamespace, showDenied]);
+  }, [ev, range, filterAgent, filterNamespace, status, query, nameCache]);
+
+  const deniedCount = filtered.filter((e) => !e.allowed).length;
+  const avgLatency =
+    filtered.length === 0
+      ? 0
+      : Math.round(
+          filtered.reduce((acc, e) => acc + (e.allowed ? e.latency_ms : 0), 0) /
+            Math.max(1, filtered.filter((e) => e.allowed).length),
+        );
+
+  const hasActiveFilter =
+    filterAgent || filterNamespace || status !== "all" || query;
 
   return (
     <div>
       <div class="page-header">
         <div>
-          <div class="page-title">Audit</div>
+          <div class="page-title">audit</div>
           <div class="page-subtitle">
-            {filtered.length} of {ev.length} events
+            {filtered.length} of {ev.length} events ·{" "}
+            {RANGE_LABELS[range]} window
           </div>
         </div>
       </div>
 
-      <div class="section">
-        <div
-          class="inline-form"
-          style="border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:0"
-        >
-          <select
-            value={filterAgent}
-            onChange={(e) =>
-              setFilterAgent((e.target as HTMLSelectElement).value)
-            }
-          >
-            <option value="">all agents</option>
-            {ag.map((a) => (
-              <option key={a.client_id} value={a.client_id}>
-                {a.label || a.description || a.client_id}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterNamespace}
-            onChange={(e) =>
-              setFilterNamespace((e.target as HTMLSelectElement).value)
-            }
-          >
-            <option value="">all namespaces</option>
-            {namespaces.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-          <select
-            value={showDenied}
-            onChange={(e) =>
-              setShowDenied(
-                (e.target as HTMLSelectElement).value as
-                  | "all"
-                  | "allowed"
-                  | "denied",
-              )
-            }
-          >
-            <option value="all">all</option>
-            <option value="allowed">allowed</option>
-            <option value="denied">denied only</option>
-          </select>
-          {(filterAgent || filterNamespace || showDenied !== "all") && (
-            <button
-              class="cancel-btn"
-              onClick={() => {
-                setFilterAgent("");
-                setFilterNamespace("");
-                setShowDenied("all");
-              }}
-            >
-              clear
-            </button>
-          )}
-        </div>
+      <div class="audit-stats">
+        <AuditStat label="events" value={filtered.length} />
+        <AuditStat
+          label="denied"
+          value={deniedCount}
+          tone={deniedCount > 0 ? "warn" : "default"}
+        />
+        <AuditStat
+          label="avg latency"
+          value={avgLatency ? `${avgLatency}ms` : "—"}
+        />
+        <AuditStat
+          label="unique agents"
+          value={new Set(filtered.map((e) => e.client_id)).size}
+        />
+      </div>
 
-        {filtered.length === 0 ? (
-          <div class="empty-state">
-            {ev.length === 0 ? "Waiting for tool calls…" : "No matching events."}
-          </div>
-        ) : (
-          <table class="events-table">
-            <thead>
-              <tr>
-                <th style="width:8%">Time</th>
-                <th style="width:18%">Agent</th>
-                <th>Tool</th>
-                <th style="width:7%">Status</th>
-                <th style="width:8%" class="right">
-                  Latency
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((e, idx) => {
-                const full =
-                  nameCache.get(e.client_id) || e.client_id || "anonymous";
-                const [shortName] = splitLabel(full);
-                const latency = e.allowed
-                  ? e.latency_ms === 0
-                    ? "<1ms"
-                    : `${e.latency_ms}ms`
-                  : "-";
-                return (
-                  <tr key={`${e.ts}-${idx}`}>
-                    <td class="ev-ts">{fmtTimeOfDay(e.ts)}</td>
-                    <td class="ev-agent" title={full}>
-                      {shortName}
-                    </td>
-                    <td>
-                      <span class="ev-tool-ns">{e.namespace}__</span>
-                      <span class="ev-tool-name">{e.tool}</span>
-                    </td>
-                    <td>
-                      {e.allowed ? (
-                        <span class="ev-status">
-                          <span class="dot" />
-                        </span>
-                      ) : (
-                        <span class="ev-status">
-                          <span class="denied-text">denied</span>
-                        </span>
-                      )}
-                    </td>
-                    <td class="ev-latency">{latency}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      <div class="audit-controls">
+        <div class="range-selector">
+          {(Object.keys(RANGE_LABELS) as Range[]).map((r) => (
+            <button
+              key={r}
+              class={r === range ? "range-btn range-btn-active" : "range-btn"}
+              onClick={() => setRange(r)}
+            >
+              {RANGE_LABELS[r]}
+            </button>
+          ))}
+        </div>
+        <input
+          type="search"
+          class="search-input audit-search"
+          placeholder="search tool, agent, namespace…"
+          value={query}
+          onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+        />
+        <select
+          value={status}
+          onChange={(e) =>
+            setStatus((e.target as HTMLSelectElement).value as Status)
+          }
+          class="audit-select"
+        >
+          <option value="all">all status</option>
+          <option value="allowed">allowed</option>
+          <option value="denied">denied only</option>
+        </select>
+        <select
+          value={filterAgent}
+          onChange={(e) =>
+            setFilterAgent((e.target as HTMLSelectElement).value)
+          }
+          class="audit-select"
+        >
+          <option value="">all agents</option>
+          {ag.map((a) => (
+            <option key={a.client_id} value={a.client_id}>
+              {a.label || a.description || a.client_id}
+            </option>
+          ))}
+        </select>
+        <select
+          value={filterNamespace}
+          onChange={(e) =>
+            setFilterNamespace((e.target as HTMLSelectElement).value)
+          }
+          class="audit-select"
+        >
+          <option value="">all namespaces</option>
+          {namespaces.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        {hasActiveFilter && (
+          <button
+            class="cancel-btn"
+            onClick={() => {
+              setQuery("");
+              setStatus("all");
+              setFilterAgent("");
+              setFilterNamespace("");
+            }}
+          >
+            clear filters
+          </button>
         )}
       </div>
+
+      {filtered.length === 0 ? (
+        <div class="empty-callout">
+          <div class="empty-callout-title">
+            {ev.length === 0 ? "no audit events yet" : "no matching events"}
+          </div>
+          <div class="empty-callout-body">
+            {ev.length === 0
+              ? "audit events appear here as soon as agents call tools through the gateway. each call is logged with timestamp, agent, tool, status, and latency."
+              : "try widening the time range or clearing one of the active filters."}
+          </div>
+        </div>
+      ) : (
+        <div class="audit-table">
+          <div class="audit-table-header">
+            <div>time</div>
+            <div></div>
+            <div>agent</div>
+            <div>tool</div>
+            <div class="right">latency</div>
+          </div>
+          {filtered.map((e, idx) => {
+            const fullName =
+              nameCache.get(e.client_id) || e.client_id || "anonymous";
+            const [shortName] = splitLabel(fullName);
+            const latency = e.allowed
+              ? e.latency_ms === 0
+                ? "<1ms"
+                : `${e.latency_ms}ms`
+              : "—";
+            const open = selected === idx;
+            return (
+              <div key={`${e.ts}-${idx}`}>
+                <button
+                  class={
+                    e.allowed
+                      ? "audit-row"
+                      : "audit-row audit-row-denied"
+                  }
+                  onClick={() => setSelected(open ? null : idx)}
+                >
+                  <div class="audit-time" title={e.ts}>
+                    {fmtTimeOfDay(e.ts)}
+                    <div class="audit-time-rel">{fmtAge(e.ts)}</div>
+                  </div>
+                  <div class="audit-status">
+                    {e.allowed ? (
+                      <span class="status-pip status-pip-ok" />
+                    ) : (
+                      <span class="status-pip status-pip-error" />
+                    )}
+                  </div>
+                  <div class="audit-agent" title={fullName}>
+                    {shortName}
+                  </div>
+                  <div class="audit-tool">
+                    <span class="ev-tool-ns">{e.namespace}__</span>
+                    <span class="ev-tool-name">{e.tool}</span>
+                  </div>
+                  <div class="audit-latency">{latency}</div>
+                </button>
+                {open && <EventDetail event={e} fullName={fullName} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuditStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number | string;
+  tone?: "default" | "warn";
+}) {
+  return (
+    <div class="audit-stat">
+      <div class="audit-stat-label">{label}</div>
+      <div
+        class={
+          tone === "warn"
+            ? "audit-stat-value audit-stat-value-warn"
+            : "audit-stat-value"
+        }
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function EventDetail({
+  event,
+  fullName,
+}: {
+  event: AuditEvent;
+  fullName: string;
+}) {
+  return (
+    <div class="audit-detail">
+      <DetailRow label="timestamp" value={event.ts} mono />
+      <DetailRow label="agent" value={fullName} />
+      <DetailRow label="client_id" value={event.client_id} mono />
+      <DetailRow label="namespace" value={event.namespace} mono />
+      <DetailRow label="tool" value={event.tool} mono />
+      <DetailRow
+        label="status"
+        value={event.allowed ? "allowed" : "denied"}
+        tone={event.allowed ? "ok" : "error"}
+      />
+      <DetailRow
+        label="latency"
+        value={event.allowed ? `${event.latency_ms}ms` : "—"}
+      />
+    </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  mono,
+  tone,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  tone?: "ok" | "error";
+}) {
+  return (
+    <div class="audit-detail-row">
+      <span class="audit-detail-label">{label}</span>
+      <span
+        class={[
+          "audit-detail-value",
+          mono ? "audit-detail-value-mono" : "",
+          tone === "ok" ? "audit-detail-value-ok" : "",
+          tone === "error" ? "audit-detail-value-error" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        {value}
+      </span>
     </div>
   );
 }
