@@ -1,7 +1,6 @@
 /*
- * Midnight Editorial — Prism's design language.
- * Deep black background, coral accent, editorial typography.
- * Dark-only by design. Light mode is intentionally not supported.
+ * Prism design language — deep editorial dark, calm indigo accent.
+ * Dark-only by design.
  */
 :root {
   /* Surfaces, deepest first */
@@ -23,8 +22,8 @@
   --line-soft: #222222;
 
   /* Accents */
-  --accent: #ff6b50;
-  --accent-dim: #c84d36;
+  --accent: #6366f1;
+  --accent-dim: #4f46e5;
   --denied: #f87171;
   --warn: #fbbf24;
 
