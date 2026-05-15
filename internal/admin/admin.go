@@ -68,7 +68,6 @@ func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []an
 // Handler returns the admin HTTP handler.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", a.handleDashboard)
 	mux.HandleFunc("GET /health", a.handleHealth)
 	mux.HandleFunc("GET /backends", a.handleBackends)
 	mux.HandleFunc("GET /info", a.handleInfo)
@@ -93,6 +92,10 @@ func (a *API) Handler() http.Handler {
 	if metrics.Enabled() {
 		mux.Handle("GET /metrics", metrics.Handler())
 	}
+	// SPA catch-all for the embedded admin console. Registered last so
+	// specific API routes above take precedence; ServeMux matches the
+	// most specific pattern first.
+	mux.HandleFunc("GET /", a.handleSPA)
 	return mux
 }
 
