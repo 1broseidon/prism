@@ -79,8 +79,6 @@ a {
   align-items: center;
   gap: 8px;
   padding: 0 28px;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
   background: var(--nav-bg);
 }
 .shell-logo .logo-mark {
@@ -110,7 +108,6 @@ a {
   justify-content: space-between;
   align-items: center;
   padding: 0 36px;
-  border-bottom: 1px solid var(--line);
   background: rgba(8, 8, 8, 0.6);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -180,7 +177,6 @@ a {
   display: flex;
   flex-direction: column;
   padding: 28px 0;
-  border-right: 1px solid var(--line);
   background: var(--nav-bg);
   overflow-y: auto;
 }
@@ -238,9 +234,7 @@ a {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  padding-bottom: 24px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 36px;
+  margin-bottom: 48px;
 }
 .page-title {
   font-size: 32px;
@@ -360,7 +354,8 @@ table {
   table-layout: fixed;
 }
 thead tr {
-  border-bottom: 1px solid var(--line-soft);
+  /* No header underline — letter-spacing on th + the gap before the
+     first row gives enough separation in editorial style. */
 }
 th {
   text-align: left;
@@ -369,16 +364,13 @@ th {
   text-transform: uppercase;
   letter-spacing: 0.25em;
   color: var(--muted);
-  padding-bottom: 12px;
+  padding-bottom: 18px;
 }
 th.right {
   text-align: right;
 }
 tbody tr {
-  border-bottom: 1px solid var(--line);
-}
-tbody tr:last-child {
-  border-bottom: none;
+  /* No row borders — rhythm comes from padding + hover. */
 }
 tbody tr:hover {
   background: var(--hover);
@@ -768,7 +760,6 @@ tr:hover .copy-id {
   font-size: 12px;
 }
 .backend-edit-row {
-  border-bottom: 1px solid var(--line);
   background: var(--bg-elev);
 }
 .backend-edit-row:hover {
@@ -871,8 +862,9 @@ tr:hover .remove-btn {
 
 .policy-breakdown {
   padding: 16px 0 16px 28px;
-  border-bottom: 1px solid var(--line);
   background: var(--bg-elev);
+  border-radius: 8px;
+  margin: 4px 0;
 }
 .policy-row {
   display: flex;
@@ -916,9 +908,11 @@ tr:hover .remove-btn {
   color: var(--bg);
 }
 .policy-effective {
-  border-top: 1px solid var(--line);
-  margin-top: 6px;
+  margin-top: 10px;
   padding-top: 12px;
+}
+.policy-effective .policy-label {
+  color: var(--fg);
 }
 .add-btn {
   font-family: var(--font-mono);
