@@ -66,37 +66,40 @@ make build    # builds bin/prism and bin/prism-bridge
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `listen_addr` | string | `:8080` | MCP gateway listen address |
-| `admin_addr` | string | `:9090` | Admin API listen address |
-| `servers` | array | required | Backend MCP servers to connect to |
-| `auth` | object | none | Client-facing authentication |
+| `listen` | string | `:8080` | MCP gateway listen address |
+| `admin` | string | `:9090` | Admin API listen address |
+| `mcpServers` | object | required | Backend MCP servers, keyed by namespace |
+| `policy` | object | none | Agents, groups, and scopes. When present, Prism embeds an OAuth 2.1 auth server. |
 | `audit` | object | none | Structured audit logging |
 | `rate_limit` | object | none | Global rate limiting |
-| `resource_uri` | string | none | Canonical URI for RFC 9728 discovery |
+| `store` | object | bbolt | KV backend for DCR clients, refresh tokens, audit log |
+| `tls` | object | none | HTTPS on the gateway listener (no reverse proxy needed) |
 | `shutdown_timeout` | duration | `10s` | Graceful shutdown timeout |
 
 ### Server Config
 
-Each entry in `servers`:
+`mcpServers` is a map. The map key is both the server ID and the tool namespace (e.g. tools from the `github` entry are exposed as `github__create_issue`). Each entry mirrors `claude_desktop_config.json` plus Prism extensions:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `id` | string | required | Unique backend identifier |
-| `url` | string | required | Backend MCP server URL (must include `/mcp` path) |
-| `namespace` | string | `id` | Namespace prefix for tools (e.g. `github__create_issue`) |
-| `credentials` | object | none | Backend credential configuration |
+| `command` | string | — | Executable to spawn for stdio transport |
+| `args` | array | — | Command arguments |
+| `env` | object | — | Environment variables for the spawned process |
+| `url` | string | — | HTTP endpoint (alternative to `command`) |
+| `credentials` | object | none | Outbound credential injection (HTTP backends only) |
 | `timeout` | duration | `30s` | Per-request timeout to this backend |
 | `circuit_breaker` | object | none | Circuit breaker settings |
 | `rate_limit` | object | none | Per-backend rate limiting |
 
+A backend is either stdio (`command` + `args`) or HTTP (`url`) — not both.
+
 ### Credential Types
 
-Credentials are resolved at call time and injected into outbound HTTP requests. The agent never sees the raw value.
+Credentials are resolved at call time and injected into outbound HTTP requests. The agent never sees the raw value. The credential type is determined by which field is set — exactly one of `value`, `env`, `file`, or `command`. `header` is optional (default: `Authorization`).
 
 **Static** — fixed value, suitable for long-lived API keys:
 ```json
 {
-  "type": "static",
   "header": "X-API-Key",
   "value": "sk_live_your_key"
 }
@@ -105,77 +108,59 @@ Credentials are resolved at call time and injected into outbound HTTP requests. 
 **Environment variable** — resolved at call time:
 ```json
 {
-  "type": "env",
-  "header": "Authorization",
-  "env_var": "GITHUB_TOKEN"
+  "env": "GITHUB_TOKEN"
 }
 ```
 
 **File** — read from disk (Kubernetes mounted secrets, service account tokens):
 ```json
 {
-  "type": "file",
-  "header": "Authorization",
-  "path": "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  "file": "/var/run/secrets/kubernetes.io/serviceaccount/token"
 }
 ```
 
 **Command** — execute a shell command, cache the result with TTL:
 ```json
 {
-  "type": "command",
-  "header": "Authorization",
   "command": "vault kv get -field=token secret/mcp/github",
   "ttl": "5m"
 }
 ```
 
-The `command` type caches stdout for the configured TTL (default 5 minutes), then re-executes. This works with Vault, AWS STS, `gcloud auth print-access-token`, or any CLI that outputs a credential.
+Command credentials cache stdout for the configured TTL (default 5 minutes), then re-execute. This works with Vault, AWS STS, `gcloud auth print-access-token`, or any CLI that outputs a credential.
 
 ### Authentication
 
-#### API Key (development / internal)
+When `policy` is present, Prism embeds an OAuth 2.1 authorization server in-process — there is no external IdP to configure. When `policy` is omitted, the gateway runs open (no auth).
 
 ```json
 {
-  "auth": {
-    "header": "X-API-Key",
-    "valid_keys": ["key-1", "key-2"]
+  "policy": {
+    "agents": {
+      "ci-agent": { "secret": "change-me-ci",    "groups": ["deployers"] },
+      "analyst":  { "secret": "change-me-read",  "groups": ["readers"] },
+      "admin":    { "secret": "change-me-admin", "groups": ["deployers", "readers"], "grant": ["*"] }
+    },
+    "groups": {
+      "deployers": { "scopes": ["github:*", "filesystem:*"] },
+      "readers":   { "scopes": ["github:list_prs", "filesystem:read_file"] }
+    },
+    "default_scopes": []
   }
 }
 ```
 
-#### OAuth 2.1 (production / agentic)
+Each agent has a `secret` used as the OAuth `client_secret` (client-credentials grant). An agent's effective scopes are the union of its groups' `scopes`, plus any `grant` on the agent, minus any `deny` (deny wins). `default_scopes` applies to agents that have no group membership (e.g. dynamic client registration pending).
 
-```json
-{
-  "auth": {
-    "oauth": {
-      "issuer_url": "https://auth.example.com/realms/mcp",
-      "audience": "https://prism.example.com",
-      "required_scopes": ["mcp:connect"],
-      "scopes_supported": [
-        "mcp:connect",
-        "github:*",
-        "github:create_issue",
-        "fs:read_file"
-      ],
-      "max_token_age": "1h"
-    }
-  },
-  "resource_uri": "https://prism.example.com"
-}
-```
+Per request, Prism:
 
-When OAuth is configured, Prism:
-
-1. Validates the Bearer token signature via JWKS (auto-discovered from issuer)
-2. Checks `aud` matches the configured audience
-3. Checks `exp` and optional `max_token_age`
-4. Extracts `scope` claim and builds an access policy
+1. Validates the Bearer token it issued
+2. Resolves the agent's effective scopes
+3. Filters `tools/list` to only scoped tools
+4. Authorizes `tools/call` against the requested `namespace:tool`
 5. Serves `/.well-known/oauth-protected-resource` per RFC 9728
 
-Scope format: `namespace:tool` (e.g. `github:create_issue`) or `namespace:*` for all tools in a namespace.
+Scope format: `namespace:tool` (e.g. `github:create_issue`) or `namespace:*` for all tools in a namespace. The literal `*` in `grant` is the admin wildcard.
 
 ### Audit Logging
 

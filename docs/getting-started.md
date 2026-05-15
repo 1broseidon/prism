@@ -136,42 +136,32 @@ curl -X POST http://localhost:3005/mcp \
 
 ## Step 2: Configure Prism
 
-Create `config.json` pointing to your backends (bridges and native servers alike):
+Create `config.json` pointing to your backends. `mcpServers` is a map keyed by namespace — stdio (`command`/`args`) and HTTP (`url`) entries can coexist:
 
 ```json
 {
-  "listen_addr": ":8080",
-  "admin_addr": ":9090",
-  "servers": [
-    {
-      "id": "github",
+  "listen": ":8080",
+  "admin": ":9090",
+  "mcpServers": {
+    "github": {
       "url": "http://localhost:3001/mcp",
-      "namespace": "github",
-      "credentials": {
-        "type": "env",
-        "header": "Authorization",
-        "env_var": "GITHUB_TOKEN"
-      }
+      "credentials": { "env": "GITHUB_TOKEN" }
     },
-    {
-      "id": "dns",
-      "url": "http://localhost:3004/mcp",
-      "namespace": "dns"
+    "dns": {
+      "url": "http://localhost:3004/mcp"
     },
-    {
-      "id": "custom-api",
+    "api": {
       "url": "http://localhost:3005/mcp",
-      "namespace": "api",
-      "credentials": {
-        "type": "static",
-        "header": "X-API-Key",
-        "value": "sk_live_your_key"
-      }
+      "credentials": { "header": "X-API-Key", "value": "sk_live_your_key" }
     }
-  ],
-  "auth": {
-    "header": "X-API-Key",
-    "valid_keys": ["my-agent-key"]
+  },
+  "policy": {
+    "agents": {
+      "my-agent": { "secret": "change-me", "groups": ["dev"] }
+    },
+    "groups": {
+      "dev": { "scopes": ["github:*", "dns:*", "api:*"] }
+    }
   },
   "audit": {
     "enabled": true,
@@ -182,9 +172,9 @@ Create `config.json` pointing to your backends (bridges and native servers alike
 
 **Key points:**
 - Prism doesn't know or care whether a backend is bridged or native — it's all HTTP
-- Each backend gets a `namespace`. Tools are exposed as `namespace__toolname` (e.g. `github__create_issue`, `dns__check-dns`)
-- `credentials` are injected by Prism into outbound requests — the agent never sees them
-- `auth` defines how agents authenticate *to Prism* (API key for dev, OAuth for production)
+- The map key is the namespace. Tools are exposed as `namespace__toolname` (e.g. `github__create_issue`, `dns__check-dns`)
+- `credentials` are injected by Prism into outbound requests — the agent never sees them. The credential type is the field that's set (`env`, `value`, `file`, or `command`)
+- `policy` defines how agents authenticate *to Prism*. When present, Prism embeds an OAuth 2.1 auth server; agents use the `secret` as their `client_secret` (client-credentials grant). Omit `policy` to run open in development.
 
 ### Start Prism
 

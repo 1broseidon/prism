@@ -208,36 +208,27 @@ metadata:
 data:
   config.json: |
     {
-      "listen_addr": ":8080",
-      "admin_addr": ":9090",
-      "servers": [
-        {
-          "id": "github",
+      "listen": ":8080",
+      "admin": ":9090",
+      "mcpServers": {
+        "github": {
           "url": "http://github-mcp:3001/mcp",
-          "namespace": "github",
-          "credentials": {
-            "type": "file",
-            "header": "Authorization",
-            "path": "/secrets/github/token"
-          }
+          "credentials": { "file": "/secrets/github/token" }
         },
-        {
-          "id": "vault-backed",
+        "infra": {
           "url": "http://vault-mcp:3002/mcp",
-          "namespace": "infra",
           "credentials": {
-            "type": "command",
-            "header": "Authorization",
             "command": "cat /var/run/secrets/kubernetes.io/serviceaccount/token",
             "ttl": "10m"
           }
         }
-      ],
-      "auth": {
-        "oauth": {
-          "issuer_url": "https://auth.example.com/realms/mcp",
-          "audience": "https://prism.example.com",
-          "required_scopes": ["mcp:connect"]
+      },
+      "policy": {
+        "agents": {
+          "ci-agent": { "secret": "${CI_AGENT_SECRET}", "groups": ["deployers"] }
+        },
+        "groups": {
+          "deployers": { "scopes": ["github:*", "infra:*"] }
         }
       },
       "audit": {
@@ -487,4 +478,4 @@ prism.example.com {
 | 8080 | MCP gateway (agents connect here) | External / agent-facing |
 | 9090 | Admin API (health, status) | Internal only |
 
-Both ports are configurable via `listen_addr` and `admin_addr`.
+Both ports are configurable via `listen` and `admin`.
