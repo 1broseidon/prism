@@ -23,13 +23,14 @@ export function Layout({ children }: Props) {
   return (
     <div class="shell">
       <div class="shell-logo">
+        <div class="logo-mark">P</div>
         <h1>prism</h1>
       </div>
 
       <header class="shell-header">
         <div class="status-badge">
           <div class={err ? "status-dot error" : "status-dot"} />
-          <span class="status-text">{err ? "disconnected" : "running"}</span>
+          <span class="status-text">{err ? "disconnected" : "live"}</span>
         </div>
         <div class="shell-meta">
           {i ? <span>v{i.version}</span> : null}

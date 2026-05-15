@@ -1,31 +1,42 @@
+/*
+ * Midnight Editorial — Prism's design language.
+ * Deep black background, coral accent, editorial typography.
+ * Dark-only by design. Light mode is intentionally not supported.
+ */
 :root {
-  --bg: #fafafa;
-  --bg-elev: #ffffff;
-  --fg: #111111;
-  --muted: #737373;
-  --faint: #d4d4d4;
-  --line: #e5e5e5;
-  --active: #10b981;
-  --denied: #ef4444;
-  --warn: #f59e0b;
-  --hover: rgba(0, 0, 0, 0.015);
-  --tag-bg: #ffffff;
-  --nav-bg: #f4f4f4;
-  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
-  --font-mono: "Azeret Mono", "SF Mono", "Consolas", monospace;
-}
+  /* Surfaces, deepest first */
+  --bg: #050505;
+  --bg-elev: #0c0c0c;
+  --bg-surface: #111111;
+  --nav-bg: #080808;
+  --tag-bg: #111111;
 
-.dark {
-  --bg: #0a0a0a;
-  --bg-elev: #141414;
-  --fg: #e5e5e5;
-  --muted: #737373;
-  --faint: #2a2a2a;
-  --line: #1f1f1f;
-  --active: #34d399;
+  /* Foreground tiers */
+  --fg: #ebebeb;
+  --fg-emphasis: #ffffff;
+  --muted: #888888;
+  --faint: #444444;
+  --dim: #333333;
+
+  /* Lines */
+  --line: #1a1a1a;
+  --line-soft: #222222;
+
+  /* Accents */
+  --accent: #ff6b50;
+  --accent-dim: #c84d36;
   --denied: #f87171;
   --warn: #fbbf24;
-  --hover: rgba(255, 255, 255, 0.03);
-  --tag-bg: #141414;
-  --nav-bg: #0f0f0f;
+
+  /* Interaction */
+  --hover: rgba(255, 255, 255, 0.04);
+  --selection: var(--accent);
+
+  /* Type */
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "Azeret Mono", "SF Mono", "Consolas", monospace;
+
+  /* Back-compat alias: --active was the old emerald state color;
+     now points to coral so legacy rules render correctly. */
+  --active: var(--accent);
 }
