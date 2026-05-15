@@ -120,7 +120,7 @@ RUN CGO_ENABLED=0 go build -o /prism ./cmd/prism
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
 COPY --from=build /prism /usr/local/bin/prism
-EXPOSE 8080 9090
+EXPOSE 8080 9086
 ENTRYPOINT ["prism"]
 CMD ["-config", "/etc/prism/config.json"]
 ```
@@ -132,7 +132,7 @@ docker build -t prism .
 docker run -d \
   --name prism \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 9086:9086 \
   -v ./config.json:/etc/prism/config.json:ro \
   -e GITHUB_TOKEN="Bearer ghp_xxx" \
   prism
@@ -149,7 +149,7 @@ services:
     build: .
     ports:
       - "8080:8080"   # MCP gateway
-      - "9090:9090"   # Admin API
+      - "9086:9086"   # Admin API
     volumes:
       - ./config.json:/etc/prism/config.json:ro
       - ./audit:/var/log/prism
@@ -160,7 +160,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9086/health"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -209,7 +209,7 @@ data:
   config.json: |
     {
       "listen": ":8080",
-      "admin": ":9090",
+      "admin": ":9086",
       "mcpServers": {
         "github": {
           "url": "http://github-mcp:3001/mcp",
@@ -273,7 +273,7 @@ spec:
           ports:
             - containerPort: 8080
               name: mcp
-            - containerPort: 9090
+            - containerPort: 9086
               name: admin
           args: ["-config", "/etc/prism/config.json"]
           volumeMounts:
@@ -326,7 +326,7 @@ spec:
       port: 8080
       targetPort: mcp
     - name: admin
-      port: 9090
+      port: 9086
       targetPort: admin
 ```
 
@@ -444,7 +444,7 @@ prism.example.com {
 - [ ] **TLS termination** — Prism itself doesn't terminate TLS. Use a reverse proxy (nginx, Caddy, cloud LB) or a sidecar.
 - [ ] **OAuth enabled** — Don't use API key auth in production. Configure OAuth 2.1 with a proper authorization server.
 - [ ] **Audit logging enabled** — Write to a file or stdout for log aggregation. Every tool call should be traceable.
-- [ ] **Admin API not exposed** — The admin port (`:9090`) should only be reachable from internal networks or monitoring systems.
+- [ ] **Admin API not exposed** — The admin port (`:9086`) should only be reachable from internal networks or monitoring systems.
 - [ ] **Credentials secured** — Use `env`, `file`, or `command` credential types. Avoid `static` with literal secrets in the config file.
 - [ ] **Config file permissions** — `chmod 640`, owned by the service user. Contains credential references.
 - [ ] **Network policy** — In Kubernetes, restrict which pods can reach Prism and which backends Prism can reach.
@@ -476,6 +476,6 @@ prism.example.com {
 | Port | Purpose | Exposure |
 |---|---|---|
 | 8080 | MCP gateway (agents connect here) | External / agent-facing |
-| 9090 | Admin API (health, status) | Internal only |
+| 9086 | Admin API (health, status) | Internal only |
 
 Both ports are configurable via `listen` and `admin`.

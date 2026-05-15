@@ -10,14 +10,13 @@ declare const process: {
 
 // Vite config for Prism admin console.
 // - Build output goes to dist/ and is embedded into the Go binary via go:embed.
-// - Dev server proxies API calls to the running prism admin port.
-//   Override with PRISM_ADMIN_URL (e.g. `PRISM_ADMIN_URL=http://localhost:9095 npm run dev`)
-//   when port 9090 is taken by Cockpit or another service.
+// - Dev server proxies API calls to the running prism admin port (default :9086).
+//   Override with PRISM_ADMIN_URL when running prism on a non-default port.
 // - server.host is deliberately NOT set, keeping the dev server on localhost only
 //   (mitigates CVE-2025-31125 in older vite versions; we're on 8.x but the discipline holds).
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const adminURL = env.PRISM_ADMIN_URL || "http://localhost:9090";
+  const adminURL = env.PRISM_ADMIN_URL || "http://localhost:9086";
   const apiPaths = [
     "/agents",
     "/backends",

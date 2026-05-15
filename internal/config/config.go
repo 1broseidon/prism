@@ -19,7 +19,7 @@ type Config struct {
 	// Listen is the address for the MCP gateway. Default: ":8080".
 	Listen string `json:"listen,omitempty"`
 
-	// Admin is the address for the admin API. Default: ":9090".
+	// Admin is the address for the admin API. Default: ":9086".
 	Admin string `json:"admin,omitempty"`
 
 	// McpServers defines the backend MCP servers to aggregate.
@@ -446,7 +446,7 @@ func expand(cfg *Config) (*Loaded, error) {
 		loaded.Listen = ":8080"
 	}
 	if loaded.Admin == "" {
-		loaded.Admin = ":9090"
+		loaded.Admin = ":9086"
 	}
 	if loaded.ShutdownTimeout == 0 {
 		loaded.ShutdownTimeout = Duration(10 * time.Second)

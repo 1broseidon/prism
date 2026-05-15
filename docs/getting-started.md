@@ -141,7 +141,7 @@ Create `config.json` pointing to your backends. `mcpServers` is a map keyed by n
 ```json
 {
   "listen": ":8080",
-  "admin": ":9090",
+  "admin": ":9086",
   "mcpServers": {
     "github": {
       "url": "http://localhost:3001/mcp",
@@ -187,11 +187,11 @@ export GITHUB_TOKEN="Bearer ghp_xxxxxxxxxxxx"
 
 ```bash
 # Gateway health
-curl http://localhost:9090/health
+curl http://localhost:9086/health
 # → {"status":"ok"}
 
 # Connected backends
-curl http://localhost:9090/backends
+curl http://localhost:9086/backends
 # → [{"id":"github","namespace":"github","url":"http://localhost:3001/mcp"}, ...]
 ```
 
@@ -362,8 +362,8 @@ Watch the audit log (stderr or your configured output):
 ### 3. Check the admin API
 
 ```bash
-curl -s http://localhost:9090/backends | jq .
-curl -s http://localhost:9090/health
+curl -s http://localhost:9086/backends | jq .
+curl -s http://localhost:9086/health
 ```
 
 ## What You've Achieved
@@ -393,7 +393,7 @@ For production, swap API key auth for OAuth 2.1 and run bridges in containers:
 services:
   prism:
     build: .
-    ports: ["8080:8080", "9090:9090"]
+    ports: ["8080:8080", "9086:9086"]
     volumes: ["./config.json:/etc/prism/config.json:ro"]
 
   bridge-github:

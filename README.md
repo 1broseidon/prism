@@ -67,7 +67,7 @@ make build    # builds bin/prism and bin/prism-bridge
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `listen` | string | `:8080` | MCP gateway listen address |
-| `admin` | string | `:9090` | Admin API listen address |
+| `admin` | string | `:9086` | Admin API listen address |
 | `mcpServers` | object | required | Backend MCP servers, keyed by namespace |
 | `policy` | object | none | Agents, groups, and scopes. When present, Prism embeds an OAuth 2.1 auth server. |
 | `audit` | object | none | Structured audit logging |

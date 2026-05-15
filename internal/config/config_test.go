@@ -18,7 +18,7 @@ func writeConfig(t *testing.T, content string) string {
 func TestLoadValid(t *testing.T) {
 	path := writeConfig(t, `{
 		"listen": ":8080",
-		"admin": ":9090",
+		"admin": ":9086",
 		"mcpServers": {
 			"github": {
 				"url": "http://localhost:3001/mcp"
@@ -224,8 +224,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.Listen != ":8080" {
 		t.Errorf("expected default listen :8080, got %q", c.Listen)
 	}
-	if c.Admin != ":9090" {
-		t.Errorf("expected default admin :9090, got %q", c.Admin)
+	if c.Admin != ":9086" {
+		t.Errorf("expected default admin :9086, got %q", c.Admin)
 	}
 	if c.Servers[0].Namespace != "test" {
 		t.Errorf("expected namespace to default to key 'test', got %q", c.Servers[0].Namespace)

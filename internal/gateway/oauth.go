@@ -378,7 +378,7 @@ func (g *Gateway) setAuthStatus(backendID, status string) {
 }
 
 // InitAuthFlows initializes the OAuth auth flow manager.
-// adminAddr is the admin server listen address (e.g., ":9090").
+// adminAddr is the admin server listen address (e.g., ":9086").
 func (g *Gateway) InitAuthFlows(adminAddr string) {
 	// Build the callback URL from the admin address.
 	host := "localhost"
