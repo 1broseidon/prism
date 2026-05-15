@@ -11,6 +11,25 @@
   color: var(--bg);
 }
 
+/* Consistent keyboard focus across every interactive surface */
+*:focus {
+  outline: none;
+}
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+button:focus-visible {
+  outline-offset: 3px;
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -30,6 +49,21 @@ html,
 body,
 #app {
   height: 100%;
+}
+
+/* Subtle page transition — fades when route content swaps */
+.shell-content > div {
+  animation: page-in 0.18s ease-out;
+}
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 body {
