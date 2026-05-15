@@ -42,16 +42,14 @@ export function Layout({ children }: Props) {
         <div class="nav-section-label">Console</div>
         {NAV_ITEMS.map((n) => {
           const active = path === n.href || (n.href !== "/" && path.startsWith(n.href));
+          // Plain anchors — preact-iso's LocationProvider installs a global
+          // click listener that intercepts in-origin <a> clicks. No custom
+          // onClick needed; it correctly handles modifier keys itself.
           return (
             <a
               key={n.href}
               href={n.href}
               class={active ? "nav-link active" : "nav-link"}
-              onClick={(e) => {
-                // preact-iso uses anchor navigation by default. Allow modifier-click
-                // and middle-click defaults; otherwise let iso handle it.
-                if (e.metaKey || e.ctrlKey || e.shiftKey) return;
-              }}
             >
               {n.label}
             </a>

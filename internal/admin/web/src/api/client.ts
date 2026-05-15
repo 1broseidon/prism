@@ -15,22 +15,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   const text = await res.text();
-  let body: unknown = text;
-  if (text) {
+
+  if (!res.ok) {
+    let body: unknown = text;
     try {
       body = JSON.parse(text);
     } catch {
-      // leave as text
+      // keep raw text
     }
-  }
-  if (!res.ok) {
     const msg =
       typeof body === "object" && body && "error" in body
         ? String((body as { error: unknown }).error)
         : `${res.status} ${res.statusText}`;
     throw new ApiError(res.status, body, msg);
   }
-  return body as T;
+
+  if (!text) return undefined as T;
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // Non-JSON success body — almost always a proxy hitting the wrong port
+    // (e.g. Cockpit returning its loading HTML). Fail loudly so the
+    // misconfiguration is visible instead of poisoning typed signals.
+    const preview = text.slice(0, 120).replace(/\s+/g, " ");
+    throw new ApiError(
+      res.status,
+      text,
+      `expected JSON from ${path} but got: ${preview}`,
+    );
+  }
 }
 
 export function getJSON<T>(path: string): Promise<T> {
