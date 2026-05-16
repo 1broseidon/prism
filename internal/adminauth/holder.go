@@ -16,14 +16,28 @@ import (
 // console. The zero-value Holder is a valid "auth disabled" state — every
 // middleware call passes through, matching the open-mode semantics.
 type Holder struct {
-	v      atomic.Pointer[Service]
-	kv     store.Store
-	logger *slog.Logger
+	v       atomic.Pointer[Service]
+	kv      store.Store
+	logger  *slog.Logger
+	limiter *loginRateLimiter
 }
 
 // NewHolder returns a Holder with no active service (open mode).
 func NewHolder(kv store.Store, logger *slog.Logger) *Holder {
-	return &Holder{kv: kv, logger: logger}
+	return &Holder{
+		kv:      kv,
+		logger:  logger,
+		limiter: newLoginRateLimiter(),
+	}
+}
+
+// LoginAllowed wraps the per-IP token bucket. Exposed so the admin handler
+// can apply rate limiting even before reaching the (optional) Service.
+func (h *Holder) LoginAllowed(r *http.Request) bool {
+	if h == nil || h.limiter == nil {
+		return true
+	}
+	return h.limiter.allow(clientIP(r))
 }
 
 // Get returns the currently active *Service. A nil result means auth is

@@ -205,6 +205,9 @@ func runServe() {
 // file workflow viable for operators who prefer it.
 func initAdminAuth(ctx context.Context, fileCfg *config.AdminAuthConfig, kv store.Store, logger *slog.Logger) (*adminauth.Holder, error) {
 	holder := adminauth.NewHolder(kv, logger)
+	// Periodically purge expired sessions and login attempts. Goroutine
+	// exits when ctx is canceled at process shutdown.
+	holder.StartSweeper(ctx)
 	st, err := adminauth.LoadState(kv)
 	if err != nil {
 		return nil, err
