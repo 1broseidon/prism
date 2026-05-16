@@ -398,6 +398,30 @@ func validate(cfg *Config) error {
 	return validateRateLimit(cfg.RateLimit)
 }
 
+// ValidateAdminAuth validates an AdminAuthConfig the same way file-based
+// Load() does. Exported so the admin API can re-validate runtime mutations.
+func ValidateAdminAuth(a *AdminAuthConfig) error {
+	return validateAdminAuth(a)
+}
+
+// ApplyAdminAuthDefaults fills in unset optional fields (scopes, groups_claim,
+// session_ttl) so the resulting config can be handed straight to adminauth.
+// Mirrors the defaults applied during file load.
+func ApplyAdminAuthDefaults(a *AdminAuthConfig) {
+	if a == nil {
+		return
+	}
+	if len(a.Scopes) == 0 {
+		a.Scopes = []string{"openid", "profile", "email"}
+	}
+	if a.GroupsClaim == "" {
+		a.GroupsClaim = "groups"
+	}
+	if a.SessionTTL == 0 {
+		a.SessionTTL = Duration(24 * time.Hour)
+	}
+}
+
 func validateAdminAuth(a *AdminAuthConfig) error {
 	if a.Issuer == "" {
 		return errors.New("admin_auth.issuer is required")
@@ -532,17 +556,7 @@ func expand(cfg *Config) (*Loaded, error) {
 	}
 
 	// Defaults for admin auth.
-	if loaded.AdminAuth != nil {
-		if len(loaded.AdminAuth.Scopes) == 0 {
-			loaded.AdminAuth.Scopes = []string{"openid", "profile", "email"}
-		}
-		if loaded.AdminAuth.GroupsClaim == "" {
-			loaded.AdminAuth.GroupsClaim = "groups"
-		}
-		if loaded.AdminAuth.SessionTTL == 0 {
-			loaded.AdminAuth.SessionTTL = Duration(24 * time.Hour)
-		}
-	}
+	ApplyAdminAuthDefaults(loaded.AdminAuth)
 
 	// Apply defaults.
 	if loaded.Listen == "" {

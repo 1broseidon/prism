@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { href: "/servers", label: "MCP Servers" },
   { href: "/identity", label: "Identity" },
   { href: "/audit", label: "Audit" },
+  { href: "/config", label: "Configuration" },
 ];
 
 export function Layout({ children }: Props) {

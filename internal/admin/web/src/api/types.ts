@@ -97,3 +97,47 @@ export type AddBackendResponse =
 export interface AuthStatus {
   status: string;
 }
+
+export interface AdminAuthRule {
+  role: "admin" | "viewer";
+  emails?: string[];
+  domains?: string[];
+  groups?: string[];
+}
+
+export interface AdminAuthConfigView {
+  issuer: string;
+  client_id: string;
+  redirect_url: string;
+  scopes?: string[];
+  groups_claim?: string;
+  session_ttl?: string;
+  cookie_domain?: string;
+  cookie_secure?: boolean;
+  rules: AdminAuthRule[];
+}
+
+export interface AdminAuthView {
+  config: AdminAuthConfigView | null;
+  client_secret_set: boolean;
+  enabled: boolean;
+  active: boolean;
+  active_issuer?: string;
+}
+
+export interface AdminAuthPutPayload {
+  issuer: string;
+  client_id: string;
+  client_secret: string | null;
+  redirect_url: string;
+  scopes?: string[];
+  groups_claim?: string;
+  session_ttl?: string;
+  cookie_domain?: string;
+  cookie_secure?: boolean;
+  rules: AdminAuthRule[];
+}
+
+export type AdminAuthTestResponse =
+  | { ok: true; issuer: string; authorize_url: string; token_url: string }
+  | { ok: false; error: string };

@@ -161,19 +161,14 @@ func runServe() {
 	agentMgr := &authServerAgentManager{srv: authSrv}
 	groupMgr := &authServerGroupManager{srv: authSrv}
 
-	adminAuthSvc, err := adminauth.NewService(ctx, cfg.AdminAuth, kvStore, logger)
+	adminAuthHolder, err := initAdminAuth(ctx, cfg.AdminAuth, kvStore, logger)
 	if err != nil {
 		logger.Error("admin auth init failed", "error", err)
 		_ = os.Remove(pidFile)
 		return
 	}
-	if adminAuthSvc != nil {
-		logger.Info("admin auth enabled", "issuer", adminAuthSvc.Issuer())
-	} else {
-		logger.Info("admin auth disabled — running open")
-	}
 
-	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback, adminAuthSvc)
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback, adminAuthHolder)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -183,6 +178,39 @@ func runServe() {
 	startServers(cfg, mainServer, adminServer, logger, errCh)
 	printStartupBanner(cfg, gw, logger)
 	waitForShutdown(cfg, *configPath, mainServer, adminServer, gw, authSrv, logger, errCh)
+}
+
+// initAdminAuth constructs the admin auth Holder. KV-persisted state takes
+// precedence over the file config so console mutations survive restarts.
+// File config is used only on first boot — to seed KV — keeping a config
+// file workflow viable for operators who prefer it.
+func initAdminAuth(ctx context.Context, fileCfg *config.AdminAuthConfig, kv store.Store, logger *slog.Logger) (*adminauth.Holder, error) {
+	holder := adminauth.NewHolder(kv, logger)
+	st, err := adminauth.LoadState(kv)
+	if err != nil {
+		return nil, err
+	}
+	// Seed KV from file config on first boot.
+	if st.Config == nil && fileCfg != nil {
+		st.Config = fileCfg
+		st.Enabled = true
+		if err := adminauth.SaveState(kv, st); err != nil {
+			logger.Warn("seed admin auth state failed", "error", err)
+		}
+	}
+	if st.Enabled && st.Config != nil {
+		config.ApplyAdminAuthDefaults(st.Config)
+		if err := holder.Reload(ctx, st.Config); err != nil {
+			// Don't refuse to start: keep auth disabled so the operator can
+			// log in via the open console and fix the broken config.
+			logger.Error("admin auth disabled: discovery failed at boot", "error", err)
+		} else {
+			logger.Info("admin auth enabled", "issuer", st.Config.Issuer)
+			return holder, nil
+		}
+	}
+	logger.Info("admin auth disabled — running open")
+	return holder, nil
 }
 
 // setupGateway creates the gateway and connects backends.

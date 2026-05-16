@@ -45,8 +45,8 @@ type API struct {
 	backendMgr           BackendManager
 	agentMgr             AgentManager
 	groupMgr             GroupManager
-	oauthCallbackHandler http.Handler       // optional: gateway's OAuth callback handler
-	auth                 *adminauth.Service // optional: nil means open mode
+	oauthCallbackHandler http.Handler      // optional: gateway's OAuth callback handler
+	auth                 *adminauth.Holder // holder for live admin auth service; zero-value = open
 	startedAt            time.Time
 }
 
@@ -63,7 +63,7 @@ func NewAPI(
 	agentMgr AgentManager,
 	groupMgr GroupManager,
 	oauthCallback http.Handler,
-	auth *adminauth.Service,
+	auth *adminauth.Holder,
 ) *API {
 	return &API{
 		statusFn:             statusFn,
@@ -102,6 +102,15 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /groups/", a.session(http.HandlerFunc(a.handleGetGroup)))
 	mux.Handle("GET /defaults", a.session(http.HandlerFunc(a.handleDefaults)))
 	mux.Handle("GET /backends/", a.session(http.HandlerFunc(a.handleBackendSub)))
+
+	// Admin auth configuration — admin role required when admin auth is
+	// configured; pass-through (anonymous) in open mode, consistent with
+	// other mutation routes.
+	mux.Handle("GET /config/admin-auth", a.admin(http.HandlerFunc(a.handleGetAdminAuth)))
+	mux.Handle("PUT /config/admin-auth", a.admin(http.HandlerFunc(a.handlePutAdminAuth)))
+	mux.Handle("POST /config/admin-auth/test", a.admin(http.HandlerFunc(a.handleTestAdminAuth)))
+	mux.Handle("POST /config/admin-auth/enable", a.admin(http.HandlerFunc(a.handleEnableAdminAuth)))
+	mux.Handle("DELETE /config/admin-auth/enable", a.admin(http.HandlerFunc(a.handleDisableAdminAuth)))
 
 	// Mutation routes — admin role required.
 	mux.Handle("PUT /agents/", a.admin(http.HandlerFunc(a.handlePutAgent)))
@@ -142,19 +151,19 @@ func (a *API) admin(h http.Handler) http.Handler {
 // SPA has a single contract: it sees {"auth":"open"} when running open, or
 // the operator's identity when signed in.
 func (a *API) handleAuthMe(w http.ResponseWriter, r *http.Request) {
-	a.auth.HandleMe(w, r)
+	a.auth.Get().HandleMe(w, r)
 }
 
 func (a *API) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	a.auth.HandleLogin(w, r)
+	a.auth.Get().HandleLogin(w, r)
 }
 
 func (a *API) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
-	a.auth.HandleCallback(w, r)
+	a.auth.Get().HandleCallback(w, r)
 }
 
 func (a *API) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
-	a.auth.HandleLogout(w, r)
+	a.auth.Get().HandleLogout(w, r)
 }
 
 // handlePutAgent dispatches PUT /agents/{prism_id}/policy to the policy handler.

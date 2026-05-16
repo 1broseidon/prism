@@ -9,6 +9,7 @@ import { Identity } from "./pages/Identity";
 import { AgentDetail } from "./pages/AgentDetail";
 import { GroupDetail } from "./pages/GroupDetail";
 import { Audit } from "./pages/Audit";
+import { Config } from "./pages/Config";
 import { Login } from "./pages/Login";
 
 export function App() {
@@ -41,6 +42,7 @@ export function App() {
           <Route path="/identity/agents/:prismId" component={AgentDetail} />
           <Route path="/identity/groups/:name" component={GroupDetail} />
           <Route path="/audit" component={Audit} />
+          <Route path="/config" component={Config} />
           <Route default component={NotFound} />
         </Router>
       </Layout>
