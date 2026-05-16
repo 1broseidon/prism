@@ -2619,6 +2619,45 @@ tr:hover .remove-btn {
   }
 }
 
+/* Manual OAuth form (DCR-unsupported providers) */
+.manual-oauth-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.manual-oauth-lead {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.manual-oauth-lead code {
+  color: var(--fg);
+}
+.manual-oauth-step {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.manual-oauth-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+.manual-oauth-value code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+}
+.manual-oauth-callback {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 /* Very narrow phones */
 @media (max-width: 380px) {
   .shell-content {

@@ -88,11 +88,21 @@ export interface AddBackendBody {
   env?: Record<string, string>;
   url?: string;
   credential?: CredentialInput | null;
+  // Optional manual OAuth client credentials. Skips DCR when supplied —
+  // required for providers without DCR (GitHub, most IdPs).
+  oauth_client_id?: string;
+  oauth_client_secret?: string;
 }
 
 export type AddBackendResponse =
   | { status: "ok"; id: string }
-  | { status: "auth_required"; auth_url: string; state: string; backend_id: string };
+  | { status: "auth_required"; auth_url: string; state: string; backend_id: string }
+  | {
+      status: "manual_oauth_required";
+      auth_server: string;
+      callback_url: string;
+      backend_id: string;
+    };
 
 export interface AuthStatus {
   status: string;

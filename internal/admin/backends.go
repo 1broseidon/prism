@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -17,6 +18,12 @@ type BackendConfig struct {
 	Runtime string            `json:"runtime,omitempty"`
 	// Credential config for backend authentication
 	Credential *CredentialConfig `json:"credential,omitempty"`
+	// OAuthClientID, when set, skips DCR and uses these credentials directly.
+	// Required for providers that don't support Dynamic Client Registration
+	// (GitHub, most identity providers without DCR enabled). The operator
+	// pre-registers prism with the provider and pastes the values here.
+	OAuthClientID     string `json:"oauth_client_id,omitempty"`
+	OAuthClientSecret string `json:"oauth_client_secret,omitempty"`
 }
 
 // CredentialConfig specifies how to authenticate with a backend.
@@ -77,18 +84,38 @@ func callbackBaseFromRequest(r *http.Request) string {
 	return scheme + "://" + host
 }
 
+// OAuthProberOptions carries optional inputs to a probe: a host-aware
+// callback base derived from the inbound admin request, and operator-supplied
+// client credentials used when the provider doesn't support DCR.
+type OAuthProberOptions struct {
+	CallbackBase string
+	ClientID     string
+	ClientSecret string
+}
+
 // OAuthProber is an optional interface that BackendManager may implement
 // to support probing backends for OAuth authentication requirements.
 type OAuthProber interface {
 	// ProbeBackendOAuth probes a URL. If the backend requires OAuth, returns
 	// (authURL, state, nil). If no OAuth is needed, returns ("", "", nil).
-	// callbackBase is the externally-reachable scheme+host the provider should
-	// redirect to (e.g. "http://172.16.30.90:9086"); empty falls back to the
-	// configured admin_public_url.
-	ProbeBackendOAuth(ctx context.Context, backendID, url, callbackBase string) (authURL, state string, err error)
+	ProbeBackendOAuth(ctx context.Context, backendID, url string, opts OAuthProberOptions) (authURL, state string, err error)
 	// AuthFlowStatus returns the status of an OAuth flow for a backend.
 	// Returns "pending", "connected", "failed:{reason}", or "".
 	AuthFlowStatus(backendID string) string
+}
+
+// DCRUnsupportedError is returned when the backend's authorization server
+// doesn't expose a registration_endpoint and no manual client credentials
+// were supplied. The UI uses this to prompt the operator for a pre-registered
+// client_id/client_secret. CallbackURL is what the operator should register
+// with the provider.
+type DCRUnsupportedError struct {
+	AuthServer  string
+	CallbackURL string
+}
+
+func (e *DCRUnsupportedError) Error() string {
+	return "provider at " + e.AuthServer + " does not support dynamic client registration; register prism manually (callback: " + e.CallbackURL + ") and supply oauth_client_id"
 }
 
 func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
@@ -122,8 +149,25 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 	// If a URL is provided with no explicit credential, probe for OAuth.
 	if cfg.URL != "" && cfg.Credential == nil {
 		if prober, ok := a.backendMgr.(OAuthProber); ok {
-			authURL, state, err := prober.ProbeBackendOAuth(r.Context(), id, cfg.URL, callbackBaseFromRequest(r))
+			opts := OAuthProberOptions{
+				CallbackBase: callbackBaseFromRequest(r),
+				ClientID:     cfg.OAuthClientID,
+				ClientSecret: cfg.OAuthClientSecret,
+			}
+			authURL, state, err := prober.ProbeBackendOAuth(r.Context(), id, cfg.URL, opts)
 			if err != nil {
+				var dcrErr *DCRUnsupportedError
+				if errors.As(err, &dcrErr) {
+					// Provider doesn't do DCR. Ask the operator to register
+					// manually and resubmit with oauth_client_id/secret.
+					writeJSON(w, http.StatusOK, map[string]any{
+						"status":       "manual_oauth_required",
+						"auth_server":  dcrErr.AuthServer,
+						"callback_url": dcrErr.CallbackURL,
+						"backend_id":   id,
+					})
+					return
+				}
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "probe failed: " + err.Error()})
 				return
 			}

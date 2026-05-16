@@ -217,8 +217,13 @@ function AddBackend({
     backendId: string;
     authUrl: string;
   } | null>(null);
+  const [manualOAuth, setManualOAuth] = useState<{
+    backendId: string;
+    authServer: string;
+    callbackUrl: string;
+  } | null>(null);
 
-  const submit = async () => {
+  const submitWith = async (extra?: Partial<AddBackendBody>) => {
     setError(null);
     const id = name.trim();
     const target = cmd.trim();
@@ -231,6 +236,7 @@ function AddBackend({
       : { command: target };
     const credInput = buildCredInput(cred);
     if (credInput) body.credential = credInput;
+    Object.assign(body, extra || {});
     try {
       const res = await postJSON<AddBackendResponse>(
         `/backends/${encodeURIComponent(id)}`,
@@ -240,12 +246,22 @@ function AddBackend({
         setOauth({ backendId: id, authUrl: res.auth_url });
         return;
       }
+      if (res.status === "manual_oauth_required") {
+        setManualOAuth({
+          backendId: id,
+          authServer: res.auth_server,
+          callbackUrl: res.callback_url,
+        });
+        return;
+      }
       onDone();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
     }
   };
+
+  const submit = () => submitWith();
 
   if (oauth) {
     return (
@@ -254,6 +270,23 @@ function AddBackend({
         authUrl={oauth.authUrl}
         onConnected={onDone}
         onCancel={onCancel}
+      />
+    );
+  }
+
+  if (manualOAuth) {
+    return (
+      <ManualOAuthForm
+        backendId={manualOAuth.backendId}
+        authServer={manualOAuth.authServer}
+        callbackUrl={manualOAuth.callbackUrl}
+        onSubmit={(clientId, clientSecret) =>
+          submitWith({
+            oauth_client_id: clientId,
+            oauth_client_secret: clientSecret,
+          })
+        }
+        onCancel={() => setManualOAuth(null)}
       />
     );
   }
@@ -473,6 +506,111 @@ function OAuthFlow({
         >
           cancel
         </button>
+      </div>
+    </div>
+  );
+}
+
+function ManualOAuthForm({
+  backendId,
+  authServer,
+  callbackUrl,
+  onSubmit,
+  onCancel,
+}: {
+  backendId: string;
+  authServer: string;
+  callbackUrl: string;
+  onSubmit: (clientId: string, clientSecret: string) => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const submit = async () => {
+    if (!clientId.trim()) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(clientId.trim(), clientSecret.trim());
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const copyCallback = async () => {
+    try {
+      await navigator.clipboard.writeText(callbackUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // ignore; user can still copy manually
+    }
+  };
+
+  return (
+    <div class="card form-card">
+      <div class="form-card-title">manual app registration required</div>
+      <div class="manual-oauth-body">
+        <p class="manual-oauth-lead">
+          <code>{authServer}</code> doesn't support dynamic client
+          registration. Register prism as an OAuth app with the provider, then
+          paste the credentials below.
+        </p>
+        <div class="manual-oauth-step">
+          <div class="manual-oauth-label">backend</div>
+          <div class="manual-oauth-value">
+            <code>{backendId}</code>
+          </div>
+        </div>
+        <div class="manual-oauth-step">
+          <div class="manual-oauth-label">callback URL to register</div>
+          <div class="manual-oauth-value manual-oauth-callback">
+            <code>{callbackUrl}</code>
+            <button
+              type="button"
+              class="section-btn"
+              onClick={copyCallback}
+            >
+              {copied ? "copied" : "copy"}
+            </button>
+          </div>
+        </div>
+        <div class="inline-form" style="flex-wrap:wrap;gap:8px">
+          <input
+            type="text"
+            placeholder="client id"
+            value={clientId}
+            autoFocus
+            spellcheck={false}
+            style="flex:1;min-width:220px"
+            onInput={(e) => setClientId((e.target as HTMLInputElement).value)}
+          />
+          <input
+            type="password"
+            placeholder="client secret (optional for public clients)"
+            value={clientSecret}
+            spellcheck={false}
+            autoComplete="new-password"
+            style="flex:1;min-width:220px"
+            onInput={(e) =>
+              setClientSecret((e.target as HTMLInputElement).value)
+            }
+          />
+        </div>
+        <div class="inline-form" style="margin-top:4px">
+          <button
+            class="save-btn"
+            onClick={submit}
+            disabled={submitting || !clientId.trim()}
+          >
+            {submitting ? "connecting…" : "continue"}
+          </button>
+          <button class="cancel-btn" onClick={onCancel}>
+            cancel
+          </button>
+        </div>
       </div>
     </div>
   );

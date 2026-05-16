@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1broseidon/prism/internal/admin"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/credentials"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
@@ -88,12 +89,23 @@ func codeChallenge(verifier string) string {
 // ProbeBackendAuth probes a URL and initiates an OAuth flow if 401 is returned.
 // Returns a PendingAuthFlow with the auth URL the operator should visit, or nil
 // if the backend does not require OAuth authentication.
+// ProbeAuthOptions carries per-request inputs to ProbeBackendAuth.
+type ProbeAuthOptions struct {
+	// CallbackOverride is the externally-reachable base URL the provider
+	// should redirect to (e.g. http://172.16.30.90:9086). Empty falls back
+	// to admin_public_url / localhost.
+	CallbackOverride string
+	// ManualClientID + Secret skip DCR. Required for providers without DCR
+	// (GitHub, most IdPs without it enabled).
+	ManualClientID     string
+	ManualClientSecret string
+}
+
 // ProbeBackendAuth detects whether backendURL requires OAuth and, if so,
-// kicks off DCR + auth flow. callbackOverride lets a caller supply the
-// externally-reachable base URL the auth provider should redirect to
-// (e.g. derived from the inbound admin request). When empty, the manager's
-// static callback URL is used (admin_public_url or localhost fallback).
-func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL, callbackOverride string) (*PendingAuthFlow, error) {
+// kicks off DCR + auth flow. If DCR isn't supported by the auth server and
+// no manual credentials are provided, returns an admin.DCRUnsupportedError
+// so the UI can prompt the operator.
+func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL string, opts ProbeAuthOptions) (*PendingAuthFlow, error) {
 	afm := g.getAuthFlows()
 	if afm == nil {
 		return nil, fmt.Errorf("OAuth flow manager not initialized")
@@ -217,20 +229,40 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL, c
 		)
 	}
 
-	// Dynamic Client Registration (RFC 7591).
+	// Resolve the redirect URI for this flow.
 	callbackURL := afm.callbackURL
-	if callbackOverride != "" {
-		callbackURL = strings.TrimRight(callbackOverride, "/") + "/oauth/callback"
+	if opts.CallbackOverride != "" {
+		callbackURL = strings.TrimRight(opts.CallbackOverride, "/") + "/oauth/callback"
 	}
-	regResp, err := oauthex.RegisterClient(ctx, asm.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
-		ClientName:              "Prism Gateway",
-		RedirectURIs:            []string{callbackURL},
-		GrantTypes:              []string{"authorization_code"},
-		ResponseTypes:           []string{"code"},
-		TokenEndpointAuthMethod: "none",
-	}, nil)
-	if err != nil {
-		return nil, fmt.Errorf("dynamic client registration: %w", err)
+
+	// Obtain client credentials: prefer manual when supplied, otherwise DCR.
+	var clientID, clientSecret string
+	switch {
+	case opts.ManualClientID != "":
+		clientID = opts.ManualClientID
+		clientSecret = opts.ManualClientSecret
+		g.logger.Info("using operator-supplied OAuth client credentials",
+			"backend", backendID, "auth_server", authServerIssuer)
+	case asm.RegistrationEndpoint == "":
+		// Provider doesn't support DCR and operator didn't supply manual creds.
+		// Surface a typed error so the admin handler can prompt for them.
+		return nil, &admin.DCRUnsupportedError{
+			AuthServer:  authServerIssuer,
+			CallbackURL: callbackURL,
+		}
+	default:
+		regResp, err := oauthex.RegisterClient(ctx, asm.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
+			ClientName:              "Prism Gateway",
+			RedirectURIs:            []string{callbackURL},
+			GrantTypes:              []string{"authorization_code"},
+			ResponseTypes:           []string{"code"},
+			TokenEndpointAuthMethod: "none",
+		}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic client registration: %w", err)
+		}
+		clientID = regResp.ClientID
+		clientSecret = regResp.ClientSecret
 	}
 
 	// Gap 3 (MCP auth spec §170-175): Scope priority —
@@ -242,13 +274,20 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL, c
 	}
 
 	// Build the oauth2.Config.
+	authStyle := oauth2.AuthStyleInParams
+	if clientSecret != "" {
+		// Confidential clients (manual creds with a real secret) typically use
+		// HTTP Basic at the token endpoint. AuthStyleAutoDetect lets the lib
+		// fall back if the server rejects it.
+		authStyle = oauth2.AuthStyleAutoDetect
+	}
 	oauthCfg := &oauth2.Config{
-		ClientID:     regResp.ClientID,
-		ClientSecret: regResp.ClientSecret,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
 		Endpoint: oauth2.Endpoint{
 			AuthURL:   asm.AuthorizationEndpoint,
 			TokenURL:  asm.TokenEndpoint,
-			AuthStyle: oauth2.AuthStyleInParams,
+			AuthStyle: authStyle,
 		},
 		RedirectURL: callbackURL,
 		Scopes:      scopes,
@@ -414,11 +453,13 @@ func (g *Gateway) AuthFlowStatus(backendID string) string {
 // ProbeBackendOAuth probes a URL for OAuth requirements. If the backend returns
 // 401 with WWW-Authenticate + resource_metadata, initiates the OAuth flow and
 // returns the authorization URL and state. Returns ("", "", nil) if no OAuth needed.
-// callbackOverride is the externally-reachable base URL the provider should
-// redirect to (e.g. http://172.16.30.90:9086); empty means use the static
-// admin_public_url. Satisfies the admin.OAuthProber interface.
-func (g *Gateway) ProbeBackendOAuth(ctx context.Context, backendID, url, callbackOverride string) (authURL, state string, err error) {
-	flow, err := g.ProbeBackendAuth(ctx, backendID, url, callbackOverride)
+// Satisfies the admin.OAuthProber interface.
+func (g *Gateway) ProbeBackendOAuth(ctx context.Context, backendID, url string, opts admin.OAuthProberOptions) (authURL, state string, err error) {
+	flow, err := g.ProbeBackendAuth(ctx, backendID, url, ProbeAuthOptions{
+		CallbackOverride:   opts.CallbackBase,
+		ManualClientID:     opts.ClientID,
+		ManualClientSecret: opts.ClientSecret,
+	})
 	if err != nil {
 		return "", "", err
 	}
