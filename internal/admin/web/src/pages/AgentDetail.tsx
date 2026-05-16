@@ -23,13 +23,10 @@ function visibleScopes(scopes: string[] | undefined): string[] {
 }
 
 async function setPolicy(prismID: string, p: AgentPolicy) {
-  await withToast(
-    async () => {
-      await putJSON(`/agents/${encodeURIComponent(prismID)}/policy`, p);
-      await agents.refresh();
-    },
-    { success: "policy updated" },
-  );
+  await withToast(async () => {
+    await putJSON(`/agents/${encodeURIComponent(prismID)}/policy`, p);
+    await agents.refresh();
+  });
 }
 
 export function AgentDetail() {
@@ -538,13 +535,10 @@ function DangerSection({
     )
       return;
     setBusy(true);
-    await withToast(
-      async () => {
-        await deleteJSON(`/agents/${encodeURIComponent(agent.client_id)}`);
-        await onRemoved();
-      },
-      { success: `agent ${agent.label || agent.client_id} removed` },
-    );
+    await withToast(async () => {
+      await deleteJSON(`/agents/${encodeURIComponent(agent.client_id)}`);
+      await onRemoved();
+    });
     setBusy(false);
   };
 

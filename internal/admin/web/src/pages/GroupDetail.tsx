@@ -50,16 +50,13 @@ export function GroupDetail() {
 
   const commit = async (next: string[]) => {
     setEditing(false);
-    await withToast(
-      async () => {
-        await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
-          scopes: next,
-        });
-        await groups.refresh();
-        await agents.refresh();
-      },
-      { success: `scopes updated for ${group.name}` },
-    );
+    await withToast(async () => {
+      await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
+        scopes: next,
+      });
+      await groups.refresh();
+      await agents.refresh();
+    });
   };
 
   const remove = async () => {
@@ -69,14 +66,11 @@ export function GroupDetail() {
       )
     )
       return;
-    const ok = await withToast(
-      async () => {
-        await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
-        await groups.refresh();
-        await agents.refresh();
-      },
-      { success: `group ${group.name} deleted` },
-    );
+    const ok = await withToast(async () => {
+      await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
+      await groups.refresh();
+      await agents.refresh();
+    });
     if (ok !== undefined) loc.route("/identity");
   };
 
@@ -236,20 +230,17 @@ function MemberRow({ agent, groupName }: { agent: Agent; groupName: string }) {
   const removeFromGroup = async (e: MouseEvent) => {
     e.stopPropagation();
     const policy = agent.policy || { groups: [], grant: [], deny: [] };
-    await withToast(
-      async () => {
-        await putJSON(
-          `/agents/${encodeURIComponent(agent.prism_id!)}/policy`,
-          {
-            groups: (policy.groups || []).filter((g) => g !== groupName),
-            grant: policy.grant || [],
-            deny: policy.deny || [],
-          },
-        );
-        await agents.refresh();
-      },
-      { success: `removed ${name} from ${groupName}` },
-    );
+    await withToast(async () => {
+      await putJSON(
+        `/agents/${encodeURIComponent(agent.prism_id!)}/policy`,
+        {
+          groups: (policy.groups || []).filter((g) => g !== groupName),
+          grant: policy.grant || [],
+          deny: policy.deny || [],
+        },
+      );
+      await agents.refresh();
+    });
   };
 
   return (

@@ -1,7 +1,6 @@
 import { useMemo, useState, useEffect } from "preact/hooks";
 import { useLocation } from "preact-iso";
 import { events, agents } from "../state";
-import { toast } from "../state/toasts";
 import { fmtTimeOfDay, fmtAge, splitLabel } from "../util/time";
 import type { AuditEvent } from "../api/types";
 
@@ -86,24 +85,13 @@ export function Audit() {
   }, [ev, range, filterAgent, filterNamespace, status, query, nameCache]);
 
   const deniedCount = filtered.filter((e) => !e.allowed).length;
-  const avgLatency =
-    filtered.length === 0
-      ? 0
-      : Math.round(
-          filtered.reduce((acc, e) => acc + (e.allowed ? e.latency_ms : 0), 0) /
-            Math.max(1, filtered.filter((e) => e.allowed).length),
-        );
 
   const hasActiveFilter =
     filterAgent || filterNamespace || status !== "all" || query;
 
   const exportCSV = () => {
-    if (filtered.length === 0) {
-      toast.info("nothing to export with current filters");
-      return;
-    }
-    const escape = (s: string) =>
-      `"${String(s).replace(/"/g, '""')}"`;
+    if (filtered.length === 0) return;
+    const escape = (s: string) => `"${String(s).replace(/"/g, '""')}"`;
     const header = [
       "timestamp",
       "agent_client_id",
@@ -135,7 +123,6 @@ export function Audit() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast.success(`exported ${filtered.length} events`);
   };
 
   return (
@@ -165,14 +152,6 @@ export function Audit() {
           label="denied"
           value={deniedCount}
           tone={deniedCount > 0 ? "warn" : "default"}
-        />
-        <AuditStat
-          label="avg latency"
-          value={avgLatency ? `${avgLatency}ms` : "—"}
-        />
-        <AuditStat
-          label="unique agents"
-          value={new Set(filtered.map((e) => e.client_id)).size}
         />
       </div>
 

@@ -70,14 +70,11 @@ function DefaultsSection() {
 
   const commit = async (next: string[]) => {
     setEditing(false);
-    await withToast(
-      async () => {
-        await putJSON("/defaults", { default_scopes: next });
-        await defaults.refresh();
-        await agents.refresh();
-      },
-      { success: "default scopes updated" },
-    );
+    await withToast(async () => {
+      await putJSON("/defaults", { default_scopes: next });
+      await defaults.refresh();
+      await agents.refresh();
+    });
   };
 
   return (
@@ -167,12 +164,9 @@ function AddGroupForm({
       onCancel();
       return;
     }
-    const ok = await withToast(
-      async () => {
-        await putJSON(`/groups/${encodeURIComponent(n)}`, { scopes: [] });
-      },
-      { success: `group ${n} created` },
-    );
+    const ok = await withToast(async () => {
+      await putJSON(`/groups/${encodeURIComponent(n)}`, { scopes: [] });
+    });
     if (ok !== undefined) onDone();
     else onCancel();
   };
@@ -206,28 +200,22 @@ function GroupCard({ group }: { group: Group }) {
 
   const commit = async (next: string[]) => {
     setEditing(false);
-    await withToast(
-      async () => {
-        await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
-          scopes: next,
-        });
-        await groups.refresh();
-        await agents.refresh();
-      },
-      { success: `scopes updated for ${group.name}` },
-    );
+    await withToast(async () => {
+      await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
+        scopes: next,
+      });
+      await groups.refresh();
+      await agents.refresh();
+    });
   };
 
   const remove = async () => {
     if (!confirm(`Delete group "${group.name}"?`)) return;
-    await withToast(
-      async () => {
-        await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
-        await groups.refresh();
-        await agents.refresh();
-      },
-      { success: `group ${group.name} deleted` },
-    );
+    await withToast(async () => {
+      await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
+      await groups.refresh();
+      await agents.refresh();
+    });
   };
 
   const detailHref = `/identity/groups/${encodeURIComponent(group.name)}`;
@@ -304,16 +292,10 @@ function AgentsSection({ agents: ag }: { agents: Agent[] }) {
   }, [ag, query]);
 
   const cleanStale = async () => {
-    await withToast(
-      async () => {
-        const r = (await deleteJSON("/agents/stale")) as {
-          removed?: number;
-        };
-        await agents.refresh();
-        return r;
-      },
-      { success: "stale agents removed" },
-    );
+    await withToast(async () => {
+      await deleteJSON("/agents/stale");
+      await agents.refresh();
+    });
   };
 
   return (

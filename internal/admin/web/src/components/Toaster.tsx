@@ -8,9 +8,9 @@ export function Toaster() {
       {list.map((t) => (
         <button
           key={t.id}
-          class={`toast toast-${t.kind}`}
+          class="toast"
           onClick={() => dismiss(t.id)}
-          title="click to dismiss"
+          title="dismiss"
         >
           <span class="toast-mark" />
           <span class="toast-message">{t.message}</span>

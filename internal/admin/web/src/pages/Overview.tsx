@@ -1,13 +1,12 @@
 import { useMemo } from "preact/hooks";
 import { useLocation } from "preact-iso";
-import { info, agents, backends, groups, events } from "../state";
-import { fmtUptime, fmtTimeOfDay, splitLabel } from "../util/time";
+import { info, agents, backends, events } from "../state";
+import { fmtTimeOfDay, splitLabel } from "../util/time";
 
 export function Overview() {
   const i = info.data.value;
   const ag = agents.data.value || [];
   const be = backends.data.value || [];
-  const gr = groups.data.value || [];
   const ev = events.data.value || [];
 
   const totalTools = be.reduce((acc, b) => acc + (b.tools?.length ?? 0), 0);
@@ -93,19 +92,7 @@ export function Overview() {
         />
       </div>
 
-      <div class="overview-columns">
-        <div class="overview-main">
-          <RecentActivity events={ev} nameCacheBuilder={ag} />
-        </div>
-        <div class="overview-side">
-          <SidePanel
-            groupsCount={gr.length}
-            backendsCount={be.length}
-            agentsCount={ag.length}
-            uptime={i?.uptime}
-          />
-        </div>
-      </div>
+      <RecentActivity events={ev} nameCacheBuilder={ag} />
     </div>
   );
 }
@@ -238,53 +225,3 @@ function RecentActivity({
   );
 }
 
-function SidePanel({
-  groupsCount,
-  backendsCount,
-  agentsCount,
-  uptime,
-}: {
-  groupsCount: number;
-  backendsCount: number;
-  agentsCount: number;
-  uptime: string | undefined;
-}) {
-  return (
-    <div class="side-panel">
-      <div class="side-panel-section">
-        <div class="side-panel-title">system</div>
-        <div class="side-panel-row">
-          <span class="side-panel-label">uptime</span>
-          <span class="side-panel-value">
-            {uptime ? fmtUptime(uptime) : "—"}
-          </span>
-        </div>
-        <div class="side-panel-row">
-          <span class="side-panel-label">backends</span>
-          <span class="side-panel-value">{backendsCount}</span>
-        </div>
-        <div class="side-panel-row">
-          <span class="side-panel-label">agents</span>
-          <span class="side-panel-value">{agentsCount}</span>
-        </div>
-        <div class="side-panel-row">
-          <span class="side-panel-label">groups</span>
-          <span class="side-panel-value">{groupsCount}</span>
-        </div>
-      </div>
-
-      <div class="side-panel-section">
-        <div class="side-panel-title">quick links</div>
-        <a class="side-panel-link" href="/servers">
-          → connect a backend
-        </a>
-        <a class="side-panel-link" href="/identity">
-          → manage policy
-        </a>
-        <a class="side-panel-link" href="/audit">
-          → search audit log
-        </a>
-      </div>
-    </div>
-  );
-}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useMemo } from "preact/hooks";
 import { useLocation } from "preact-iso";
 import { backends, events } from "../state";
 import { getJSON, postJSON } from "../api/client";
-import { toast } from "../state/toasts";
+import { showError } from "../state/toasts";
 import type {
   AddBackendBody,
   AddBackendResponse,
@@ -237,12 +237,10 @@ function AddBackend({
         setOauth({ backendId: id, authUrl: res.auth_url });
         return;
       }
-      toast.success(`backend ${id} connected`);
       onDone();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
-      toast.error(`could not connect ${id}: ${msg}`);
     }
   };
 
@@ -420,14 +418,13 @@ function OAuthFlow({
         );
         if (d.status === "connected") {
           stop();
-          toast.success(`backend ${backendId} connected`);
           onConnected();
         } else if (d.status.startsWith("failed")) {
           stop();
           setStatus("error");
           const reason = d.status.replace("failed:", "");
           setMessage("failed: " + reason);
-          toast.error(`auth failed for ${backendId}: ${reason}`);
+          showError(`auth failed for ${backendId}: ${reason}`);
         }
       } catch {
         // keep polling

@@ -1,7 +1,6 @@
 import { LocationProvider, Router, Route } from "preact-iso";
 import { Layout } from "./components/Layout";
 import { Toaster } from "./components/Toaster";
-import { CommandPalette } from "./components/CommandPalette";
 import { Overview } from "./pages/Overview";
 import { Servers } from "./pages/Servers";
 import { ServerDetail } from "./pages/ServerDetail";
@@ -26,7 +25,6 @@ export function App() {
         </Router>
       </Layout>
       <Toaster />
-      <CommandPalette />
     </LocationProvider>
   );
 }
