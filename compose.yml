@@ -1,0 +1,15 @@
+services:
+  prism:
+    build: .
+    image: prism:dev
+    container_name: prism
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # MCP gateway
+      - "9086:9086"   # admin console
+    volumes:
+      - prism-data:/data
+      - ./deploy/config.json:/etc/prism/config.json:ro
+
+volumes:
+  prism-data:
