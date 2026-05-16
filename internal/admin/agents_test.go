@@ -97,6 +97,7 @@ func newTestAPI() (*API, *mockAgentManager) {
 		mgr,
 		nil, // no group manager
 		nil, // no OAuth callback
+		nil, // no admin auth — open mode for tests
 	)
 	return api, mgr
 }
@@ -258,6 +259,7 @@ func TestAgentMgrNil_Returns503(t *testing.T) {
 		nil, // no agent manager
 		nil, // no group manager
 		nil, // no OAuth callback
+		nil, // no admin auth
 	)
 
 	r := httptest.NewRequest(http.MethodGet, "/agents/some-id", nil)

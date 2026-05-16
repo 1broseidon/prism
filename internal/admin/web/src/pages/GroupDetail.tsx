@@ -3,6 +3,7 @@ import { useLocation, useRoute } from "preact-iso";
 import { agents, groups, backends } from "../state";
 import { deleteJSON, putJSON } from "../api/client";
 import { withToast } from "../state/toasts";
+import { canMutate } from "../state/me";
 import { ScopeEditor } from "../components/ScopeEditor";
 import { ScopeList } from "../components/ScopeList";
 import { StatusCell } from "../components/StatusCell";
@@ -47,6 +48,7 @@ export function GroupDetail() {
   }
 
   const isConfig = group.source === "config";
+  const mutate = canMutate();
 
   const commit = async (next: string[]) => {
     setEditing(false);
@@ -111,7 +113,7 @@ export function GroupDetail() {
       <div class="section">
         <div class="section-header">
           <span class="section-title">scopes</span>
-          {!isConfig && !editing && (
+          {!isConfig && !editing && mutate && (
             <button class="section-btn" onClick={() => setEditing(true)}>
               edit
             </button>
@@ -155,7 +157,7 @@ export function GroupDetail() {
         )}
       </div>
 
-      {!isConfig && (
+      {!isConfig && mutate && (
         <div class="section section-danger">
           <div class="section-header">
             <span class="section-title section-title-danger">

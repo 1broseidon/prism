@@ -46,6 +46,11 @@ type Config struct {
 	// When set, the gateway serves TLS directly — no reverse proxy needed.
 	TLS *TLSConfig `json:"tls,omitempty"`
 
+	// AdminAuth, when set, requires operators to sign in via an OIDC
+	// provider before they can reach the admin console or API. Absent →
+	// admin runs open (appropriate for trusted home-lab networks).
+	AdminAuth *AdminAuthConfig `json:"admin_auth,omitempty"`
+
 	// ShutdownTimeout is the graceful shutdown duration. Default: "10s".
 	ShutdownTimeout Duration `json:"shutdown_timeout,omitempty"`
 }
@@ -66,6 +71,52 @@ type TLSConfig struct {
 	Cert string `json:"cert"`
 	// Key is the path to the PEM-encoded private key.
 	Key string `json:"key"`
+}
+
+// AdminAuthConfig protects the admin console and API behind an OIDC login.
+// Mount point in the JSON config: "admin_auth". Absent means open.
+type AdminAuthConfig struct {
+	// Issuer is the OIDC issuer URL used for discovery
+	// (e.g. https://accounts.google.com, https://your-tenant.okta.com).
+	Issuer string `json:"issuer"`
+	// ClientID is the OAuth client ID registered with the issuer.
+	ClientID string `json:"client_id"`
+	// ClientSecret is the OAuth client secret. Required for confidential clients.
+	ClientSecret string `json:"client_secret"`
+	// RedirectURL is the absolute callback URL registered with the issuer.
+	// e.g. http://localhost:9086/auth/callback
+	RedirectURL string `json:"redirect_url"`
+	// Scopes are the OAuth scopes requested. Default: openid, profile, email.
+	// Add provider-specific scopes (e.g. "groups") when using group RBAC.
+	Scopes []string `json:"scopes,omitempty"`
+	// GroupsClaim is the ID-token claim carrying group membership.
+	// Default: "groups". Other common values: "roles", "cognito:groups".
+	GroupsClaim string `json:"groups_claim,omitempty"`
+	// SessionTTL is how long a logged-in session lasts. Default: "24h".
+	SessionTTL Duration `json:"session_ttl,omitempty"`
+	// CookieDomain optionally pins the session cookie Domain attribute.
+	CookieDomain string `json:"cookie_domain,omitempty"`
+	// CookieSecure forces Secure=true on the session cookie. Auto-on when TLS
+	// is configured; set explicitly when terminating TLS at a reverse proxy.
+	CookieSecure bool `json:"cookie_secure,omitempty"`
+	// Rules grant roles by matching the authenticated user's email/domain/group
+	// claims. The first matching rule wins. Users who match no rule are rejected.
+	Rules []AdminAuthRule `json:"rules"`
+}
+
+// AdminAuthRule maps a set of OIDC matchers to a role. A rule matches when the
+// authenticated user's email is in Emails, their email domain is in Domains,
+// or any of their group claims is in Groups. Matching is case-insensitive for
+// email/domain, case-sensitive for groups.
+type AdminAuthRule struct {
+	// Role is "admin" (full access) or "viewer" (read-only). Required.
+	Role string `json:"role"`
+	// Emails is a list of exact email addresses to grant this role.
+	Emails []string `json:"emails,omitempty"`
+	// Domains is a list of email domains (e.g. "example.com").
+	Domains []string `json:"domains,omitempty"`
+	// Groups is a list of group names from the OIDC groups claim.
+	Groups []string `json:"groups,omitempty"`
 }
 
 // McpServerConfig defines a backend MCP server.
@@ -287,6 +338,7 @@ type Loaded struct {
 	TLS             *TLSConfig
 	Audit           *AuditConfig
 	RateLimit       *RateLimitConfig
+	AdminAuth       *AdminAuthConfig
 	ShutdownTimeout Duration
 }
 
@@ -337,7 +389,44 @@ func validate(cfg *Config) error {
 		}
 	}
 
+	if cfg.AdminAuth != nil {
+		if err := validateAdminAuth(cfg.AdminAuth); err != nil {
+			return err
+		}
+	}
+
 	return validateRateLimit(cfg.RateLimit)
+}
+
+func validateAdminAuth(a *AdminAuthConfig) error {
+	if a.Issuer == "" {
+		return errors.New("admin_auth.issuer is required")
+	}
+	if a.ClientID == "" {
+		return errors.New("admin_auth.client_id is required")
+	}
+	if a.ClientSecret == "" {
+		return errors.New("admin_auth.client_secret is required")
+	}
+	if a.RedirectURL == "" {
+		return errors.New("admin_auth.redirect_url is required")
+	}
+	if len(a.Rules) == 0 {
+		return errors.New("admin_auth.rules: at least one rule is required (otherwise no operator can sign in)")
+	}
+	for i, r := range a.Rules {
+		switch r.Role {
+		case "admin", "viewer":
+		case "":
+			return fmt.Errorf("admin_auth.rules[%d]: role is required (admin or viewer)", i)
+		default:
+			return fmt.Errorf("admin_auth.rules[%d]: role must be \"admin\" or \"viewer\", got %q", i, r.Role)
+		}
+		if len(r.Emails) == 0 && len(r.Domains) == 0 && len(r.Groups) == 0 {
+			return fmt.Errorf("admin_auth.rules[%d]: at least one matcher (emails, domains, or groups) is required", i)
+		}
+	}
+	return nil
 }
 
 func validateServer(name string, srv *McpServerConfig) error {
@@ -438,7 +527,21 @@ func expand(cfg *Config) (*Loaded, error) {
 		TLS:             cfg.TLS,
 		Audit:           cfg.Audit,
 		RateLimit:       cfg.RateLimit,
+		AdminAuth:       cfg.AdminAuth,
 		ShutdownTimeout: cfg.ShutdownTimeout,
+	}
+
+	// Defaults for admin auth.
+	if loaded.AdminAuth != nil {
+		if len(loaded.AdminAuth.Scopes) == 0 {
+			loaded.AdminAuth.Scopes = []string{"openid", "profile", "email"}
+		}
+		if loaded.AdminAuth.GroupsClaim == "" {
+			loaded.AdminAuth.GroupsClaim = "groups"
+		}
+		if loaded.AdminAuth.SessionTTL == 0 {
+			loaded.AdminAuth.SessionTTL = Duration(24 * time.Hour)
+		}
 	}
 
 	// Apply defaults.

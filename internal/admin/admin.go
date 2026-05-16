@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/1broseidon/prism/internal/adminauth"
 	"github.com/1broseidon/prism/internal/metrics"
 )
 
@@ -44,13 +45,26 @@ type API struct {
 	backendMgr           BackendManager
 	agentMgr             AgentManager
 	groupMgr             GroupManager
-	oauthCallbackHandler http.Handler // optional: gateway's OAuth callback handler
+	oauthCallbackHandler http.Handler       // optional: gateway's OAuth callback handler
+	auth                 *adminauth.Service // optional: nil means open mode
 	startedAt            time.Time
 }
 
 // NewAPI creates an admin API.
-// agentMgr, groupMgr, and oauthCallback are optional — when nil, their endpoints return 503/404.
-func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []any, removeFn func(string) bool, removeStaleFn func() int, eventsFn func() []any, agentMgr AgentManager, groupMgr GroupManager, oauthCallback http.Handler) *API {
+// agentMgr, groupMgr, oauthCallback, and auth are optional —
+// when nil their endpoints return 503/404 or the middleware no-ops.
+func NewAPI(
+	statusFn func() any,
+	backendMgr BackendManager,
+	agentsFn func() []any,
+	removeFn func(string) bool,
+	removeStaleFn func() int,
+	eventsFn func() []any,
+	agentMgr AgentManager,
+	groupMgr GroupManager,
+	oauthCallback http.Handler,
+	auth *adminauth.Service,
+) *API {
 	return &API{
 		statusFn:             statusFn,
 		agentsFn:             agentsFn,
@@ -61,6 +75,7 @@ func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []an
 		agentMgr:             agentMgr,
 		groupMgr:             groupMgr,
 		oauthCallbackHandler: oauthCallback,
+		auth:                 auth,
 		startedAt:            time.Now(),
 	}
 }
@@ -68,35 +83,78 @@ func NewAPI(statusFn func() any, backendMgr BackendManager, agentsFn func() []an
 // Handler returns the admin HTTP handler.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Public routes — no auth, always available.
 	mux.HandleFunc("GET /health", a.handleHealth)
-	mux.HandleFunc("GET /backends", a.handleBackends)
-	mux.HandleFunc("GET /info", a.handleInfo)
-	mux.HandleFunc("GET /agents", a.handleAgents)
-	mux.HandleFunc("GET /agents/", a.handleAgentByPrismID)
-	mux.HandleFunc("PUT /agents/", a.handlePutAgent)
-	mux.HandleFunc("DELETE /agents/stale", a.handleRemoveStaleAgents)
-	mux.HandleFunc("DELETE /agents/", a.handleDeleteAgent)
-	mux.HandleFunc("GET /events", a.handleEvents)
-	mux.HandleFunc("GET /groups", a.handleListGroups)
-	mux.HandleFunc("GET /groups/", a.handleGetGroup)
-	mux.HandleFunc("PUT /groups/", a.handleSetGroup)
-	mux.HandleFunc("DELETE /groups/", a.handleDeleteGroup)
-	mux.HandleFunc("GET /defaults", a.handleDefaults)
-	mux.HandleFunc("PUT /defaults", a.handleSetDefaults)
-	mux.HandleFunc("POST /backends/", a.handleAddBackend)
-	mux.HandleFunc("DELETE /backends/", a.handleRemoveBackend)
-	mux.HandleFunc("GET /backends/", a.handleBackendSub)
+	mux.HandleFunc("GET /auth/me", a.handleAuthMe)
+	mux.HandleFunc("GET /auth/login", a.handleAuthLogin)
+	mux.HandleFunc("GET /auth/callback", a.handleAuthCallback)
+	mux.HandleFunc("POST /auth/logout", a.handleAuthLogout)
+
+	// Read-only routes — require a session (admin or viewer). When auth is
+	// nil, the middleware is a pass-through.
+	mux.Handle("GET /backends", a.session(http.HandlerFunc(a.handleBackends)))
+	mux.Handle("GET /info", a.session(http.HandlerFunc(a.handleInfo)))
+	mux.Handle("GET /agents", a.session(http.HandlerFunc(a.handleAgents)))
+	mux.Handle("GET /agents/", a.session(http.HandlerFunc(a.handleAgentByPrismID)))
+	mux.Handle("GET /events", a.session(http.HandlerFunc(a.handleEvents)))
+	mux.Handle("GET /groups", a.session(http.HandlerFunc(a.handleListGroups)))
+	mux.Handle("GET /groups/", a.session(http.HandlerFunc(a.handleGetGroup)))
+	mux.Handle("GET /defaults", a.session(http.HandlerFunc(a.handleDefaults)))
+	mux.Handle("GET /backends/", a.session(http.HandlerFunc(a.handleBackendSub)))
+
+	// Mutation routes — admin role required.
+	mux.Handle("PUT /agents/", a.admin(http.HandlerFunc(a.handlePutAgent)))
+	mux.Handle("DELETE /agents/stale", a.admin(http.HandlerFunc(a.handleRemoveStaleAgents)))
+	mux.Handle("DELETE /agents/", a.admin(http.HandlerFunc(a.handleDeleteAgent)))
+	mux.Handle("PUT /groups/", a.admin(http.HandlerFunc(a.handleSetGroup)))
+	mux.Handle("DELETE /groups/", a.admin(http.HandlerFunc(a.handleDeleteGroup)))
+	mux.Handle("PUT /defaults", a.admin(http.HandlerFunc(a.handleSetDefaults)))
+	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleAddBackend)))
+	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
+
 	if a.oauthCallbackHandler != nil {
+		// Gateway's outbound-OAuth callback (backend authentication).
+		// Different concept from admin auth; stays public.
 		mux.Handle("GET /oauth/callback", a.oauthCallbackHandler)
 	}
 	if metrics.Enabled() {
 		mux.Handle("GET /metrics", metrics.Handler())
 	}
-	// SPA catch-all for the embedded admin console. Registered last so
-	// specific API routes above take precedence; ServeMux matches the
-	// most specific pattern first.
+	// SPA catch-all. Public so the login screen can load when admin auth
+	// rejects API calls. Auth gating happens inside the SPA via /auth/me.
 	mux.HandleFunc("GET /", a.handleSPA)
 	return mux
+}
+
+// session wraps a handler with RequireSession when auth is configured.
+// Nil-safe: when a.auth is nil, the call is a pass-through.
+func (a *API) session(h http.Handler) http.Handler {
+	return a.auth.RequireSession(h)
+}
+
+// admin wraps a handler with RequireAdmin when auth is configured.
+func (a *API) admin(h http.Handler) http.Handler {
+	return a.auth.RequireAdmin(h)
+}
+
+// handleAuthMe is exposed regardless of whether auth is configured so the
+// SPA has a single contract: it sees {"auth":"open"} when running open, or
+// the operator's identity when signed in.
+func (a *API) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	a.auth.HandleMe(w, r)
+}
+
+func (a *API) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	a.auth.HandleLogin(w, r)
+}
+
+func (a *API) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
+	a.auth.HandleCallback(w, r)
+}
+
+func (a *API) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	a.auth.HandleLogout(w, r)
 }
 
 // handlePutAgent dispatches PUT /agents/{prism_id}/policy to the policy handler.

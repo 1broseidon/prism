@@ -3,6 +3,7 @@ import { useLocation } from "preact-iso";
 import { backends, events } from "../state";
 import { getJSON, postJSON } from "../api/client";
 import { showError } from "../state/toasts";
+import { canMutate } from "../state/me";
 import type {
   AddBackendBody,
   AddBackendResponse,
@@ -93,12 +94,14 @@ export function Servers() {
             value={query}
             onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
           />
-          <button
-            class="section-btn section-btn-primary"
-            onClick={() => setAddingOpen((v) => !v)}
-          >
-            + connect
-          </button>
+          {canMutate() && (
+            <button
+              class="section-btn section-btn-primary"
+              onClick={() => setAddingOpen((v) => !v)}
+            >
+              + connect
+            </button>
+          )}
         </div>
       </div>
 

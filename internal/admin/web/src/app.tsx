@@ -1,6 +1,7 @@
 import { LocationProvider, Router, Route } from "preact-iso";
 import { Layout } from "./components/Layout";
 import { Toaster } from "./components/Toaster";
+import { me } from "./state/me";
 import { Overview } from "./pages/Overview";
 import { Servers } from "./pages/Servers";
 import { ServerDetail } from "./pages/ServerDetail";
@@ -8,8 +9,27 @@ import { Identity } from "./pages/Identity";
 import { AgentDetail } from "./pages/AgentDetail";
 import { GroupDetail } from "./pages/GroupDetail";
 import { Audit } from "./pages/Audit";
+import { Login } from "./pages/Login";
 
 export function App() {
+  const m = me.value;
+
+  // Until we've fetched /auth/me at least once, show a minimal shell.
+  if (m === null) {
+    return <div class="boot" />;
+  }
+
+  // When auth is required and we're not signed in, the login screen is the
+  // only thing the user can reach.
+  if (m.auth === "required") {
+    return (
+      <LocationProvider>
+        <Login />
+        <Toaster />
+      </LocationProvider>
+    );
+  }
+
   return (
     <LocationProvider>
       <Layout>

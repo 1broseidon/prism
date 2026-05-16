@@ -3,6 +3,7 @@ import { useLocation, useRoute } from "preact-iso";
 import { backends, events } from "../state";
 import { deleteJSON, postJSON } from "../api/client";
 import { withToast } from "../state/toasts";
+import { canMutate } from "../state/me";
 import type {
   AddBackendBody,
   Backend,
@@ -101,13 +102,15 @@ export function ServerDetail() {
       <ToolsSection backend={backend} />
       <CredentialSection backend={backend} />
       <ActivitySection backendId={backend.id} backend={backend} />
-      <DangerSection
-        backendId={backend.id}
-        onRemoved={async () => {
-          await backends.refresh();
-          loc.route("/servers");
-        }}
-      />
+      {canMutate() && (
+        <DangerSection
+          backendId={backend.id}
+          onRemoved={async () => {
+            await backends.refresh();
+            loc.route("/servers");
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -306,7 +309,7 @@ function CredentialSection({ backend }: { backend: Backend }) {
     <div class="section">
       <div class="section-header">
         <span class="section-title">credential</span>
-        {!editing && (
+        {!editing && canMutate() && (
           <button class="section-btn" onClick={() => {
             setCred(credFromBackend(backend));
             setEditing(true);

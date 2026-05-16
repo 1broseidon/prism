@@ -3,6 +3,7 @@ import { useLocation } from "preact-iso";
 import { agents, groups, backends, defaults } from "../state";
 import { deleteJSON, putJSON } from "../api/client";
 import { withToast } from "../state/toasts";
+import { canMutate } from "../state/me";
 import { ScopeEditor } from "../components/ScopeEditor";
 import { StatusCell } from "../components/StatusCell";
 import { CopyId } from "../components/CopyId";
@@ -77,6 +78,8 @@ function DefaultsSection() {
     });
   };
 
+  const mutate = canMutate();
+
   return (
     <div class="section">
       <div class="section-header">
@@ -86,7 +89,7 @@ function DefaultsSection() {
         </span>
       </div>
       <div class="card">
-        {editing ? (
+        {editing && mutate ? (
           <ScopeEditor
             initial={scopes}
             hints={namespaceHints()}
@@ -94,14 +97,18 @@ function DefaultsSection() {
             onCancel={() => setEditing(false)}
           />
         ) : scopes.length === 0 ? (
-          <span class="scope-add-cta" onClick={() => setEditing(true)}>
-            + add default scopes
-          </span>
+          mutate ? (
+            <span class="scope-add-cta" onClick={() => setEditing(true)}>
+              + add default scopes
+            </span>
+          ) : (
+            <span class="hint-text">no defaults</span>
+          )
         ) : (
           <div
-            class="scope-list editable"
-            onClick={() => setEditing(true)}
-            title="click to edit"
+            class={mutate ? "scope-list editable" : "scope-list"}
+            onClick={mutate ? () => setEditing(true) : undefined}
+            title={mutate ? "click to edit" : undefined}
           >
             {scopes.map((s) => (
               <span class="scope-tag" key={s}>
@@ -122,9 +129,11 @@ function GroupsSection({ groups: gr }: { groups: Group[] }) {
     <div class="section">
       <div class="section-header">
         <span class="section-title">groups ({gr.length})</span>
-        <button class="section-btn" onClick={() => setAdding(true)}>
-          + group
-        </button>
+        {canMutate() && (
+          <button class="section-btn" onClick={() => setAdding(true)}>
+            + group
+          </button>
+        )}
       </div>
       <div class="groups-list">
         {gr.map((g) => (
@@ -265,12 +274,16 @@ function GroupCard({ group }: { group: Group }) {
           </span>
         ))
       )}
-      <button class="group-action" onClick={() => setEditing(true)}>
-        edit
-      </button>
-      <button class="group-action delete" onClick={remove}>
-        ×
-      </button>
+      {canMutate() && (
+        <>
+          <button class="group-action" onClick={() => setEditing(true)}>
+            edit
+          </button>
+          <button class="group-action delete" onClick={remove}>
+            ×
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -312,9 +325,11 @@ function AgentsSection({ agents: ag }: { agents: Agent[] }) {
               onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
             />
           )}
-          <button class="section-btn" onClick={cleanStale}>
-            clean stale
-          </button>
+          {canMutate() && (
+            <button class="section-btn" onClick={cleanStale}>
+              clean stale
+            </button>
+          )}
         </div>
       </div>
       {ag.length === 0 ? (

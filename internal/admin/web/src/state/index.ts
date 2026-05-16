@@ -1,5 +1,6 @@
 import { makePolled } from "./polling";
 import { getJSON } from "../api/client";
+import { startMePolling } from "./me";
 import type {
   Info,
   Agent,
@@ -30,6 +31,7 @@ export const events = makePolled(
 
 export function startAllPolling(): () => void {
   const stops = [
+    startMePolling(),
     info.start(),
     agents.start(),
     backends.start(),

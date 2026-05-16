@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/1broseidon/prism/internal/admin"
+	"github.com/1broseidon/prism/internal/adminauth"
 	"github.com/1broseidon/prism/internal/audit"
 	"github.com/1broseidon/prism/internal/auth"
 	"github.com/1broseidon/prism/internal/authserver"
@@ -65,8 +66,8 @@ func runServe() {
 	}
 
 	// Write PID file for service management.
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644); err != nil { //nolint:gosec // pid file is not sensitive
-		logger.Warn("failed to write pid file", "error", err)
+	if writeErr := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644); writeErr != nil { //nolint:gosec // pid file is not sensitive
+		logger.Warn("failed to write pid file", "error", writeErr)
 	}
 	defer func() { _ = os.Remove(pidFile) }()
 
@@ -159,7 +160,20 @@ func runServe() {
 	}
 	agentMgr := &authServerAgentManager{srv: authSrv}
 	groupMgr := &authServerGroupManager{srv: authSrv}
-	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback)
+
+	adminAuthSvc, err := adminauth.NewService(ctx, cfg.AdminAuth, kvStore, logger)
+	if err != nil {
+		logger.Error("admin auth init failed", "error", err)
+		_ = os.Remove(pidFile)
+		return
+	}
+	if adminAuthSvc != nil {
+		logger.Info("admin auth enabled", "issuer", adminAuthSvc.Issuer())
+	} else {
+		logger.Info("admin auth disabled — running open")
+	}
+
+	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback, adminAuthSvc)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

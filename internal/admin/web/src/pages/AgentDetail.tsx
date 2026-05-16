@@ -3,6 +3,7 @@ import { useLocation, useRoute } from "preact-iso";
 import { agents, groups, backends, events } from "../state";
 import { deleteJSON, putJSON } from "../api/client";
 import { withToast } from "../state/toasts";
+import { canMutate } from "../state/me";
 import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
 import { ScopeList } from "../components/ScopeList";
 import { StatusCell } from "../components/StatusCell";
@@ -90,7 +91,7 @@ export function AgentDetail() {
       <MetaRow agent={agent} />
       <PolicySection agent={agent} />
       <ActivitySection agent={agent} />
-      {agent.dynamic && (
+      {agent.dynamic && canMutate() && (
         <DangerSection
           agent={agent}
           onRemoved={async () => {

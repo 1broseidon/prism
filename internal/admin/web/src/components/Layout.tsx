@@ -1,6 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useLocation } from "preact-iso";
 import { info } from "../state";
+import { me, refreshMe } from "../state/me";
 import { fmtUptime } from "../util/time";
 
 interface Props {
@@ -19,6 +20,17 @@ export function Layout({ children }: Props) {
   const path = loc.path || "/";
   const i = info.data.value;
   const err = info.error.value;
+  const m = me.value;
+
+  const signOut = async () => {
+    try {
+      await fetch("/auth/logout", { method: "POST" });
+    } catch {
+      // ignore; we'll still refresh me below
+    }
+    await refreshMe();
+    loc.route("/");
+  };
 
   return (
     <div class="shell">
@@ -33,6 +45,17 @@ export function Layout({ children }: Props) {
           <span class="status-text">{err ? "disconnected" : "live"}</span>
         </div>
         <div class="shell-meta">
+          {m?.auth === "session" && m.email && (
+            <span class="shell-identity">
+              <span class="shell-identity-email">{m.email}</span>
+              {m.role === "viewer" && (
+                <span class="shell-identity-role">viewer</span>
+              )}
+              <button class="shell-signout" onClick={signOut}>
+                sign out
+              </button>
+            </span>
+          )}
           {i ? <span>v{i.version}</span> : null}
           {i ? <span>up {fmtUptime(i.uptime)}</span> : null}
         </div>
