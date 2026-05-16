@@ -6,7 +6,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -16,19 +15,24 @@ import (
 
 const kvEncKeyFile = "kv-encryption.key"
 
-// kvEncryptionKey returns a 32-byte AES-256 key for encrypting secrets in the
-// KV store. On first call it generates the key and persists it to
-// ~/.prism/kv-encryption.key (0600). Subsequent calls return the persisted key.
-// If the key file cannot be created (e.g. no home dir), a deterministic
-// fallback derived from the hostname is used so the process can still start.
+// kvEncryptionKey returns a 32-byte AES-256 key for encrypting secrets in
+// the KV store. On first call it generates the key and persists it to
+// $PRISM_KV_KEY_FILE (if set) or ~/.prism/kv-encryption.key with 0600
+// permissions. Subsequent calls return the persisted key.
+//
+// If no usable key path can be determined (no home dir AND no override),
+// the function returns an error rather than falling back to a deterministic
+// host-derived key — that previous behaviour generated a key any attacker
+// with the binary could reproduce offline, breaking encryption-at-rest for
+// OAuth refresh tokens.
+//
+// Operators running prism in environments without a home directory (minimal
+// containers, etc.) must set PRISM_KV_KEY_FILE to a writable path.
 func kvEncryptionKey() ([]byte, error) {
-	home, err := os.UserHomeDir()
+	keyPath, err := keyFilePath()
 	if err != nil {
-		return fallbackKey(), nil
+		return nil, err
 	}
-
-	dir := filepath.Join(home, ".prism")
-	keyPath := filepath.Join(dir, kvEncKeyFile)
 
 	// Try to read existing key.
 	if data, readErr := os.ReadFile(keyPath); readErr == nil && len(data) == 64 {
@@ -44,22 +48,29 @@ func kvEncryptionKey() ([]byte, error) {
 		return nil, fmt.Errorf("generate encryption key: %w", err)
 	}
 
-	_ = os.MkdirAll(dir, 0o700)
-	if writeErr := os.WriteFile(keyPath, []byte(hex.EncodeToString(key)), 0o600); writeErr != nil {
-		// Key generated but not persisted — tokens won't survive restart.
-		// Still usable for this session.
-		return key, nil
+	if mkErr := os.MkdirAll(filepath.Dir(keyPath), 0o700); mkErr != nil {
+		return nil, fmt.Errorf("create kv encryption key dir: %w", mkErr)
 	}
-
+	if writeErr := os.WriteFile(keyPath, []byte(hex.EncodeToString(key)), 0o600); writeErr != nil {
+		return nil, fmt.Errorf("persist kv encryption key to %s: %w", keyPath, writeErr)
+	}
 	return key, nil
 }
 
-// fallbackKey derives a deterministic key from hostname. Not ideal but allows
-// the process to start when the home directory is unavailable.
-func fallbackKey() []byte {
-	host, _ := os.Hostname()
-	h := sha256.Sum256([]byte("prism-kv-fallback:" + host))
-	return h[:]
+// keyFilePath resolves the encryption-key file location. Honours an explicit
+// PRISM_KV_KEY_FILE override (useful for containers that mount a secret
+// volume); otherwise uses ~/.prism/kv-encryption.key. Returns an error when
+// neither is available — refusing to start beats silently using a derivable
+// key.
+func keyFilePath() (string, error) {
+	if override := os.Getenv("PRISM_KV_KEY_FILE"); override != "" {
+		return override, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate kv encryption key: no PRISM_KV_KEY_FILE override and no home dir: %w", err)
+	}
+	return filepath.Join(home, ".prism", kvEncKeyFile), nil
 }
 
 // encryptAESGCM encrypts plaintext with AES-256-GCM using the provided key.

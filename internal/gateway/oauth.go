@@ -213,9 +213,22 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 		"url", discoveredURL,
 	)
 	if asm.Issuer != authServerIssuer {
-		g.logger.Warn("auth server metadata issuer mismatch (RFC 8414 §3.3) — proceeding because operator-initiated",
+		// RFC 8414 §3.3 wants exact equality; some delegated setups (Clerk
+		// in front of a customer domain, Auth0 proxies) declare a different
+		// issuer than the URL we fetched metadata from. We tolerate that —
+		// but require the declared issuer's host to match the host we
+		// actually contacted, so a network attacker can't substitute an
+		// arbitrary issuer value (e.g. "https://attacker.example/").
+		if err := assertSameHost(discoveredURL, asm.Issuer); err != nil {
+			return nil, fmt.Errorf(
+				"auth server metadata issuer mismatch: %w (expected %q, got %q, fetched from %q)",
+				err, authServerIssuer, asm.Issuer, discoveredURL,
+			)
+		}
+		g.logger.Warn("auth server metadata issuer differs from requested (allowed: same host)",
 			"expected", authServerIssuer,
 			"got", asm.Issuer,
+			"fetched_from", discoveredURL,
 			"backend", backendID,
 		)
 	}
@@ -360,22 +373,26 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 		return fmt.Errorf("OAuth flow manager not initialized")
 	}
 
+	// Look up + validate expiry + consume under a single lock acquisition.
+	// Doing the expiry check before delete keeps the state slot reusable in
+	// the (theoretical) case of an attacker spamming a known state to burn
+	// it before the legitimate callback arrives — they get a clean error
+	// and we still serve the real one when it shows up later, until the
+	// 10 min window closes.
 	afm.mu.Lock()
 	flow, ok := afm.flows[state]
-	if ok {
-		delete(afm.flows, state) // single-use
-	}
-	afm.mu.Unlock()
-
 	if !ok {
+		afm.mu.Unlock()
 		return fmt.Errorf("unknown or expired OAuth state")
 	}
-
-	// Check expiration.
 	if time.Since(flow.CreatedAt) > 10*time.Minute {
+		delete(afm.flows, state)
+		afm.mu.Unlock()
 		g.setAuthStatus(flow.BackendID, "failed:timeout")
 		return fmt.Errorf("OAuth flow expired (>10 minutes)")
 	}
+	delete(afm.flows, state) // single-use
+	afm.mu.Unlock()
 
 	// Exchange code for tokens with PKCE verifier.
 	// Gap 2 (MCP auth spec §183-211): Include resource parameter (RFC 8707) in token request.
@@ -505,6 +522,28 @@ func (g *Gateway) setAuthStatus(backendID, status string) {
 //  2. https://auth.example.com/.well-known/openid-configuration
 //
 // Returns the metadata, the URL that succeeded, and any error.
+// assertSameHost returns nil iff `a` and `b` are valid URLs with the same
+// host. Used to gate the lenient RFC 8414 issuer match: we accept a
+// non-matching issuer only when its host matches the URL we fetched the
+// metadata from, so a MITM can't inject a foreign issuer value.
+func assertSameHost(a, b string) error {
+	ua, err := url.Parse(a)
+	if err != nil {
+		return fmt.Errorf("parse %q: %w", a, err)
+	}
+	ub, err := url.Parse(b)
+	if err != nil {
+		return fmt.Errorf("parse %q: %w", b, err)
+	}
+	if ua.Host == "" || ub.Host == "" {
+		return fmt.Errorf("missing host in %q or %q", a, b)
+	}
+	if !strings.EqualFold(ua.Host, ub.Host) {
+		return fmt.Errorf("host mismatch: %q vs %q", ua.Host, ub.Host)
+	}
+	return nil
+}
+
 func discoverAuthServerMeta(ctx context.Context, issuer string, logger *slog.Logger) (*oauthex.AuthServerMeta, string, error) {
 	issuerURL, err := url.Parse(issuer)
 	if err != nil {

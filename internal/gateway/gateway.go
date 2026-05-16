@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/1broseidon/prism/internal/admin"
@@ -40,6 +42,11 @@ type Backend struct {
 	CB        *middleware.CircuitBreaker
 	ToolNames []string          // namespaced tool names registered on the gateway
 	Tools     []BackendToolInfo // tool metadata captured at registration
+	// inflight counts in-progress tool calls so DisconnectBackend can drain
+	// them before Session.Close(). Add() is called only while the gateway
+	// mutex is held + the backend is still in the map, so no new Adds can
+	// race with the post-delete Wait.
+	inflight sync.WaitGroup
 }
 
 // BackendToolInfo is the per-tool metadata returned in BackendStatus.
@@ -51,6 +58,10 @@ type BackendToolInfo struct {
 	Description string `json:"description,omitempty"`
 }
 
+// policyResolverBox is a typed wrapper so atomic.Pointer can hold an interface
+// value lock-free. The hot-path scope filter loads this on every tools/list.
+type policyResolverBox struct{ r auth.PolicyResolver }
+
 // Gateway aggregates multiple MCP backends behind a single server.
 type Gateway struct {
 	mu             sync.RWMutex
@@ -59,9 +70,9 @@ type Gateway struct {
 	logger         *slog.Logger
 	auditor        *audit.Logger
 	credStore      *credentials.Store
-	kvStore        store.Store         // optional KV store for persisting runtime credential configs
-	policyResolver auth.PolicyResolver // live policy resolution, bypasses stale session context
-	authFlows      any                 //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
+	kvStore        store.Store // optional KV store for persisting runtime credential configs
+	policyResolver atomic.Pointer[policyResolverBox]
+	authFlows      any //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
 	bridgeURL      string
 	network        *networkRuntime
 }
@@ -99,8 +110,21 @@ func New(logger *slog.Logger) *Gateway {
 // When set, scope enforcement reads policy from the resolver (live from KV)
 // instead of the stale session context. This ensures policy changes take
 // effect immediately without requiring MCP client reconnection.
+//
+// Safe for concurrent use with getPolicyResolver — the swap is atomic, so
+// the scope filter on the hot path can never see a torn read.
 func (g *Gateway) SetPolicyResolver(pr auth.PolicyResolver) {
-	g.policyResolver = pr
+	g.policyResolver.Store(&policyResolverBox{r: pr})
+}
+
+// getPolicyResolver returns the current live resolver, or nil when unset.
+// Lock-free read; safe under SetPolicyResolver concurrent with hot-path reads.
+func (g *Gateway) getPolicyResolver() auth.PolicyResolver {
+	b := g.policyResolver.Load()
+	if b == nil {
+		return nil
+	}
+	return b.r
 }
 
 // NotifyToolsChanged triggers a tools/list_changed notification to all MCP sessions.
@@ -137,8 +161,8 @@ func (g *Gateway) SetStore(s store.Store) {
 }
 
 // SetBridgeURL configures the prism-bridge manage endpoint used for delegated command backends.
-func (g *Gateway) SetBridgeURL(url string) {
-	g.bridgeURL = strings.TrimRight(url, "/")
+func (g *Gateway) SetBridgeURL(u string) {
+	g.bridgeURL = strings.TrimRight(u, "/")
 }
 
 // BridgeURL returns the configured prism-bridge manage URL, if any.
@@ -158,6 +182,23 @@ func (g *Gateway) NetworkSettings() *admin.NetworkSettings {
 // Satisfies admin.NetworkSettingsProvider.
 func (g *Gateway) TrustProxyHeaders() bool {
 	return g.NetworkSettings().TrustProxyHeaders
+}
+
+// AllowedForwardedHosts returns the hosts the admin handler may take from
+// X-Forwarded-Host when trustProxy is on. We derive the list from the
+// operator-pinned admin_public_url so attackers can't substitute an arbitrary
+// host through a trusted proxy. Returns nil/empty when no admin URL is set —
+// the admin handler then refuses to substitute.
+func (g *Gateway) AllowedForwardedHosts() []string {
+	a := g.NetworkSettings().AdminPublicURL
+	if a == "" {
+		return nil
+	}
+	u, err := url.Parse(a)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	return []string{u.Host}
 }
 
 // SetNetworkSettings atomically swaps the runtime network settings.
@@ -425,7 +466,7 @@ func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
 				return result, err
 			}
 
-			policy := auth.LivePolicy(ctx, g.policyResolver)
+			policy := auth.LivePolicy(ctx, g.getPolicyResolver())
 			if policy == nil {
 				// Open / unauthenticated mode: return all tools.
 				return result, nil
@@ -622,8 +663,13 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 	)
 	defer span.End()
 
+	// Look up + register in-flight under the same lock so DisconnectBackend
+	// can rely on "removed from map ⇒ no further Adds" to drain cleanly.
 	g.mu.RLock()
 	b, ok := g.backends[backendID]
+	if ok {
+		b.inflight.Add(1)
+	}
 	g.mu.RUnlock()
 
 	if !ok {
@@ -640,6 +686,7 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 			},
 		}, nil
 	}
+	defer b.inflight.Done()
 
 	span.SetAttributes(
 		attribute.String("tool.namespace", b.Config.Namespace),
@@ -654,7 +701,7 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 
 	// Scope enforcement: check if the caller has permission for this tool.
 	// Uses LivePolicy to resolve from KV store (not stale session context).
-	if policy := auth.LivePolicy(ctx, g.policyResolver); policy != nil {
+	if policy := auth.LivePolicy(ctx, g.getPolicyResolver()); policy != nil {
 		if !policy.CanAccessTool(b.Config.Namespace, toolName) {
 			span.SetAttributes(attribute.Bool("tool.allowed", false))
 			span.SetStatus(codes.Error, "access denied")
@@ -746,6 +793,10 @@ func (g *Gateway) DisconnectBackend(id string) error {
 	g.deletePersistedBackend(id)
 	g.cleanupOAuthForBackend(id)
 
+	// Drain in-flight tool calls before closing the session so the SDK
+	// doesn't get use-after-close. Since we already removed from the map
+	// above, no new tool calls can grab this backend.
+	b.inflight.Wait()
 	if b.Session != nil {
 		_ = b.Session.Close()
 	}
@@ -764,7 +815,8 @@ func (g *Gateway) removeBackendTools(b *Backend) {
 	g.logger.Info("removed tools from backend", "id", b.Config.ID, "count", len(b.ToolNames))
 }
 
-// Close disconnects all backends.
+// Close disconnects all backends. Each backend's in-flight tool calls are
+// drained before its session is closed.
 func (g *Gateway) Close() {
 	g.mu.Lock()
 	backends := g.backends
@@ -772,6 +824,7 @@ func (g *Gateway) Close() {
 	g.mu.Unlock()
 
 	for id, b := range backends {
+		b.inflight.Wait()
 		if b.Session != nil {
 			_ = b.Session.Close()
 		}
