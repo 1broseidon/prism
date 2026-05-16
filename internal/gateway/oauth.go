@@ -88,7 +88,12 @@ func codeChallenge(verifier string) string {
 // ProbeBackendAuth probes a URL and initiates an OAuth flow if 401 is returned.
 // Returns a PendingAuthFlow with the auth URL the operator should visit, or nil
 // if the backend does not require OAuth authentication.
-func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL string) (*PendingAuthFlow, error) {
+// ProbeBackendAuth detects whether backendURL requires OAuth and, if so,
+// kicks off DCR + auth flow. callbackOverride lets a caller supply the
+// externally-reachable base URL the auth provider should redirect to
+// (e.g. derived from the inbound admin request). When empty, the manager's
+// static callback URL is used (admin_public_url or localhost fallback).
+func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL, callbackOverride string) (*PendingAuthFlow, error) {
 	afm := g.getAuthFlows()
 	if afm == nil {
 		return nil, fmt.Errorf("OAuth flow manager not initialized")
@@ -214,6 +219,9 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 
 	// Dynamic Client Registration (RFC 7591).
 	callbackURL := afm.callbackURL
+	if callbackOverride != "" {
+		callbackURL = strings.TrimRight(callbackOverride, "/") + "/oauth/callback"
+	}
 	regResp, err := oauthex.RegisterClient(ctx, asm.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
 		ClientName:              "Prism Gateway",
 		RedirectURIs:            []string{callbackURL},
@@ -406,9 +414,11 @@ func (g *Gateway) AuthFlowStatus(backendID string) string {
 // ProbeBackendOAuth probes a URL for OAuth requirements. If the backend returns
 // 401 with WWW-Authenticate + resource_metadata, initiates the OAuth flow and
 // returns the authorization URL and state. Returns ("", "", nil) if no OAuth needed.
-// Satisfies the admin.OAuthProber interface.
-func (g *Gateway) ProbeBackendOAuth(ctx context.Context, backendID, url string) (authURL, state string, err error) {
-	flow, err := g.ProbeBackendAuth(ctx, backendID, url)
+// callbackOverride is the externally-reachable base URL the provider should
+// redirect to (e.g. http://172.16.30.90:9086); empty means use the static
+// admin_public_url. Satisfies the admin.OAuthProber interface.
+func (g *Gateway) ProbeBackendOAuth(ctx context.Context, backendID, url, callbackOverride string) (authURL, state string, err error) {
+	flow, err := g.ProbeBackendAuth(ctx, backendID, url, callbackOverride)
 	if err != nil {
 		return "", "", err
 	}

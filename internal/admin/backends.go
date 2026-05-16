@@ -53,12 +53,39 @@ type BackendManager interface {
 	NotifyToolsChanged()
 }
 
+// callbackBaseFromRequest derives the externally-reachable base URL the OAuth
+// provider should redirect to, using the inbound request. This is what makes
+// the auth flow host-aware: when an operator hits the admin at
+// http://172.16.30.90:9086, the callback returns to the same host instead of
+// the configured fallback (which defaults to localhost). Honors common
+// reverse-proxy headers so deployments behind a proxy work too.
+func callbackBaseFromRequest(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+		scheme = p
+	}
+	host := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		host = h
+	}
+	if host == "" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
 // OAuthProber is an optional interface that BackendManager may implement
 // to support probing backends for OAuth authentication requirements.
 type OAuthProber interface {
 	// ProbeBackendOAuth probes a URL. If the backend requires OAuth, returns
 	// (authURL, state, nil). If no OAuth is needed, returns ("", "", nil).
-	ProbeBackendOAuth(ctx context.Context, backendID, url string) (authURL, state string, err error)
+	// callbackBase is the externally-reachable scheme+host the provider should
+	// redirect to (e.g. "http://172.16.30.90:9086"); empty falls back to the
+	// configured admin_public_url.
+	ProbeBackendOAuth(ctx context.Context, backendID, url, callbackBase string) (authURL, state string, err error)
 	// AuthFlowStatus returns the status of an OAuth flow for a backend.
 	// Returns "pending", "connected", "failed:{reason}", or "".
 	AuthFlowStatus(backendID string) string
@@ -95,7 +122,7 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 	// If a URL is provided with no explicit credential, probe for OAuth.
 	if cfg.URL != "" && cfg.Credential == nil {
 		if prober, ok := a.backendMgr.(OAuthProber); ok {
-			authURL, state, err := prober.ProbeBackendOAuth(r.Context(), id, cfg.URL)
+			authURL, state, err := prober.ProbeBackendOAuth(r.Context(), id, cfg.URL, callbackBaseFromRequest(r))
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "probe failed: " + err.Error()})
 				return
