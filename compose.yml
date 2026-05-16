@@ -24,9 +24,10 @@ services:
     container_name: prism-caddy
     restart: unless-stopped
     ports:
-      - "80:80"       # ACME HTTP-01 challenge (Let's Encrypt)
       - "443:443"     # admin console (HTTPS)
       - "8443:8443"   # MCP gateway  (HTTPS)
+      # Add "- 80:80" if you switch the Caddyfile to a public domain for
+      # Let's Encrypt — the HTTP-01 challenge needs it.
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
