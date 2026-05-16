@@ -1,0 +1,33 @@
+# Prism reverse proxy.
+#
+# Caddy resolves Let's Encrypt certs automatically when the site label is
+# a real domain (HTTP-01 challenge over port 80). For internal/local-only
+# setups, swap the site label for `:443` and add `tls internal` — Caddy
+# generates a self-signed cert from its internal CA.
+#
+# Requirements for the automatic-Let's-Encrypt path:
+#   - DNS A/AAAA record points to this host
+#   - Ports 80 and 443 reachable from the public internet
+#
+# After Caddy is running:
+#   - Open the admin: https://mcp.dfam.one
+#   - Set "admin public url" to https://mcp.dfam.one and toggle
+#     "trust reverse-proxy headers" on, so OAuth callbacks use the
+#     external hostname instead of the in-container Host.
+
+{
+	# Disable Caddy's admin endpoint — not used, smaller attack surface.
+	admin off
+}
+
+# Admin console + OAuth callbacks → port 443
+mcp.dfam.one {
+	encode gzip zstd
+	reverse_proxy prism:9086
+}
+
+# MCP gateway → port 8443 (same domain, separate listener)
+mcp.dfam.one:8443 {
+	encode gzip zstd
+	reverse_proxy prism:8080
+}

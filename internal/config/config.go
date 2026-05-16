@@ -357,9 +357,10 @@ type Loaded struct {
 	Admin          string
 	PublicURL      string // Externally-reachable base URL for the MCP gateway (OAuth issuer).
 	AdminPublicURL string // Externally-reachable base URL for the admin API (OAuth callbacks).
-	// AdminPublicURLConfigured is the raw config value, empty when not set.
-	// Lets callers (OAuth flow init) distinguish operator-pinned URLs from
-	// addresses we guessed by looking at the listen interface.
+	// PublicURLConfigured / AdminPublicURLConfigured are the raw config
+	// values (empty when not set). Lets callers distinguish operator-pinned
+	// URLs from addresses we guessed by looking at the listen interface.
+	PublicURLConfigured      string
 	AdminPublicURLConfigured string
 	BridgeURL                string
 	Servers                  []ServerConfig
@@ -601,10 +602,9 @@ func expand(cfg *Config) (*Loaded, error) {
 	// Derive PublicURL: explicit config > concrete listen address > localhost fallback.
 	loaded.PublicURL = derivePublicURL(cfg.PublicURL, loaded.Listen, cfg.TLS != nil, "public_url", "listen")
 	loaded.AdminPublicURL = derivePublicURL(cfg.AdminPublicURL, loaded.Admin, cfg.TLS != nil, "admin_public_url", "admin")
-	// Keep the raw configured value separately so OAuth callback logic can
-	// tell explicit ("operator pinned this URL") from derived ("we guessed").
-	// Explicit values force the redirect_uri; derived values lose to the
-	// inbound request's Host header.
+	// Keep raw configured values separately so callers can tell
+	// "operator pinned this URL" from "we guessed". Empty means auto-derive.
+	loaded.PublicURLConfigured = strings.TrimRight(cfg.PublicURL, "/")
 	loaded.AdminPublicURLConfigured = strings.TrimRight(cfg.AdminPublicURL, "/")
 
 	// Expand mcpServers map → ServerConfig slice.

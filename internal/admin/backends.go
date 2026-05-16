@@ -64,19 +64,24 @@ type BackendManager interface {
 // provider should redirect to, using the inbound request. This is what makes
 // the auth flow host-aware: when an operator hits the admin at
 // http://172.16.30.90:9086, the callback returns to the same host instead of
-// the configured fallback (which defaults to localhost). Honors common
-// reverse-proxy headers so deployments behind a proxy work too.
-func callbackBaseFromRequest(r *http.Request) string {
+// the configured fallback.
+//
+// X-Forwarded-Proto / X-Forwarded-Host are honored only when trustProxy is
+// true — otherwise a malicious client could inject those headers to redirect
+// OAuth callbacks to an attacker-controlled host.
+func callbackBaseFromRequest(r *http.Request, trustProxy bool) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
-		scheme = p
-	}
 	host := r.Host
-	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
-		host = h
+	if trustProxy {
+		if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+			scheme = p
+		}
+		if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+			host = h
+		}
 	}
 	if host == "" {
 		return ""
@@ -149,8 +154,12 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 	// If a URL is provided with no explicit credential, probe for OAuth.
 	if cfg.URL != "" && cfg.Credential == nil {
 		if prober, ok := a.backendMgr.(OAuthProber); ok {
+			trustProxy := false
+			if np, ok := a.backendMgr.(NetworkSettingsProvider); ok {
+				trustProxy = np.TrustProxyHeaders()
+			}
 			opts := OAuthProberOptions{
-				CallbackBase: callbackBaseFromRequest(r),
+				CallbackBase: callbackBaseFromRequest(r, trustProxy),
 				ClientID:     cfg.OAuthClientID,
 				ClientSecret: cfg.OAuthClientSecret,
 			}

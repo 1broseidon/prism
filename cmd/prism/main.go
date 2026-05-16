@@ -92,6 +92,21 @@ func runServe() {
 	gw.SetBridgeURL(cfg.BridgeURL)
 	gw.LoadPersistedCredentials()
 
+	// Network settings: prefer KV (set via the Settings page) over file config.
+	if ns, nsErr := gateway.LoadNetworkSettings(kvStore); nsErr != nil {
+		logger.Warn("failed to load network settings from KV", "error", nsErr)
+	} else {
+		// Seed from raw file values only — empty means "auto-derive".
+		// The UI shows what the operator explicitly pinned.
+		if ns.PublicURL == "" {
+			ns.PublicURL = cfg.PublicURLConfigured
+		}
+		if ns.AdminPublicURL == "" {
+			ns.AdminPublicURL = cfg.AdminPublicURLConfigured
+		}
+		gw.SetNetworkSettings(ns)
+	}
+
 	// Initialize OAuth client support for upstream MCP servers that require authentication.
 	// This must happen after SetStore (needs KV for persisted tokens) and before LoadPersistedBackends
 	// (so OAuth credentials are registered before backends try to connect).

@@ -151,3 +151,9 @@ export interface AdminAuthPutPayload {
 export type AdminAuthTestResponse =
   | { ok: true; issuer: string; authorize_url: string; token_url: string }
   | { ok: false; error: string };
+
+export interface NetworkSettings {
+  public_url?: string;
+  admin_public_url?: string;
+  trust_proxy_headers?: boolean;
+}

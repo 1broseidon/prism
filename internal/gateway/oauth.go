@@ -230,20 +230,22 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	}
 
 	// Resolve the redirect URI for this flow.
-	// Precedence:
-	//   1. Operator-pinned admin_public_url (afm.callbackURL is non-empty
-	//      only when the config explicitly set it).
-	//   2. Request-derived host (works out of the box for any inbound host).
-	//   3. Fail — there's no sensible default once the operator runs prism
+	// Precedence (high → low):
+	//   1. Operator-pinned admin_public_url from the Settings page (runtime KV).
+	//   2. Operator-pinned admin_public_url from the file config (static).
+	//   3. Request-derived host (covers ad-hoc access).
+	//   4. Fail — there's no sensible default once the operator runs prism
 	//      from a non-loopback address.
 	var callbackURL string
 	switch {
+	case g.network != nil && g.network.AdminCallbackURL() != "":
+		callbackURL = g.network.AdminCallbackURL()
 	case afm.callbackURL != "":
 		callbackURL = afm.callbackURL
 	case opts.CallbackOverride != "":
 		callbackURL = strings.TrimRight(opts.CallbackOverride, "/") + "/oauth/callback"
 	default:
-		return nil, fmt.Errorf("no callback URL available: set admin_public_url in the prism config")
+		return nil, fmt.Errorf("no callback URL available: set admin_public_url in the Settings page or config file")
 	}
 
 	// Obtain client credentials: prefer manual when supplied, otherwise DCR.

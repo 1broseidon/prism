@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1broseidon/prism/internal/admin"
 	"github.com/1broseidon/prism/internal/audit"
 	"github.com/1broseidon/prism/internal/auth"
 	"github.com/1broseidon/prism/internal/bridge"
@@ -62,6 +63,7 @@ type Gateway struct {
 	policyResolver auth.PolicyResolver // live policy resolution, bypasses stale session context
 	authFlows      any                 //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
 	bridgeURL      string
+	network        *networkRuntime
 }
 
 // New creates a new Gateway.
@@ -74,6 +76,7 @@ func New(logger *slog.Logger) *Gateway {
 		logger:    logger,
 		auditor:   audit.Noop(), // replaced via SetAuditLogger if audit is configured
 		credStore: credentials.NewStore(),
+		network:   newNetworkRuntime(nil),
 	}
 
 	g.server = mcp.NewServer(
@@ -141,6 +144,34 @@ func (g *Gateway) SetBridgeURL(url string) {
 // BridgeURL returns the configured prism-bridge manage URL, if any.
 func (g *Gateway) BridgeURL() string {
 	return g.bridgeURL
+}
+
+// NetworkSettings returns the current runtime network settings.
+func (g *Gateway) NetworkSettings() *admin.NetworkSettings {
+	if g.network == nil {
+		return &admin.NetworkSettings{}
+	}
+	return g.network.Get()
+}
+
+// TrustProxyHeaders is the operator's opt-in for honoring X-Forwarded-*.
+// Satisfies admin.NetworkSettingsProvider.
+func (g *Gateway) TrustProxyHeaders() bool {
+	return g.NetworkSettings().TrustProxyHeaders
+}
+
+// SetNetworkSettings atomically swaps the runtime network settings.
+func (g *Gateway) SetNetworkSettings(s *admin.NetworkSettings) {
+	if g.network == nil {
+		g.network = newNetworkRuntime(s)
+		return
+	}
+	g.network.Set(s)
+}
+
+// PersistNetworkSettings writes settings to KV. Satisfies admin.NetworkSettingsManager.
+func (g *Gateway) PersistNetworkSettings(s *admin.NetworkSettings) error {
+	return SaveNetworkSettings(g.kvStore, s)
 }
 
 // KV key prefixes for backend persistence.

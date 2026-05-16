@@ -4,12 +4,37 @@ services:
     image: prism:dev
     container_name: prism
     restart: unless-stopped
+    expose:
+      - "8080"   # MCP gateway (Caddy fronts this on :8443)
+      - "9086"   # admin console (Caddy fronts this on :443)
+    # Direct ports kept for local access when you want to bypass Caddy
+    # (e.g. when admin_public_url targets http://prism.localhost:9086).
     ports:
-      - "8080:8080"   # MCP gateway
-      - "9086:9086"   # admin console
+      - "8080:8080"
+      - "9086:9086"
     volumes:
       - prism-data:/data
       - ./deploy/config.json:/etc/prism/config.json:ro
 
+  # TLS termination + X-Forwarded-* injection. Toggle "trust proxy headers"
+  # in the admin Settings page so OAuth callbacks use the public hostname
+  # instead of the in-container Host.
+  caddy:
+    image: caddy:2-alpine
+    container_name: prism-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"       # ACME HTTP-01 challenge (Let's Encrypt)
+      - "443:443"     # admin console (HTTPS)
+      - "8443:8443"   # MCP gateway  (HTTPS)
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - prism
+
 volumes:
   prism-data:
+  caddy-data:
+  caddy-config:

@@ -41,6 +41,13 @@ type BridgeInfoProvider interface {
 	BridgeURL() string
 }
 
+// NetworkSettingsProvider exposes runtime network knobs read off the gateway,
+// including whether X-Forwarded-* headers should be trusted when deriving
+// OAuth callbacks from the inbound request.
+type NetworkSettingsProvider interface {
+	TrustProxyHeaders() bool
+}
+
 // API exposes admin endpoints.
 type API struct {
 	statusFn             func() any
@@ -117,6 +124,10 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /config/admin-auth/test", a.admin(http.HandlerFunc(a.handleTestAdminAuth)))
 	mux.Handle("POST /config/admin-auth/enable", a.admin(http.HandlerFunc(a.handleEnableAdminAuth)))
 	mux.Handle("DELETE /config/admin-auth/enable", a.admin(http.HandlerFunc(a.handleDisableAdminAuth)))
+
+	// Runtime network settings (admin_public_url, behind-proxy toggle, ...).
+	mux.Handle("GET /config/network", a.admin(http.HandlerFunc(a.handleGetNetwork)))
+	mux.Handle("PUT /config/network", a.admin(http.HandlerFunc(a.handlePutNetwork)))
 
 	// Mutation routes — admin role required.
 	mux.Handle("PUT /agents/", a.admin(http.HandlerFunc(a.handlePutAgent)))

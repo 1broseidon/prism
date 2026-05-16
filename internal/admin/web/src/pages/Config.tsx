@@ -12,6 +12,7 @@ import type {
   AdminAuthRule,
   AdminAuthTestResponse,
   AdminAuthView,
+  NetworkSettings,
 } from "../api/types";
 
 const SECRET_PLACEHOLDER = "•••••••• (kept)";
@@ -187,10 +188,12 @@ export function Config() {
         <div>
           <div class="page-title">configuration</div>
           <div class="page-subtitle">
-            admin authentication and console settings
+            network, admin authentication, and console settings
           </div>
         </div>
       </div>
+
+      <NetworkSection mutate={mutate} />
 
       <div class="section">
         <div class="section-header">
@@ -561,6 +564,126 @@ function RuleMatchers({
         value={rule.groups}
         onUpdate={(groups) => onChange({ groups })}
       />
+    </div>
+  );
+}
+
+function NetworkSection({ mutate }: { mutate: boolean }) {
+  const [loaded, setLoaded] = useState<NetworkSettings | null>(null);
+  const [adminURL, setAdminURL] = useState("");
+  const [publicURL, setPublicURL] = useState("");
+  const [trustProxy, setTrustProxy] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  const load = async () => {
+    try {
+      const v = await getJSON<NetworkSettings>("/config/network");
+      setLoaded(v);
+      setAdminURL(v.admin_public_url || "");
+      setPublicURL(v.public_url || "");
+      setTrustProxy(!!v.trust_proxy_headers);
+      setDirty(false);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const save = async () => {
+    await withToast(async () => {
+      const next = await putJSON<NetworkSettings>("/config/network", {
+        admin_public_url: adminURL.trim(),
+        public_url: publicURL.trim(),
+        trust_proxy_headers: trustProxy,
+      });
+      setLoaded(next);
+      setDirty(false);
+    });
+  };
+
+  if (loaded === null) return null;
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">network</span>
+        <span class="section-sub">
+          how prism advertises itself to oauth providers and clients
+        </span>
+      </div>
+      <div class="card config-form" style="grid-template-columns:1fr">
+        <Field label="admin public url">
+          <input
+            type="text"
+            class="config-input"
+            value={adminURL}
+            spellcheck={false}
+            placeholder="https://prism.example.com or http://prism.localhost:9086"
+            disabled={!mutate}
+            onInput={(e) => {
+              setAdminURL((e.target as HTMLInputElement).value);
+              setDirty(true);
+            }}
+          />
+          <div class="hint-text" style="margin-top:4px">
+            pinned redirect_uri for backend oauth flows. when blank, prism
+            derives it from the inbound request.
+          </div>
+        </Field>
+        <Field label="gateway public url">
+          <input
+            type="text"
+            class="config-input"
+            value={publicURL}
+            spellcheck={false}
+            placeholder="https://prism.example.com:8443"
+            disabled={!mutate}
+            onInput={(e) => {
+              setPublicURL((e.target as HTMLInputElement).value);
+              setDirty(true);
+            }}
+          />
+          <div class="hint-text" style="margin-top:4px">
+            advertised in /.well-known/oauth-protected-resource for mcp
+            clients. optional; defaults to the listen address.
+          </div>
+        </Field>
+        <label class="config-toggle">
+          <input
+            type="checkbox"
+            checked={trustProxy}
+            disabled={!mutate}
+            onChange={(e) => {
+              setTrustProxy((e.target as HTMLInputElement).checked);
+              setDirty(true);
+            }}
+          />
+          <span class="config-toggle-label">
+            trust reverse-proxy headers (X-Forwarded-Proto / Host)
+          </span>
+          <span class="hint-text">
+            enable when prism sits behind caddy, nginx, or cloudflare.
+            without it, prism uses the connecting client's Host directly.
+          </span>
+        </label>
+        {mutate && (
+          <div class="config-actions" style="grid-column:1/-1">
+            <button
+              class="save-btn"
+              onClick={save}
+              disabled={!dirty}
+            >
+              save
+            </button>
+            {dirty && (
+              <span class="config-dirty-marker">unsaved changes</span>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

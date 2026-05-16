@@ -2619,6 +2619,32 @@ tr:hover .remove-btn {
   }
 }
 
+/* Config toggle (Network settings) */
+.config-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  row-gap: 4px;
+  align-items: center;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.config-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.config-toggle .config-toggle-label {
+  color: var(--fg);
+  font-size: 13px;
+}
+.config-toggle .hint-text {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 /* Manual OAuth form (DCR-unsupported providers) */
 .manual-oauth-body {
   display: flex;
