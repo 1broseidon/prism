@@ -52,6 +52,7 @@
   <p class="subtitle">An agent wants to connect to Prism</p>
   <div class="agent-name">{{.ClientName}}</div>
   <form method="POST" action="/authorize">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <input type="hidden" name="client_id" value="{{.ClientID}}">
     <input type="hidden" name="response_type" value="{{.ResponseType}}">
     <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">

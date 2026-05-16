@@ -153,6 +153,11 @@ func NewServer(cfg *Config, km *KeyManager, kv kvStore, logger *slog.Logger, gro
 
 	for i := range cfg.Clients {
 		c := &cfg.Clients[i]
+		// Normalize the secret so the in-memory copy is always a SHA-256
+		// hash, never plaintext. Operators may put either the raw secret
+		// or a hex hash in config — both work, only the latter avoids
+		// leaving plaintext on disk.
+		c.ClientSecret = normalizeClientSecret(c.ClientSecret)
 		clientMap[c.ClientID] = c
 		for _, s := range c.AllowedScopes {
 			scopeSet[s] = struct{}{}
@@ -571,18 +576,15 @@ func (s *Server) authenticateClient(clientID, secret string) (*ClientConfig, boo
 	client, ok := s.clients[clientID]
 	s.mu.RUnlock()
 	if !ok {
-		_ = subtle.ConstantTimeCompare([]byte(secret), []byte(""))
+		// Constant-time dummy compare so the unknown-client path takes
+		// roughly the same time as the known-client mismatch path.
+		_ = subtle.ConstantTimeCompare([]byte(sha256Hash(secret)), []byte(""))
 		return nil, false
 	}
-	// ClientSecret is stored as SHA-256 hash for DCR clients.
-	// Static clients from config store plaintext — hash the presented secret
-	// and try both comparisons.
+	// In-memory ClientSecret is always a SHA-256 hash (normalised at load /
+	// DCR time). Hash the presented secret and constant-time compare.
 	presentedHash := sha256Hash(secret)
 	if subtle.ConstantTimeCompare([]byte(presentedHash), []byte(client.ClientSecret)) == 1 {
-		return client, true
-	}
-	// Fallback: direct comparison for static config clients.
-	if subtle.ConstantTimeCompare([]byte(secret), []byte(client.ClientSecret)) == 1 {
 		return client, true
 	}
 	return nil, false

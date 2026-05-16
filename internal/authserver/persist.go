@@ -110,14 +110,26 @@ func (s *Server) updateLastUsed(clientID string) {
 	_ = s.store.Set(clientKeyPrefix+clientID, updated)
 }
 
-// persistRefreshToken saves a refresh token → client_id mapping.
+// persistedRefreshToken is the on-disk shape: client_id + issued_at so we
+// can enforce a maximum lifetime across restarts and rotations.
+type persistedRefreshToken struct {
+	ClientID string    `json:"client_id"`
+	IssuedAt time.Time `json:"issued_at"`
+}
+
+// persistRefreshToken saves a refresh token → (client_id, issued_at) mapping.
 // The token itself is stored as a SHA-256 hash.
-func (s *Server) persistRefreshToken(token, clientID string) {
+func (s *Server) persistRefreshToken(token, clientID string, issuedAt time.Time) {
 	if s.store == nil {
 		return
 	}
 	hash := sha256Hash(token)
-	if err := s.store.Set(refreshKeyPrefix+hash, []byte(clientID)); err != nil {
+	data, err := json.Marshal(persistedRefreshToken{ClientID: clientID, IssuedAt: issuedAt})
+	if err != nil {
+		s.logger.Warn("failed to marshal refresh token", "client_id", clientID, "error", err)
+		return
+	}
+	if err := s.store.Set(refreshKeyPrefix+hash, data); err != nil {
 		s.logger.Warn("failed to persist refresh token", "client_id", clientID, "error", err)
 	}
 }
@@ -137,75 +149,13 @@ func (s *Server) loadPersistedState() {
 	if s.store == nil {
 		return
 	}
+	clientCount := s.loadPersistedClients()
+	refreshCount := s.loadPersistedRefreshTokens()
 
-	// Load DCR clients.
-	clientKeys, err := s.store.List(clientKeyPrefix)
-	if err != nil {
-		s.logger.Warn("failed to list persisted clients", "error", err)
-		return
-	}
-
-	for _, key := range clientKeys {
-		data, getErr := s.store.Get(key)
-		if getErr != nil {
-			continue
-		}
-
-		var pc persistedClient
-		if getErr = json.Unmarshal(data, &pc); getErr != nil {
-			s.logger.Warn("failed to unmarshal persisted client", "key", key, "error", getErr)
-			continue
-		}
-
-		// Register the client. We store the hash as the "secret" — authentication
-		// for persisted clients compares SHA-256(presented) against the stored hash.
-		s.clients[pc.ClientID] = &ClientConfig{
-			ClientID:      pc.ClientID,
-			ClientSecret:  pc.SecretHash, // stored as hash
-			AllowedScopes: pc.Scopes,
-			Description:   pc.ClientName,
-		}
-
-		s.oauth.dynamics[pc.ClientID] = &dynamicClient{
-			ClientID:     pc.ClientID,
-			ClientName:   pc.ClientName,
-			Scopes:       pc.Scopes,
-			RedirectURIs: pc.RedirectURIs,
-			PrismID:      pc.PrismID,
-			Label:        pc.Label,
-			CreatedAt:    pc.CreatedAt,
-			LastUsedAt:   pc.LastUsedAt,
-		}
-
-		displayName := pc.Label
-		if displayName == "" {
-			displayName = pc.ClientName
-		}
-		s.logger.Info("restored persisted client", "client_id", pc.ClientID, "name", displayName, "prism_id", pc.PrismID)
-	}
-
-	// Load refresh tokens.
-	refreshKeys, err := s.store.List(refreshKeyPrefix)
-	if err != nil {
-		s.logger.Warn("failed to list persisted refresh tokens", "error", err)
-		return
-	}
-
-	for _, key := range refreshKeys {
-		data, err := s.store.Get(key)
-		if err != nil {
-			continue
-		}
-		clientID := string(data)
-		// The key is "refresh/{hash}" — extract the hash part.
-		hash := strings.TrimPrefix(key, refreshKeyPrefix)
-		s.oauth.refresh[hash] = &refreshToken{clientID: clientID}
-	}
-
-	if len(clientKeys) > 0 || len(refreshKeys) > 0 {
+	if clientCount > 0 || refreshCount > 0 {
 		s.logger.Info("restored persisted state",
-			"clients", len(clientKeys),
-			"refresh_tokens", len(refreshKeys),
+			"clients", clientCount,
+			"refresh_tokens", refreshCount,
 		)
 	}
 
@@ -213,7 +163,131 @@ func (s *Server) loadPersistedState() {
 	s.loadPersistedDefaults()
 }
 
+// loadPersistedClients restores DCR client records from KV.
+func (s *Server) loadPersistedClients() int {
+	clientKeys, err := s.store.List(clientKeyPrefix)
+	if err != nil {
+		s.logger.Warn("failed to list persisted clients", "error", err)
+		return 0
+	}
+	for _, key := range clientKeys {
+		s.loadOnePersistedClient(key)
+	}
+	return len(clientKeys)
+}
+
+func (s *Server) loadOnePersistedClient(key string) {
+	data, err := s.store.Get(key)
+	if err != nil {
+		return
+	}
+	var pc persistedClient
+	if err := json.Unmarshal(data, &pc); err != nil {
+		s.logger.Warn("failed to unmarshal persisted client", "key", key, "error", err)
+		return
+	}
+	// In-memory ClientSecret is always a SHA-256 hash.
+	s.clients[pc.ClientID] = &ClientConfig{
+		ClientID:      pc.ClientID,
+		ClientSecret:  pc.SecretHash,
+		AllowedScopes: pc.Scopes,
+		Description:   pc.ClientName,
+	}
+	s.oauth.dynamics[pc.ClientID] = &dynamicClient{
+		ClientID:     pc.ClientID,
+		ClientName:   pc.ClientName,
+		Scopes:       pc.Scopes,
+		RedirectURIs: pc.RedirectURIs,
+		PrismID:      pc.PrismID,
+		Label:        pc.Label,
+		CreatedAt:    pc.CreatedAt,
+		LastUsedAt:   pc.LastUsedAt,
+	}
+	displayName := pc.Label
+	if displayName == "" {
+		displayName = pc.ClientName
+	}
+	s.logger.Info("restored persisted client",
+		"client_id", pc.ClientID,
+		"name", displayName,
+		"prism_id", pc.PrismID,
+	)
+}
+
+// loadPersistedRefreshTokens restores refresh-token records from KV.
+// Tokens past the max age are dropped on load.
+func (s *Server) loadPersistedRefreshTokens() int {
+	refreshKeys, err := s.store.List(refreshKeyPrefix)
+	if err != nil {
+		s.logger.Warn("failed to list persisted refresh tokens", "error", err)
+		return 0
+	}
+	loaded := 0
+	for _, key := range refreshKeys {
+		if s.loadOnePersistedRefreshToken(key) {
+			loaded++
+		}
+	}
+	return loaded
+}
+
+func (s *Server) loadOnePersistedRefreshToken(key string) bool {
+	data, err := s.store.Get(key)
+	if err != nil {
+		return false
+	}
+	// New format is JSON {client_id, issued_at}; legacy entries are
+	// raw client_id bytes — read them but leave issuedAt zero so the
+	// refresh handler rejects them and forces a re-auth.
+	var stored persistedRefreshToken
+	if jsonErr := json.Unmarshal(data, &stored); jsonErr != nil || stored.ClientID == "" {
+		stored = persistedRefreshToken{ClientID: string(data)}
+	}
+	// Drop on load if already past max age.
+	if !stored.IssuedAt.IsZero() && time.Since(stored.IssuedAt) > refreshTokenMaxAge {
+		_ = s.store.Delete(key)
+		return false
+	}
+	hash := strings.TrimPrefix(key, refreshKeyPrefix)
+	s.oauth.refresh[hash] = &refreshToken{
+		clientID: stored.ClientID,
+		issuedAt: stored.IssuedAt,
+	}
+	return true
+}
+
 func sha256Hash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+// isHexSHA256 reports whether s looks like an already-hashed SHA-256 hex
+// string (64 lowercase hex chars). Used to decide whether a static client
+// secret in the config file is plaintext (we'll hash it) or a pre-computed
+// hash (we'll use it directly).
+func isHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+			// ok
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeClientSecret returns the form that should be stored in memory and
+// compared against the SHA-256(presented) value at authentication time. A
+// pre-hashed config value is used as-is; anything else is hashed on the way
+// in so the in-memory ClientSecret is never plaintext.
+func normalizeClientSecret(s string) string {
+	if isHexSHA256(s) {
+		return s
+	}
+	return sha256Hash(s)
 }

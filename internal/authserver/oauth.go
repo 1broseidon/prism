@@ -42,10 +42,18 @@ type dynamicClient struct {
 	LastUsedAt string // RFC 3339, updated on refresh token exchange.
 }
 
-// refreshToken maps a refresh token string to the client_id it was issued for.
+// refreshToken maps a refresh token string to the client_id it was issued
+// for, plus when it was issued so we can age out stolen tokens.
 type refreshToken struct {
 	clientID string
+	issuedAt time.Time
 }
+
+// refreshTokenMaxAge bounds the lifetime of a refresh token regardless of
+// how many times it's rotated. After this, the client must re-authenticate
+// via the agent consent flow. 30 days is conservative for home-lab use;
+// shorter is safer if tokens get scraped from disk.
+const refreshTokenMaxAge = 30 * 24 * time.Hour
 
 // oauthStore holds in-memory state for DCR, authorization codes, and refresh tokens.
 type oauthStore struct {
@@ -353,6 +361,13 @@ func (s *Server) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// CSRF: double-submit cookie. Rejects cross-origin auto-submitted POSTs
+	// because SameSite=Strict on the cookie means it isn't sent on those.
+	if err := verifyConsentCSRF(r); err != nil {
+		s.writeOAuthError(w, http.StatusForbidden, "invalid_request", "csrf check failed: "+err.Error())
+		return
+	}
+
 	p := s.validateAuthorizeParams(w, r.Form)
 	if p == nil {
 		return
@@ -516,6 +531,14 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token not found or already used")
 		return
 	}
+	// Enforce absolute max age so a stolen + persisted token can't be
+	// replayed indefinitely. Tokens loaded from KV without an issuedAt
+	// (legacy entries) get zero-value, which trips this check — operators
+	// reauth those once after upgrade.
+	if rt.issuedAt.IsZero() || time.Since(rt.issuedAt) > refreshTokenMaxAge {
+		s.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token expired; re-authenticate")
+		return
+	}
 
 	// Lock order: s.oauth.mu before s.mu.
 	var prismID string
@@ -570,13 +593,14 @@ func (s *Server) issueTokenWithRefresh(w http.ResponseWriter, client *ClientConf
 		return
 	}
 
+	issuedAt := time.Now()
 	rtHash := sha256Hash(rt)
 	s.oauth.mu.Lock()
-	s.oauth.refresh[rtHash] = &refreshToken{clientID: client.ClientID}
+	s.oauth.refresh[rtHash] = &refreshToken{clientID: client.ClientID, issuedAt: issuedAt}
 	s.oauth.mu.Unlock()
 
-	// Persist refresh token (hashed) to KV store.
-	s.persistRefreshToken(rt, client.ClientID)
+	// Persist refresh token (hashed) to KV store with its issued_at.
+	s.persistRefreshToken(rt, client.ClientID, issuedAt)
 
 	s.writeJSON(w, http.StatusOK, TokenResponse{
 		AccessToken:  token,
