@@ -2,6 +2,7 @@ import { useMemo, useState } from "preact/hooks";
 import { useLocation } from "preact-iso";
 import { agents, groups, backends, defaults } from "../state";
 import { deleteJSON, putJSON } from "../api/client";
+import { withToast } from "../state/toasts";
 import { ScopeEditor } from "../components/ScopeEditor";
 import { StatusCell } from "../components/StatusCell";
 import { CopyId } from "../components/CopyId";
@@ -69,13 +70,14 @@ function DefaultsSection() {
 
   const commit = async (next: string[]) => {
     setEditing(false);
-    try {
-      await putJSON("/defaults", { default_scopes: next });
-      await defaults.refresh();
-      await agents.refresh();
-    } catch {
-      await defaults.refresh();
-    }
+    await withToast(
+      async () => {
+        await putJSON("/defaults", { default_scopes: next });
+        await defaults.refresh();
+        await agents.refresh();
+      },
+      { success: "default scopes updated" },
+    );
   };
 
   return (
@@ -165,12 +167,14 @@ function AddGroupForm({
       onCancel();
       return;
     }
-    try {
-      await putJSON(`/groups/${encodeURIComponent(n)}`, { scopes: [] });
-      onDone();
-    } catch {
-      onCancel();
-    }
+    const ok = await withToast(
+      async () => {
+        await putJSON(`/groups/${encodeURIComponent(n)}`, { scopes: [] });
+      },
+      { success: `group ${n} created` },
+    );
+    if (ok !== undefined) onDone();
+    else onCancel();
   };
   return (
     <div class="inline-form">
@@ -202,32 +206,38 @@ function GroupCard({ group }: { group: Group }) {
 
   const commit = async (next: string[]) => {
     setEditing(false);
-    try {
-      await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
-        scopes: next,
-      });
-      await groups.refresh();
-      await agents.refresh();
-    } catch {
-      await groups.refresh();
-    }
+    await withToast(
+      async () => {
+        await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
+          scopes: next,
+        });
+        await groups.refresh();
+        await agents.refresh();
+      },
+      { success: `scopes updated for ${group.name}` },
+    );
   };
 
   const remove = async () => {
     if (!confirm(`Delete group "${group.name}"?`)) return;
-    try {
-      await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
-      await groups.refresh();
-      await agents.refresh();
-    } catch {
-      // ignore
-    }
+    await withToast(
+      async () => {
+        await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
+        await groups.refresh();
+        await agents.refresh();
+      },
+      { success: `group ${group.name} deleted` },
+    );
   };
+
+  const detailHref = `/identity/groups/${encodeURIComponent(group.name)}`;
 
   if (group.source === "config") {
     return (
       <div class="group-card">
-        <span class="group-name">{group.name}</span>
+        <a href={detailHref} class="group-name group-name-link">
+          {group.name}
+        </a>
         {group.scopes.map((s) => (
           <span class="group-scope" key={s}>
             {s}
@@ -255,7 +265,9 @@ function GroupCard({ group }: { group: Group }) {
 
   return (
     <div class="group-card">
-      <span class="group-name">{group.name}</span>
+      <a href={detailHref} class="group-name group-name-link">
+        {group.name}
+      </a>
       {group.scopes.length === 0 ? (
         <span class="hint-text">no scopes</span>
       ) : (
@@ -292,12 +304,16 @@ function AgentsSection({ agents: ag }: { agents: Agent[] }) {
   }, [ag, query]);
 
   const cleanStale = async () => {
-    try {
-      await deleteJSON("/agents/stale");
-      await agents.refresh();
-    } catch {
-      // ignore
-    }
+    await withToast(
+      async () => {
+        const r = (await deleteJSON("/agents/stale")) as {
+          removed?: number;
+        };
+        await agents.refresh();
+        return r;
+      },
+      { success: "stale agents removed" },
+    );
   };
 
   return (

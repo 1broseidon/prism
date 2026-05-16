@@ -2,6 +2,7 @@ import { useState, useMemo } from "preact/hooks";
 import { useLocation, useRoute } from "preact-iso";
 import { backends, events } from "../state";
 import { deleteJSON, postJSON } from "../api/client";
+import { withToast } from "../state/toasts";
 import type {
   AddBackendBody,
   Backend,
@@ -190,7 +191,24 @@ function MetaItem({
 
 function ToolsSection({ backend }: { backend: Backend }) {
   const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
   const tools = backend.tools || [];
+  const ev = events.data.value || [];
+
+  // Per-tool call statistics computed from the events buffer.
+  const stats = useMemo(() => {
+    const m = new Map<string, { count: number; denied: number; lastTs?: string }>();
+    for (const t of tools) m.set(t.name, { count: 0, denied: 0 });
+    for (const e of ev) {
+      const namespaced = `${e.namespace}__${e.tool}`;
+      const s = m.get(namespaced);
+      if (!s) continue;
+      s.count++;
+      if (!e.allowed) s.denied++;
+      if (!s.lastTs) s.lastTs = e.ts;
+    }
+    return m;
+  }, [tools, ev]);
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
@@ -226,7 +244,13 @@ function ToolsSection({ backend }: { backend: Backend }) {
       ) : (
         <div class="tools-list">
           {filtered.map((t) => (
-            <ToolRow key={t.name} tool={t} />
+            <ToolRow
+              key={t.name}
+              tool={t}
+              stats={stats.get(t.name)}
+              expanded={expanded === t.name}
+              onToggle={() => setExpanded(expanded === t.name ? null : t.name)}
+            />
           ))}
         </div>
       )}
@@ -234,14 +258,70 @@ function ToolsSection({ backend }: { backend: Backend }) {
   );
 }
 
-function ToolRow({ tool }: { tool: BackendTool }) {
+function ToolRow({
+  tool,
+  stats,
+  expanded,
+  onToggle,
+}: {
+  tool: BackendTool;
+  stats?: { count: number; denied: number; lastTs?: string };
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const desc = tool.description || "";
+  const short =
+    !expanded && desc.length > 240 ? desc.slice(0, 240) + "…" : desc;
+
   return (
-    <div class="tool-row">
-      <div class="tool-name">{tool.name}</div>
-      {tool.description ? (
-        <div class="tool-desc">{tool.description}</div>
+    <div
+      class={expanded ? "tool-row tool-row-expanded" : "tool-row"}
+      onClick={onToggle}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onToggle();
+        }
+      }}
+    >
+      <div class="tool-row-header">
+        <div class="tool-name">{tool.name}</div>
+        {stats && stats.count > 0 && (
+          <div class="tool-count">
+            <span class="tool-count-value">{stats.count}</span>
+            <span class="tool-count-label">
+              call{stats.count === 1 ? "" : "s"}
+              {stats.denied > 0 && ` · ${stats.denied} denied`}
+            </span>
+          </div>
+        )}
+      </div>
+      {desc ? (
+        <div class="tool-desc">{short}</div>
       ) : (
         <div class="tool-desc tool-desc-empty">no description provided</div>
+      )}
+      {expanded && stats && (
+        <div class="tool-stats">
+          <div class="tool-stat">
+            <div class="tool-stat-label">calls (recent)</div>
+            <div class="tool-stat-value">{stats.count}</div>
+          </div>
+          <div class="tool-stat">
+            <div class="tool-stat-label">denied</div>
+            <div class="tool-stat-value">{stats.denied}</div>
+          </div>
+          <div class="tool-stat">
+            <div class="tool-stat-label">last call</div>
+            <div class="tool-stat-value">
+              {stats.lastTs
+                ? new Date(stats.lastTs).toLocaleTimeString()
+                : "—"}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -254,19 +334,20 @@ function CredentialSection({ backend }: { backend: Backend }) {
 
   const save = async () => {
     setError(null);
-    try {
-      const body: AddBackendBody = { url: backend.url || "" };
-      const credInput = buildCredInput(cred);
-      body.credential = credInput ?? null;
-      await postJSON(
-        `/backends/${encodeURIComponent(backend.id)}`,
-        body,
-      );
-      await backends.refresh();
-      setEditing(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+    const result = await withToast(
+      async () => {
+        const body: AddBackendBody = { url: backend.url || "" };
+        const credInput = buildCredInput(cred);
+        body.credential = credInput ?? null;
+        await postJSON(
+          `/backends/${encodeURIComponent(backend.id)}`,
+          body,
+        );
+        await backends.refresh();
+      },
+      { success: `credential saved for ${backend.id}` },
+    );
+    if (result !== undefined) setEditing(false);
   };
 
   const c = backend.credential;
@@ -497,14 +578,14 @@ function DangerSection({
     )
       return;
     setBusy(true);
-    try {
-      await deleteJSON(`/backends/${encodeURIComponent(backendId)}`);
-      await onRemoved();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    await withToast(
+      async () => {
+        await deleteJSON(`/backends/${encodeURIComponent(backendId)}`);
+        await onRemoved();
+      },
+      { success: `backend ${backendId} removed` },
+    );
+    setBusy(false);
   };
 
   return (

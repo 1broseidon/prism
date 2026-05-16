@@ -2,6 +2,7 @@ import { useState } from "preact/hooks";
 import { useLocation, useRoute } from "preact-iso";
 import { agents, groups, backends, events } from "../state";
 import { deleteJSON, putJSON } from "../api/client";
+import { withToast } from "../state/toasts";
 import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
 import { ScopeList } from "../components/ScopeList";
 import { StatusCell } from "../components/StatusCell";
@@ -22,8 +23,13 @@ function visibleScopes(scopes: string[] | undefined): string[] {
 }
 
 async function setPolicy(prismID: string, p: AgentPolicy) {
-  await putJSON(`/agents/${encodeURIComponent(prismID)}/policy`, p);
-  await agents.refresh();
+  await withToast(
+    async () => {
+      await putJSON(`/agents/${encodeURIComponent(prismID)}/policy`, p);
+      await agents.refresh();
+    },
+    { success: "policy updated" },
+  );
 }
 
 export function AgentDetail() {
@@ -532,14 +538,14 @@ function DangerSection({
     )
       return;
     setBusy(true);
-    try {
-      await deleteJSON(`/agents/${encodeURIComponent(agent.client_id)}`);
-      await onRemoved();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    await withToast(
+      async () => {
+        await deleteJSON(`/agents/${encodeURIComponent(agent.client_id)}`);
+        await onRemoved();
+      },
+      { success: `agent ${agent.label || agent.client_id} removed` },
+    );
+    setBusy(false);
   };
 
   return (

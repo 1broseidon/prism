@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect } from "preact/hooks";
 import { useLocation } from "preact-iso";
 import { events, agents } from "../state";
+import { toast } from "../state/toasts";
 import { fmtTimeOfDay, fmtAge, splitLabel } from "../util/time";
 import type { AuditEvent } from "../api/types";
 
@@ -96,6 +97,47 @@ export function Audit() {
   const hasActiveFilter =
     filterAgent || filterNamespace || status !== "all" || query;
 
+  const exportCSV = () => {
+    if (filtered.length === 0) {
+      toast.info("nothing to export with current filters");
+      return;
+    }
+    const escape = (s: string) =>
+      `"${String(s).replace(/"/g, '""')}"`;
+    const header = [
+      "timestamp",
+      "agent_client_id",
+      "agent_label",
+      "namespace",
+      "tool",
+      "status",
+      "latency_ms",
+    ].join(",");
+    const rows = filtered.map((e) =>
+      [
+        escape(e.ts),
+        escape(e.client_id),
+        escape(nameCache.get(e.client_id) || ""),
+        escape(e.namespace),
+        escape(e.tool),
+        e.allowed ? "allowed" : "denied",
+        e.allowed ? String(e.latency_ms) : "",
+      ].join(","),
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `prism-audit-${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success(`exported ${filtered.length} events`);
+  };
+
   return (
     <div>
       <div class="page-header">
@@ -105,6 +147,15 @@ export function Audit() {
             {filtered.length} of {ev.length} events ·{" "}
             {RANGE_LABELS[range]} window
           </div>
+        </div>
+        <div class="page-header-actions">
+          <button
+            class="audit-export"
+            onClick={exportCSV}
+            disabled={filtered.length === 0}
+          >
+            export csv
+          </button>
         </div>
       </div>
 

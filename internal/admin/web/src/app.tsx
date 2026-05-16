@@ -1,10 +1,13 @@
 import { LocationProvider, Router, Route } from "preact-iso";
 import { Layout } from "./components/Layout";
+import { Toaster } from "./components/Toaster";
+import { CommandPalette } from "./components/CommandPalette";
 import { Overview } from "./pages/Overview";
 import { Servers } from "./pages/Servers";
 import { ServerDetail } from "./pages/ServerDetail";
 import { Identity } from "./pages/Identity";
 import { AgentDetail } from "./pages/AgentDetail";
+import { GroupDetail } from "./pages/GroupDetail";
 import { Audit } from "./pages/Audit";
 
 export function App() {
@@ -17,10 +20,13 @@ export function App() {
           <Route path="/servers/:id" component={ServerDetail} />
           <Route path="/identity" component={Identity} />
           <Route path="/identity/agents/:prismId" component={AgentDetail} />
+          <Route path="/identity/groups/:name" component={GroupDetail} />
           <Route path="/audit" component={Audit} />
           <Route default component={NotFound} />
         </Router>
       </Layout>
+      <Toaster />
+      <CommandPalette />
     </LocationProvider>
   );
 }
