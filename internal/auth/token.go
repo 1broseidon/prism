@@ -326,22 +326,53 @@ func newStaticJWKSKeySet(data []byte) *jwksKeySet {
 		if k.Kty != "RSA" || k.Use != "sig" {
 			continue
 		}
-		nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
+		pubKey, err := parseRSAJWK(k.N, k.E)
 		if err != nil {
 			continue
-		}
-		eBytes, err := base64.RawURLEncoding.DecodeString(k.E)
-		if err != nil {
-			continue
-		}
-		pubKey := &rsa.PublicKey{
-			N: new(big.Int).SetBytes(nBytes),
-			E: int(new(big.Int).SetBytes(eBytes).Int64()),
 		}
 		ks.keys[k.Kid] = pubKey
 	}
 
 	return ks
+}
+
+// rsaMaxExponentBytes caps the size of the JWK `e` field. RSA public
+// exponents in practice are always 65537 (0x010001 — 3 bytes). 8 bytes is
+// already generous; anything bigger is hostile or buggy input and would
+// either panic on Int64() or silently truncate. We refuse instead.
+const rsaMaxExponentBytes = 8
+
+// parseRSAJWK builds an *rsa.PublicKey from JWK base64url `n` and `e`
+// strings. Returns an error on malformed input or oversize exponent.
+func parseRSAJWK(nStr, eStr string) (*rsa.PublicKey, error) {
+	nBytes, err := base64.RawURLEncoding.DecodeString(nStr)
+	if err != nil {
+		return nil, fmt.Errorf("decode jwk.n: %w", err)
+	}
+	eBytes, err := base64.RawURLEncoding.DecodeString(eStr)
+	if err != nil {
+		return nil, fmt.Errorf("decode jwk.e: %w", err)
+	}
+	if len(eBytes) == 0 {
+		return nil, fmt.Errorf("jwk.e is empty")
+	}
+	if len(eBytes) > rsaMaxExponentBytes {
+		return nil, fmt.Errorf("jwk.e too large: %d bytes (max %d)", len(eBytes), rsaMaxExponentBytes)
+	}
+	e := new(big.Int).SetBytes(eBytes)
+	if !e.IsInt64() {
+		return nil, fmt.Errorf("jwk.e does not fit in int64")
+	}
+	eInt := e.Int64()
+	// Standard library's rsa.PublicKey.E is an int. On 32-bit platforms a
+	// huge legitimate-but-rare exponent could overflow; reject explicitly.
+	if eInt < 0 || eInt > int64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("jwk.e out of range for int")
+	}
+	return &rsa.PublicKey{
+		N: new(big.Int).SetBytes(nBytes),
+		E: int(eInt),
+	}, nil
 }
 
 func (ks *jwksKeySet) GetKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
@@ -418,21 +449,9 @@ func (ks *jwksKeySet) refresh(ctx context.Context) error {
 			continue
 		}
 
-		nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
+		pubKey, err := parseRSAJWK(k.N, k.E)
 		if err != nil {
 			continue
-		}
-		eBytes, err := base64.RawURLEncoding.DecodeString(k.E)
-		if err != nil {
-			continue
-		}
-
-		n := new(big.Int).SetBytes(nBytes)
-		e := new(big.Int).SetBytes(eBytes)
-
-		pubKey := &rsa.PublicKey{
-			N: n,
-			E: int(e.Int64()),
 		}
 		newKeys[k.Kid] = pubKey
 	}
