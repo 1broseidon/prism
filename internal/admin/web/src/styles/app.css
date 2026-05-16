@@ -2260,3 +2260,375 @@ tr:hover .remove-btn {
   gap: 4px;
 }
 
+/* ---------- Mobile drawer toggle + scrim (desktop: hidden) ---------- */
+
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+  width: 40px;
+  height: 40px;
+  margin-right: 4px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  border-radius: 6px;
+  -webkit-tap-highlight-color: transparent;
+}
+.nav-toggle:hover {
+  background: var(--hover);
+}
+.nav-toggle-bar {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: var(--fg);
+  border-radius: 2px;
+  transition:
+    transform 0.18s ease,
+    opacity 0.12s ease;
+}
+.shell-nav-open .nav-toggle-bar:nth-child(1) {
+  transform: translateY(6px) rotate(45deg);
+}
+.shell-nav-open .nav-toggle-bar:nth-child(2) {
+  opacity: 0;
+}
+.shell-nav-open .nav-toggle-bar:nth-child(3) {
+  transform: translateY(-6px) rotate(-45deg);
+}
+
+.nav-scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.55);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+/* ---------- Mobile breakpoint ---------- */
+
+@media (max-width: 720px) {
+  body {
+    /* iOS won't zoom inputs ≥16px. We can't apply this only on inputs because
+       the rule applies on focus, so set it as the base body size on mobile
+       and let the design rescale around it via the existing px values. */
+    font-size: 14px;
+  }
+  /* Stop content scroll under the drawer */
+  body[data-nav-open="true"] {
+    overflow: hidden;
+  }
+
+  /* Shell becomes a flow with a top bar; nav slides in from the left. */
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: 56px 1fr;
+    grid-template-areas:
+      "logo"
+      "content";
+    padding-top: env(safe-area-inset-top, 0);
+  }
+
+  .shell-logo {
+    grid-area: logo;
+    padding: 0 16px;
+    gap: 10px;
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+  }
+  .shell-logo h1 {
+    font-size: 16px;
+  }
+
+  .nav-toggle {
+    display: flex;
+  }
+
+  /* Header collapses into a single subline. Strip version/uptime — they
+     belong on the Overview page where there's room. Keep status + identity. */
+  .shell-header {
+    display: none;
+  }
+
+  /* Drawer */
+  .shell-nav {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 50;
+    width: min(280px, 86vw);
+    padding: 16px 0 calc(16px + env(safe-area-inset-bottom, 0));
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    border-right: 1px solid var(--line);
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.4);
+  }
+  .shell-nav-open .shell-nav {
+    transform: translateX(0);
+  }
+  .nav-link {
+    /* ~44px tap target */
+    padding: 14px 22px;
+    font-size: 14px;
+  }
+  .nav-section-label {
+    padding: 8px 22px 8px;
+  }
+  .nav-footer {
+    padding: 12px 0 0;
+  }
+  .nav-footer .nav-link {
+    padding-top: 14px;
+    padding-bottom: 14px;
+  }
+
+  /* Scrim */
+  .shell-nav-open .nav-scrim {
+    display: block;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Reflow the content area */
+  .shell-content {
+    padding: 20px 16px calc(40px + env(safe-area-inset-bottom, 0));
+  }
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .page-title {
+    font-size: 24px;
+  }
+  .section {
+    margin-bottom: 32px;
+  }
+  .section-header {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+  .section-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .search-input {
+    width: 100%;
+  }
+
+  /* Tap-friendly buttons (still readable, not chunky) */
+  .section-btn,
+  .danger-btn,
+  .primary-btn,
+  .save-btn,
+  .cancel-btn {
+    min-height: 40px;
+    padding: 10px 14px;
+  }
+
+  /* Cards a bit tighter */
+  .card {
+    padding: 14px;
+  }
+
+  /* Config form: single column */
+  .config-form {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .config-status-row {
+    flex-wrap: wrap;
+  }
+  .config-actions {
+    flex-wrap: wrap;
+  }
+  .rule-matchers {
+    grid-template-columns: 1fr;
+  }
+
+  /* Inputs: 16px to defeat iOS zoom-on-focus */
+  .config-input,
+  .search-input,
+  input[type="text"],
+  input[type="password"],
+  input[type="search"],
+  input[type="email"],
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  /* Agent / group rows: stack metadata under name */
+  .agent-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 14px;
+  }
+  .agent-row-main {
+    width: 100%;
+  }
+  .agent-row-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .agent-name-row {
+    flex-wrap: wrap;
+  }
+  .group-card {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .meta-row {
+    flex-wrap: wrap;
+    gap: 12px 18px;
+  }
+
+  /* Audit list: collapse the grid columns so the row stacks vertically.
+     Header becomes hidden — the row labels itself with inline metadata. */
+  .audit-table-header {
+    display: none;
+  }
+  .audit-row {
+    grid-template-columns: 18px 1fr auto;
+    grid-template-areas:
+      "pip  agent latency"
+      "pip  tool  time";
+    align-items: start;
+    gap: 4px 12px;
+    padding: 14px 16px;
+  }
+  .audit-status {
+    grid-area: pip;
+    align-self: center;
+  }
+  .audit-agent {
+    grid-area: agent;
+    font-weight: 600;
+    color: var(--fg-emphasis);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .audit-tool {
+    grid-area: tool;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .audit-time {
+    grid-area: time;
+    text-align: right;
+    font-size: 10px;
+  }
+  .audit-time-rel {
+    display: inline;
+    margin-left: 6px;
+  }
+  .audit-latency {
+    grid-area: latency;
+    text-align: right;
+    color: var(--muted);
+  }
+  .audit-controls {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .audit-stats {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .audit-select {
+    min-height: 40px;
+  }
+
+  /* Toaster sits above the home indicator on iOS */
+  .toaster {
+    bottom: calc(16px + env(safe-area-inset-bottom, 0));
+    left: 16px;
+    right: 16px;
+  }
+
+  /* Tile grid: tighten card padding to avoid wasted vertical space */
+  .tile {
+    padding: 16px 18px;
+  }
+  .tile-value {
+    font-size: 28px;
+  }
+
+  /* Server rows: stack right-side stats under the main info */
+  .server-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 14px;
+  }
+  .server-row-stats {
+    gap: 18px;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .server-row-meta {
+    margin-left: 0;
+  }
+  .server-row-url {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .server-row-chevron {
+    align-self: flex-end;
+    margin-top: -28px;
+  }
+
+  /* Tool rows: drop chunky horizontal padding */
+  .tool-row {
+    padding: 12px 14px;
+  }
+
+  /* Detail breadcrumb wraps + becomes scannable */
+  .detail-breadcrumb {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .detail-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  /* Login card: full-width on phones */
+  .login-card {
+    width: 100%;
+    max-width: none;
+    padding: 28px 20px;
+  }
+}
+
+/* Very narrow phones */
+@media (max-width: 380px) {
+  .shell-content {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .page-title {
+    font-size: 22px;
+  }
+  .meta-row {
+    gap: 10px 14px;
+  }
+}
