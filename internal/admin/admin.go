@@ -43,9 +43,11 @@ type BridgeInfoProvider interface {
 
 // NetworkSettingsProvider exposes runtime network knobs read off the gateway,
 // including whether X-Forwarded-* headers should be trusted when deriving
-// OAuth callbacks from the inbound request.
+// OAuth callbacks from the inbound request, and which host names from those
+// headers are accepted.
 type NetworkSettingsProvider interface {
 	TrustProxyHeaders() bool
+	AllowedForwardedHosts() []string
 }
 
 // API exposes admin endpoints.
@@ -172,6 +174,13 @@ func (a *API) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	// Per-IP login rate limit applies even in open mode so a misbehaving
+	// client can't flood /auth/login. Service-level handler then either
+	// runs the OIDC redirect or 404s when auth is disabled.
+	if a.auth != nil && !a.auth.LoginAllowed(r) {
+		http.Error(w, "too many login attempts; try again in a moment", http.StatusTooManyRequests)
+		return
+	}
 	a.auth.Get().HandleLogin(w, r)
 }
 
@@ -199,18 +208,17 @@ func (a *API) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	a.handleRemoveAgent(w, r)
 }
 
-// isPolicyPath returns true if the URL path matches /agents/{id}/policy.
+// isPolicyPath returns true iff the URL path is exactly /agents/{id}/policy
+// where {id} matches isValidID. Previous suffix-based check was permissive —
+// "/agents/foo/bar/policy" and "/agents/x/my-policy" both matched.
 func isPolicyPath(path string) bool {
-	// Path: /agents/{prism_id}/policy
-	trimmed := path
-	if trimmed != "" && trimmed[len(trimmed)-1] == '/' {
-		trimmed = trimmed[:len(trimmed)-1]
+	const prefix = "/agents/"
+	const suffix = "/policy"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
 	}
-	return len(trimmed) > len("/agents/") && hasSuffix(trimmed, "/policy")
-}
-
-func hasSuffix(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+	id := path[len(prefix) : len(path)-len(suffix)]
+	return isValidID(id)
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, _ *http.Request) {

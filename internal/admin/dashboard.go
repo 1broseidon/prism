@@ -91,8 +91,8 @@ func (a *API) handleRemoveAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/agents/")
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent id required"})
+	if !isValidID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid agent id"})
 		return
 	}
 	if !a.removeFn(id) {

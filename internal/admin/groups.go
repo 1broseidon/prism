@@ -23,8 +23,8 @@ func (a *API) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := strings.TrimPrefix(r.URL.Path, "/groups/")
-	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group name required"})
+	if !isValidID(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid group name"})
 		return
 	}
 
@@ -47,8 +47,8 @@ func (a *API) handleSetGroup(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 
 	name := strings.TrimPrefix(r.URL.Path, "/groups/")
-	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group name required"})
+	if !isValidID(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid group name"})
 		return
 	}
 
@@ -84,8 +84,8 @@ func (a *API) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := strings.TrimPrefix(r.URL.Path, "/groups/")
-	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group name required"})
+	if !isValidID(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid group name"})
 		return
 	}
 

@@ -39,8 +39,8 @@ func (a *API) handleAgentByPrismID(w http.ResponseWriter, r *http.Request) {
 	prismID := strings.TrimPrefix(r.URL.Path, "/agents/")
 	// Strip trailing /policy if present (this handler is for the agent, not policy).
 	prismID = strings.TrimSuffix(prismID, "/policy")
-	if prismID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prism_id required"})
+	if !isValidID(prismID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid prism_id"})
 		return
 	}
 
@@ -65,8 +65,8 @@ func (a *API) handleSetAgentPolicy(w http.ResponseWriter, r *http.Request) {
 	// Extract prism_id from path: /agents/{prism_id}/policy
 	path := strings.TrimPrefix(r.URL.Path, "/agents/")
 	prismID := strings.TrimSuffix(path, "/policy")
-	if prismID == "" || prismID == path {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/policy"})
+	if prismID == path || !isValidID(prismID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/policy with a valid prism_id"})
 		return
 	}
 
@@ -98,8 +98,8 @@ func (a *API) handleDeleteAgentPolicy(w http.ResponseWriter, r *http.Request) {
 
 	path := strings.TrimPrefix(r.URL.Path, "/agents/")
 	prismID := strings.TrimSuffix(path, "/policy")
-	if prismID == "" || prismID == path {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/policy"})
+	if prismID == path || !isValidID(prismID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/policy with a valid prism_id"})
 		return
 	}
 

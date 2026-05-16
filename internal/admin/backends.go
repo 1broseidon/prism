@@ -67,26 +67,58 @@ type BackendManager interface {
 // the configured fallback.
 //
 // X-Forwarded-Proto / X-Forwarded-Host are honored only when trustProxy is
-// true — otherwise a malicious client could inject those headers to redirect
-// OAuth callbacks to an attacker-controlled host.
-func callbackBaseFromRequest(r *http.Request, trustProxy bool) string {
+// true AND the forwarded host is in the operator's allowlist (currently the
+// host portion of admin_public_url) — otherwise a malicious client behind a
+// trusted reverse proxy could still inject a foreign host header and redirect
+// OAuth callbacks to an attacker-controlled domain.
+func callbackBaseFromRequest(r *http.Request, trustProxy bool, allowedHosts []string) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
 	host := r.Host
 	if trustProxy {
-		if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+		if p := r.Header.Get("X-Forwarded-Proto"); p != "" && (p == "http" || p == "https") {
 			scheme = p
 		}
 		if h := r.Header.Get("X-Forwarded-Host"); h != "" {
-			host = h
+			// h may be a comma-separated list when chained; take the first.
+			if i := strings.IndexByte(h, ','); i >= 0 {
+				h = strings.TrimSpace(h[:i])
+			}
+			if isAllowedHost(h, allowedHosts) {
+				host = h
+			}
 		}
 	}
 	if host == "" {
 		return ""
 	}
 	return scheme + "://" + host
+}
+
+// isAllowedHost reports whether candidate matches one of the allowed hosts.
+// Empty allowlist means "no proxy host substitution is permitted" — the
+// inbound r.Host wins. Matching is case-insensitive on host only (port
+// agnostic) so reverse proxies on a non-standard port still validate.
+func isAllowedHost(candidate string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return false
+	}
+	cand := strings.ToLower(stripPort(candidate))
+	for _, a := range allowed {
+		if cand == strings.ToLower(stripPort(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripPort(hostport string) string {
+	if i := strings.LastIndexByte(hostport, ':'); i > strings.LastIndexByte(hostport, ']') {
+		return hostport[:i]
+	}
+	return hostport
 }
 
 // OAuthProberOptions carries optional inputs to a probe: a host-aware
@@ -133,8 +165,8 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 
 	// Extract backend ID from path: POST /backends/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/backends/")
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "backend id is required in path: POST /backends/{id}"})
+	if !isValidID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "backend id must be 1-64 chars of [A-Za-z0-9_.-] and cannot start with '-' or '.'"})
 		return
 	}
 
@@ -155,11 +187,13 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 	if cfg.URL != "" && cfg.Credential == nil {
 		if prober, ok := a.backendMgr.(OAuthProber); ok {
 			trustProxy := false
+			var allowedHosts []string
 			if np, ok := a.backendMgr.(NetworkSettingsProvider); ok {
 				trustProxy = np.TrustProxyHeaders()
+				allowedHosts = np.AllowedForwardedHosts()
 			}
 			opts := OAuthProberOptions{
-				CallbackBase: callbackBaseFromRequest(r, trustProxy),
+				CallbackBase: callbackBaseFromRequest(r, trustProxy, allowedHosts),
 				ClientID:     cfg.OAuthClientID,
 				ClientSecret: cfg.OAuthClientSecret,
 			}
@@ -209,8 +243,8 @@ func (a *API) handleRemoveBackend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := strings.TrimPrefix(r.URL.Path, "/backends/")
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "backend id is required in path: DELETE /backends/{id}"})
+	if !isValidID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid backend id"})
 		return
 	}
 
@@ -228,7 +262,7 @@ func (a *API) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	// Path: /backends/{id}/auth-status
 	path := strings.TrimPrefix(r.URL.Path, "/backends/")
 	id := strings.TrimSuffix(path, "/auth-status")
-	if id == "" || id == path {
+	if id == path || !isValidID(id) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
 		return
 	}

@@ -69,9 +69,14 @@ func (a *API) handlePutAdminAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admin auth config not available", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdminAuthPayloadBytes)
 	var p adminAuthPutPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := checkPayloadLimits(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	existing, err := adminauth.LoadState(a.auth.KV())
@@ -106,9 +111,14 @@ func (a *API) handlePutAdminAuth(w http.ResponseWriter, r *http.Request) {
 // handleTestAdminAuth probes the OIDC issuer for discovery and returns the
 // authorization/token endpoints. Does not persist anything.
 func (a *API) handleTestAdminAuth(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdminAuthPayloadBytes)
 	var p adminAuthPutPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := checkPayloadLimits(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -247,3 +257,71 @@ type hasKV interface {
 }
 
 var _ hasKV = (*adminauth.Holder)(nil)
+
+// Payload guards for /config/admin-auth — well under what's reasonable, well
+// above what any human-written config needs.
+const (
+	maxAdminAuthPayloadBytes = 32 * 1024
+	maxAdminAuthFieldLen     = 1024
+	maxAdminAuthScopes       = 64
+	maxAdminAuthRules        = 64
+	maxAdminAuthMatchersPer  = 256
+)
+
+// checkPayloadLimits validates that the incoming admin-auth config payload
+// doesn't contain absurdly large fields or array lengths. Keeps a buggy or
+// compromised admin from wedging the KV / restart path.
+func checkPayloadLimits(p *adminAuthPutPayload) error {
+	fields := []string{p.Issuer, p.ClientID, p.RedirectURL, p.GroupsClaim, p.SessionTTL, p.CookieDomain}
+	if p.ClientSecret != nil {
+		fields = append(fields, *p.ClientSecret)
+	}
+	for _, f := range fields {
+		if len(f) > maxAdminAuthFieldLen {
+			return errors.New("admin_auth: field longer than max allowed")
+		}
+	}
+	if err := checkScopeLimits(p.Scopes); err != nil {
+		return err
+	}
+	if len(p.Rules) > maxAdminAuthRules {
+		return errors.New("admin_auth: too many rules")
+	}
+	for i := range p.Rules {
+		if err := checkRuleLimits(&p.Rules[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkScopeLimits(scopes []string) error {
+	if len(scopes) > maxAdminAuthScopes {
+		return errors.New("admin_auth: too many scopes")
+	}
+	for _, s := range scopes {
+		if len(s) > maxAdminAuthFieldLen {
+			return errors.New("admin_auth: scope longer than max allowed")
+		}
+	}
+	return nil
+}
+
+func checkRuleLimits(rule *config.AdminAuthRule) error {
+	if len(rule.Role) > maxAdminAuthFieldLen {
+		return errors.New("admin_auth: rule.role too long")
+	}
+	if len(rule.Emails) > maxAdminAuthMatchersPer ||
+		len(rule.Domains) > maxAdminAuthMatchersPer ||
+		len(rule.Groups) > maxAdminAuthMatchersPer {
+		return errors.New("admin_auth: too many matchers in rule")
+	}
+	for _, vals := range [][]string{rule.Emails, rule.Domains, rule.Groups} {
+		for _, v := range vals {
+			if len(v) > maxAdminAuthFieldLen {
+				return errors.New("admin_auth: rule matcher value too long")
+			}
+		}
+	}
+	return nil
+}
