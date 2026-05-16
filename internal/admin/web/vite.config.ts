@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => {
     "/metrics",
     "/oauth",
     "/auth",
+    "/config/admin-auth",
   ];
   const proxy = Object.fromEntries(apiPaths.map((p) => [p, adminURL]));
 

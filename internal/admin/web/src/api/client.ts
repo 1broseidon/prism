@@ -23,10 +23,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // keep raw text
     }
-    const msg =
-      typeof body === "object" && body && "error" in body
-        ? String((body as { error: unknown }).error)
-        : `${res.status} ${res.statusText}`;
+    let msg: string;
+    if (typeof body === "object" && body && "error" in body) {
+      msg = String((body as { error: unknown }).error);
+    } else if (typeof body === "string" && body.trim()) {
+      // Plain-text error body from http.Error — surface it directly.
+      msg = body.trim();
+    } else {
+      msg = `${res.status} ${res.statusText}`;
+    }
     throw new ApiError(res.status, body, msg);
   }
 

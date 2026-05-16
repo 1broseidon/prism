@@ -13,8 +13,9 @@ const NAV_ITEMS = [
   { href: "/servers", label: "MCP Servers" },
   { href: "/identity", label: "Identity" },
   { href: "/audit", label: "Audit" },
-  { href: "/config", label: "Configuration" },
 ];
+
+const NAV_FOOTER_ITEMS = [{ href: "/config", label: "Settings" }];
 
 export function Layout({ children }: Props) {
   const loc = useLocation();
@@ -77,6 +78,21 @@ export function Layout({ children }: Props) {
             </a>
           );
         })}
+        <div class="nav-footer">
+          {NAV_FOOTER_ITEMS.map((n) => {
+            const active =
+              path === n.href || (n.href !== "/" && path.startsWith(n.href));
+            return (
+              <a
+                key={n.href}
+                href={n.href}
+                class={active ? "nav-link active" : "nav-link"}
+              >
+                {n.label}
+              </a>
+            );
+          })}
+        </div>
       </nav>
 
       <main class="shell-content">{children}</main>
