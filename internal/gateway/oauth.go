@@ -95,10 +95,15 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	}
 
 	// Probe the backend URL for 401.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, backendURL, nil)
+	// MCP Streamable HTTP servers respond to POST, not GET. Some return 405 on
+	// GET even if they require OAuth on POST. Send a minimal MCP initialize
+	// request so the server's auth behavior is accurately detected.
+	probeBody := strings.NewReader(`{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"prism-probe","version":"0.1.0"}},"id":1}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, backendURL, probeBody)
 	if err != nil {
 		return nil, fmt.Errorf("create probe request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -112,7 +117,7 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 		return nil, nil
 	}
 
-	// Parse WWW-Authenticate header for resource_metadata URL.
+	// Parse WWW-Authenticate header for resource_metadata URL and scope.
 	wwwAuth := resp.Header[http.CanonicalHeaderKey("WWW-Authenticate")]
 	if len(wwwAuth) == 0 {
 		return nil, fmt.Errorf("401 from %s but no WWW-Authenticate header", backendURL)
@@ -121,6 +126,16 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	challenges, err := oauthex.ParseWWWAuthenticate(wwwAuth)
 	if err != nil {
 		return nil, fmt.Errorf("parse WWW-Authenticate: %w", err)
+	}
+
+	// Gap 3 (MCP auth spec §170-175): Extract scope from WWW-Authenticate challenge.
+	// Prefer challenged scopes over scopes_supported from Protected Resource Metadata.
+	var challengedScopes []string
+	for _, c := range challenges {
+		if s := c.Params["scope"]; s != "" {
+			challengedScopes = strings.Fields(s)
+			break
+		}
 	}
 
 	// Find the resource_metadata URL from challenges.
@@ -156,22 +171,45 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 		return nil, fmt.Errorf("no authorization servers in protected resource metadata for %s", backendURL)
 	}
 
-	// Discover auth server metadata (RFC 8414).
+	// Discover auth server metadata (RFC 8414 + OIDC Discovery fallback).
 	authServerIssuer := prm.AuthorizationServers[0]
 
-	// Build metadata URL from issuer.
-	issuerURL, err := url.Parse(authServerIssuer)
-	if err != nil {
-		return nil, fmt.Errorf("parse auth server issuer: %w", err)
-	}
-	asmURL := fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server", issuerURL.Scheme, issuerURL.Host)
-
-	asm, err := oauthex.GetAuthServerMeta(ctx, asmURL, authServerIssuer, nil)
+	// Gap 1 (MCP auth spec §70-79): Try multiple well-known endpoints.
+	// RFC 8414 first, then OIDC Discovery as fallback.
+	// Fetch auth server metadata with lenient issuer validation.
+	// RFC 8414 §3.3 requires the issuer in the metadata to exactly match the
+	// URL used to fetch it. However, delegated auth setups (Clerk, Auth0 proxies)
+	// commonly violate this — e.g., context7.com serves metadata with issuer
+	// "clerk.context7.com". The SDK's oauthex.GetAuthServerMeta enforces the
+	// strict check and fails on mismatch. Since the operator is manually adding
+	// a trusted backend, the impersonation risk §3.3 guards against doesn't apply.
+	// We fetch and parse the metadata ourselves, logging a warning on mismatch.
+	asm, discoveredURL, err := discoverAuthServerMeta(ctx, authServerIssuer, g.logger)
 	if err != nil {
 		return nil, fmt.Errorf("get auth server metadata: %w", err)
 	}
 	if asm == nil {
-		return nil, fmt.Errorf("auth server at %s returned no metadata", authServerIssuer)
+		return nil, fmt.Errorf("auth server at %s returned no metadata (tried RFC 8414 and OIDC Discovery)", authServerIssuer)
+	}
+	g.logger.Info("discovered auth server metadata",
+		"backend", backendID,
+		"url", discoveredURL,
+	)
+	if asm.Issuer != authServerIssuer {
+		g.logger.Warn("auth server metadata issuer mismatch (RFC 8414 §3.3) — proceeding because operator-initiated",
+			"expected", authServerIssuer,
+			"got", asm.Issuer,
+			"backend", backendID,
+		)
+	}
+
+	// Gap 4 (MCP auth spec §87-155): Check for Client ID Metadata Document support.
+	// This is a SHOULD requirement — detect and log, but fall back to DCR.
+	if asm.ClientIDMetadataDocumentSupported {
+		g.logger.Info("auth server supports Client ID Metadata Documents but Prism does not yet host one — falling back to DCR",
+			"backend", backendID,
+			"auth_server", authServerIssuer,
+		)
 	}
 
 	// Dynamic Client Registration (RFC 7591).
@@ -187,6 +225,14 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 		return nil, fmt.Errorf("dynamic client registration: %w", err)
 	}
 
+	// Gap 3 (MCP auth spec §170-175): Scope priority —
+	// 1. scope from WWW-Authenticate challenge (parsed above)
+	// 2. scopes_supported from Protected Resource Metadata
+	scopes := challengedScopes
+	if len(scopes) == 0 {
+		scopes = prm.ScopesSupported
+	}
+
 	// Build the oauth2.Config.
 	oauthCfg := &oauth2.Config{
 		ClientID:     regResp.ClientID,
@@ -197,7 +243,7 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
 		RedirectURL: callbackURL,
-		Scopes:      prm.ScopesSupported,
+		Scopes:      scopes,
 	}
 
 	// Generate PKCE and state.
@@ -235,11 +281,14 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 }
 
 // AuthURL returns the full authorization URL the operator should visit.
+// Gap 2 (MCP auth spec §183-211): Includes the resource parameter (RFC 8707)
+// identifying the MCP server being accessed.
 func (f *PendingAuthFlow) AuthURL() string {
 	return f.Config.AuthCodeURL(
 		f.State,
 		oauth2.SetAuthURLParam("code_challenge", codeChallenge(f.CodeVerifier)),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
+		oauth2.SetAuthURLParam("resource", f.ResourceURL),
 	)
 }
 
@@ -269,8 +318,10 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 	}
 
 	// Exchange code for tokens with PKCE verifier.
+	// Gap 2 (MCP auth spec §183-211): Include resource parameter (RFC 8707) in token request.
 	token, err := flow.Config.Exchange(ctx, code,
 		oauth2.SetAuthURLParam("code_verifier", flow.CodeVerifier),
+		oauth2.SetAuthURLParam("resource", flow.ResourceURL),
 	)
 	if err != nil {
 		g.setAuthStatus(flow.BackendID, "failed:"+err.Error())
@@ -377,18 +428,106 @@ func (g *Gateway) setAuthStatus(backendID, status string) {
 	afm.mu.Unlock()
 }
 
-// InitAuthFlows initializes the OAuth auth flow manager.
-// adminAddr is the admin server listen address (e.g., ":9086").
-func (g *Gateway) InitAuthFlows(adminAddr string) {
-	// Build the callback URL from the admin address.
-	host := "localhost"
-	port := strings.TrimPrefix(adminAddr, ":")
-	if !strings.HasPrefix(port, ":") && strings.Contains(adminAddr, ":") && !strings.HasPrefix(adminAddr, ":") {
-		// adminAddr is "host:port"
-		host = strings.Split(adminAddr, ":")[0]
-		port = strings.Split(adminAddr, ":")[1]
+// discoverAuthServerMeta tries multiple well-known endpoints to discover auth server
+// metadata, per MCP authorization spec §70-79.
+//
+// For issuer URLs WITH path components (e.g., https://auth.example.com/tenant1):
+//  1. https://auth.example.com/.well-known/oauth-authorization-server/tenant1
+//  2. https://auth.example.com/.well-known/openid-configuration/tenant1
+//  3. https://auth.example.com/tenant1/.well-known/openid-configuration
+//
+// For issuer URLs WITHOUT path components (e.g., https://auth.example.com):
+//  1. https://auth.example.com/.well-known/oauth-authorization-server
+//  2. https://auth.example.com/.well-known/openid-configuration
+//
+// Returns the metadata, the URL that succeeded, and any error.
+func discoverAuthServerMeta(ctx context.Context, issuer string, logger *slog.Logger) (*oauthex.AuthServerMeta, string, error) {
+	issuerURL, err := url.Parse(issuer)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse auth server issuer: %w", err)
 	}
-	callbackURL := fmt.Sprintf("http://%s:%s/oauth/callback", host, port)
+
+	// Build the list of discovery URLs to try in priority order.
+	var discoveryURLs []string
+	issuerPath := strings.TrimRight(issuerURL.Path, "/")
+
+	if issuerPath != "" && issuerPath != "/" {
+		// Issuer has a path component.
+		// 1. RFC 8414: /.well-known/oauth-authorization-server/<path>
+		discoveryURLs = append(discoveryURLs,
+			fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server%s", issuerURL.Scheme, issuerURL.Host, issuerPath))
+		// 2. OIDC Discovery: /.well-known/openid-configuration/<path>
+		discoveryURLs = append(discoveryURLs,
+			fmt.Sprintf("%s://%s/.well-known/openid-configuration%s", issuerURL.Scheme, issuerURL.Host, issuerPath))
+		// 3. OIDC Discovery (legacy): <path>/.well-known/openid-configuration
+		discoveryURLs = append(discoveryURLs,
+			fmt.Sprintf("%s://%s%s/.well-known/openid-configuration", issuerURL.Scheme, issuerURL.Host, issuerPath))
+	} else {
+		// No path component.
+		// 1. RFC 8414: /.well-known/oauth-authorization-server
+		discoveryURLs = append(discoveryURLs,
+			fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server", issuerURL.Scheme, issuerURL.Host))
+		// 2. OIDC Discovery: /.well-known/openid-configuration
+		discoveryURLs = append(discoveryURLs,
+			fmt.Sprintf("%s://%s/.well-known/openid-configuration", issuerURL.Scheme, issuerURL.Host))
+	}
+
+	for _, dURL := range discoveryURLs {
+		logger.Debug("trying auth server metadata discovery", "url", dURL)
+		asm, err := fetchAuthServerMeta(ctx, dURL)
+		if err != nil {
+			logger.Debug("auth server metadata fetch failed", "url", dURL, "error", err)
+			return nil, "", err
+		}
+		if asm != nil {
+			return asm, dURL, nil
+		}
+		// asm == nil means 4xx — try next URL.
+		logger.Debug("auth server metadata not found at URL, trying next", "url", dURL)
+	}
+
+	// All URLs returned 4xx.
+	return nil, "", nil
+}
+
+// fetchAuthServerMeta fetches OAuth 2.0 Authorization Server Metadata (RFC 8414)
+// without enforcing strict issuer matching. Returns nil if the server returns 4xx.
+func fetchAuthServerMeta(ctx context.Context, metadataURL string) (*oauthex.AuthServerMeta, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", metadataURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, metadataURL)
+	}
+
+	var asm oauthex.AuthServerMeta
+	if err := json.NewDecoder(resp.Body).Decode(&asm); err != nil {
+		return nil, fmt.Errorf("decode metadata from %s: %w", metadataURL, err)
+	}
+
+	if asm.AuthorizationEndpoint == "" || asm.TokenEndpoint == "" {
+		return nil, fmt.Errorf("metadata from %s missing required endpoints", metadataURL)
+	}
+
+	return &asm, nil
+}
+
+// adminPublicURL is the externally-reachable base URL for the admin API
+// (e.g., "http://172.16.30.90:9086").
+func (g *Gateway) InitAuthFlows(adminPublicURL string) {
+	callbackURL := adminPublicURL + "/oauth/callback"
 
 	g.authFlows = newAuthFlowManager(callbackURL, g.logger)
 

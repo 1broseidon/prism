@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -50,6 +51,23 @@ type Config struct {
 	// provider before they can reach the admin console or API. Absent →
 	// admin runs open (appropriate for trusted home-lab networks).
 	AdminAuth *AdminAuthConfig `json:"admin_auth,omitempty"`
+
+	// PublicURL is the externally-reachable base URL for the MCP gateway.
+	// Used as the OAuth issuer and in 401 resource_metadata hints.
+	// Example: "http://172.16.30.90:8080" or "https://prism.example.com".
+	// When omitted, derived from listen address or defaults to http://localhost:{port}.
+	PublicURL string `json:"public_url,omitempty"`
+
+	// AdminPublicURL is the externally-reachable base URL for the admin API.
+	// Used for OAuth callback URLs when adding backends that require OAuth.
+	// Example: "http://172.16.30.90:9086".
+	// When omitted, derived from admin address or defaults to http://localhost:{port}.
+	AdminPublicURL string `json:"admin_public_url,omitempty"`
+
+	// BridgeURL is the URL of a prism-bridge running in manage mode.
+	// When set, command-type backends added via the admin UI are delegated to the
+	// bridge instead of being spawned inside the gateway process.
+	BridgeURL string `json:"bridge_url,omitempty"`
 
 	// ShutdownTimeout is the graceful shutdown duration. Default: "10s".
 	ShutdownTimeout Duration `json:"shutdown_timeout,omitempty"`
@@ -299,6 +317,11 @@ type ServerConfig struct {
 	// HTTP transport
 	URL string
 
+	// Bridge-managed command metadata
+	OriginalCommand []string
+	BridgeManaged   bool
+	BridgeRuntime   string
+
 	// Prism extensions
 	Credentials    *CredentialConfig
 	RateLimit      *RateLimitConfig
@@ -332,6 +355,9 @@ type EmbeddedClient struct {
 type Loaded struct {
 	Listen          string
 	Admin           string
+	PublicURL       string // Externally-reachable base URL for the MCP gateway (OAuth issuer).
+	AdminPublicURL  string // Externally-reachable base URL for the admin API (OAuth callbacks).
+	BridgeURL       string
 	Servers         []ServerConfig
 	EmbeddedAuth    *EmbeddedAuthConfig
 	Store           *StoreConfig
@@ -367,10 +393,8 @@ func Load(path string) (*Loaded, error) {
 // --- Validation ---
 
 func validate(cfg *Config) error {
-	if len(cfg.McpServers) == 0 {
-		return errors.New("mcpServers: at least one server is required")
-	}
-
+	// mcpServers is optional — backends are managed via admin UI + KV store.
+	// When present, they serve as a one-time seed on first boot.
 	for name, srv := range cfg.McpServers {
 		if err := validateServer(name, &srv); err != nil {
 			return err
@@ -547,6 +571,7 @@ func expand(cfg *Config) (*Loaded, error) {
 	loaded := &Loaded{
 		Listen:          cfg.Listen,
 		Admin:           cfg.Admin,
+		BridgeURL:       strings.TrimRight(cfg.BridgeURL, "/"),
 		Store:           cfg.Store,
 		TLS:             cfg.TLS,
 		Audit:           cfg.Audit,
@@ -568,6 +593,10 @@ func expand(cfg *Config) (*Loaded, error) {
 	if loaded.ShutdownTimeout == 0 {
 		loaded.ShutdownTimeout = Duration(10 * time.Second)
 	}
+
+	// Derive PublicURL: explicit config > concrete listen address > localhost fallback.
+	loaded.PublicURL = derivePublicURL(cfg.PublicURL, loaded.Listen, cfg.TLS != nil, "public_url", "listen")
+	loaded.AdminPublicURL = derivePublicURL(cfg.AdminPublicURL, loaded.Admin, cfg.TLS != nil, "admin_public_url", "admin")
 
 	// Expand mcpServers map → ServerConfig slice.
 	for name, srv := range cfg.McpServers {
@@ -600,6 +629,32 @@ func expand(cfg *Config) (*Loaded, error) {
 	}
 
 	return loaded, nil
+}
+
+// derivePublicURL resolves the external base URL for a listener.
+// Priority: explicit config value > concrete listen address > localhost fallback.
+func derivePublicURL(explicit, listenAddr string, hasTLS bool, configField, addrField string) string {
+	scheme := "http"
+	if hasTLS {
+		scheme = "https"
+	}
+
+	// If explicitly configured, use it directly (strip trailing slash).
+	if explicit != "" {
+		return strings.TrimRight(explicit, "/")
+	}
+
+	// If listen address has a concrete host (not just ":port"), derive from it.
+	if !strings.HasPrefix(listenAddr, ":") {
+		slog.Warn("using "+addrField+" address as "+configField+" — set "+configField+" in config for production",
+			addrField, listenAddr)
+		return scheme + "://" + listenAddr
+	}
+
+	// Fallback: localhost with the listen port.
+	slog.Warn(configField+" not set — OAuth will only work from localhost",
+		addrField, listenAddr)
+	return scheme + "://localhost" + listenAddr
 }
 
 // expandPolicy converts policy agents/groups into embedded auth client configs.

@@ -14,6 +14,7 @@ type BackendConfig struct {
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	URL     string            `json:"url,omitempty"`
+	Runtime string            `json:"runtime,omitempty"`
 	// Credential config for backend authentication
 	Credential *CredentialConfig `json:"credential,omitempty"`
 }

@@ -116,9 +116,24 @@ func TestLoadWithPolicy(t *testing.T) {
 
 func TestLoadNoServers(t *testing.T) {
 	path := writeConfig(t, `{"mcpServers": {}}`)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for empty mcpServers")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected no error for empty mcpServers, got: %v", err)
+	}
+	if len(c.Servers) != 0 {
+		t.Fatalf("expected 0 servers, got %d", len(c.Servers))
+	}
+}
+
+func TestLoadNoMcpServersField(t *testing.T) {
+	// Config with no mcpServers at all is valid — backends come from admin UI.
+	path := writeConfig(t, `{"listen": ":8080"}`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected no error for missing mcpServers, got: %v", err)
+	}
+	if len(c.Servers) != 0 {
+		t.Fatalf("expected 0 servers, got %d", len(c.Servers))
 	}
 }
 
@@ -229,6 +244,113 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if c.Servers[0].Namespace != "test" {
 		t.Errorf("expected namespace to default to key 'test', got %q", c.Servers[0].Namespace)
+	}
+}
+
+func TestPublicURLExplicit(t *testing.T) {
+	path := writeConfig(t, `{
+		"public_url": "http://172.16.30.90:8080",
+		"admin_public_url": "http://172.16.30.90:9090",
+		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
+	}`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if c.PublicURL != "http://172.16.30.90:8080" {
+		t.Errorf("expected explicit public_url, got %q", c.PublicURL)
+	}
+	if c.AdminPublicURL != "http://172.16.30.90:9090" {
+		t.Errorf("expected explicit admin_public_url, got %q", c.AdminPublicURL)
+	}
+}
+
+func TestPublicURLExplicitTrailingSlash(t *testing.T) {
+	path := writeConfig(t, `{
+		"public_url": "http://172.16.30.90:8080/",
+		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
+	}`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if c.PublicURL != "http://172.16.30.90:8080" {
+		t.Errorf("expected trailing slash stripped, got %q", c.PublicURL)
+	}
+}
+
+func TestPublicURLConcreteListenAddress(t *testing.T) {
+	path := writeConfig(t, `{
+		"listen": "192.168.1.10:8080",
+		"admin": "192.168.1.10:9090",
+		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
+	}`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if c.PublicURL != "http://192.168.1.10:8080" {
+		t.Errorf("expected derived public_url from listen, got %q", c.PublicURL)
+	}
+	if c.AdminPublicURL != "http://192.168.1.10:9090" {
+		t.Errorf("expected derived admin_public_url from admin, got %q", c.AdminPublicURL)
+	}
+}
+
+func TestPublicURLLocalhostFallback(t *testing.T) {
+	path := writeConfig(t, `{
+		"listen": ":8080",
+		"admin": ":9090",
+		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
+	}`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if c.PublicURL != "http://localhost:8080" {
+		t.Errorf("expected localhost fallback, got %q", c.PublicURL)
+	}
+	if c.AdminPublicURL != "http://localhost:9090" {
+		t.Errorf("expected localhost fallback for admin, got %q", c.AdminPublicURL)
+	}
+}
+
+func TestPublicURLDefaultPortFallback(t *testing.T) {
+	// No listen/admin specified at all — defaults to :8080/:9086
+	path := writeConfig(t, `{
+		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
+	}`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if c.PublicURL != "http://localhost:8080" {
+		t.Errorf("expected localhost:8080 fallback, got %q", c.PublicURL)
+	}
+	if c.AdminPublicURL != "http://localhost:9086" {
+		t.Errorf("expected localhost:9086 fallback, got %q", c.AdminPublicURL)
+	}
+}
+
+func TestPublicURLWithTLS(t *testing.T) {
+	path := writeConfig(t, `{
+		"listen": "0.0.0.0:443",
+		"tls": { "cert": "/etc/tls/cert.pem", "key": "/etc/tls/key.pem" },
+		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
+	}`)
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	// Concrete address + TLS should produce https:// scheme
+	if c.PublicURL != "https://0.0.0.0:443" {
+		t.Errorf("expected https scheme with TLS, got %q", c.PublicURL)
 	}
 }
 

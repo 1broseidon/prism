@@ -89,12 +89,13 @@ func runServe() {
 
 	// Give the gateway access to the KV store for persisting runtime configs.
 	gw.SetStore(kvStore)
+	gw.SetBridgeURL(cfg.BridgeURL)
 	gw.LoadPersistedCredentials()
 
 	// Initialize OAuth client support for upstream MCP servers that require authentication.
 	// This must happen after SetStore (needs KV for persisted tokens) and before LoadPersistedBackends
 	// (so OAuth credentials are registered before backends try to connect).
-	oauthCallback := gw.SetupOAuth(cfg.Admin)
+	oauthCallback := gw.SetupOAuth(cfg.AdminPublicURL)
 
 	gw.LoadPersistedBackends(ctx)
 
@@ -595,8 +596,8 @@ func reloadConfig(configPath string, gw *gateway.Gateway, authSrv *authserver.Se
 	}
 
 	newIDs := make(map[string]struct{}, len(newCfg.Servers))
-	for _, s := range newCfg.Servers {
-		newIDs[s.ID] = struct{}{}
+	for i := range newCfg.Servers {
+		newIDs[newCfg.Servers[i].ID] = struct{}{}
 	}
 
 	// Remove backends that no longer exist in config.

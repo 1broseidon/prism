@@ -35,6 +35,12 @@ type GroupManager interface {
 	SetDefaultScopes(scopes []string) error
 }
 
+// BridgeInfoProvider is implemented by backend managers that can report
+// whether a prism-bridge `manage` endpoint is configured.
+type BridgeInfoProvider interface {
+	BridgeURL() string
+}
+
 // API exposes admin endpoints.
 type API struct {
 	statusFn             func() any
@@ -205,12 +211,17 @@ func (a *API) handleBackends(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *API) handleInfo(w http.ResponseWriter, _ *http.Request) {
+	bridgeConfigured := false
+	if provider, ok := a.backendMgr.(BridgeInfoProvider); ok && provider.BridgeURL() != "" {
+		bridgeConfigured = true
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":       "prism",
-		"version":    "0.1.0",
-		"go_version": runtime.Version(),
-		"uptime":     time.Since(a.startedAt).String(),
-		"goroutines": runtime.NumGoroutine(),
+		"name":              "prism",
+		"version":           "0.1.0",
+		"go_version":        runtime.Version(),
+		"uptime":            time.Since(a.startedAt).String(),
+		"goroutines":        runtime.NumGoroutine(),
+		"bridge_configured": bridgeConfigured,
 	})
 }
 

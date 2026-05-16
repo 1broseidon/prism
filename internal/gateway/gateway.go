@@ -61,6 +61,7 @@ type Gateway struct {
 	kvStore        store.Store         // optional KV store for persisting runtime credential configs
 	policyResolver auth.PolicyResolver // live policy resolution, bypasses stale session context
 	authFlows      any                 //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
+	bridgeURL      string
 }
 
 // New creates a new Gateway.
@@ -106,7 +107,10 @@ func (g *Gateway) NotifyToolsChanged() {
 	// The MCP SDK doesn't expose a public method to send arbitrary notifications.
 	// Adding and immediately removing a sentinel tool triggers changeAndNotify
 	// for notificationToolListChanged, which debounces and sends to all sessions.
-	sentinel := &mcp.Tool{Name: "__prism_policy_refresh"}
+	sentinel := &mcp.Tool{
+		Name:        "__prism_policy_refresh",
+		InputSchema: map[string]any{"type": "object"},
+	}
 	g.server.AddTool(sentinel, nil)
 	g.server.RemoveTools(sentinel.Name)
 	g.logger.Info("sent tools/list_changed notification to all sessions")
@@ -129,16 +133,28 @@ func (g *Gateway) SetStore(s store.Store) {
 	g.kvStore = s
 }
 
+// SetBridgeURL configures the prism-bridge manage endpoint used for delegated command backends.
+func (g *Gateway) SetBridgeURL(url string) {
+	g.bridgeURL = strings.TrimRight(url, "/")
+}
+
+// BridgeURL returns the configured prism-bridge manage URL, if any.
+func (g *Gateway) BridgeURL() string {
+	return g.bridgeURL
+}
+
 // KV key prefixes for backend persistence.
 const credKVPrefix = "backend/cred/" //nolint:gosec // not a credential, just a KV key prefix
 const backendKVPrefix = "backend/config/"
 
 // persistedBackend is the JSON representation of a runtime-added backend stored in KV.
 type persistedBackend struct {
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	URL     string            `json:"url,omitempty"`
+	Command       string            `json:"command,omitempty"`
+	Args          []string          `json:"args,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	BridgeManaged bool              `json:"bridge_managed,omitempty"`
+	Runtime       string            `json:"runtime,omitempty"`
 }
 
 // persistBackend saves a backend config to KV for restart persistence.
@@ -270,14 +286,27 @@ func (g *Gateway) LoadPersistedBackends(ctx context.Context) {
 		}
 
 		sc := &config.ServerConfig{
-			ID:        backendID,
-			Namespace: backendID,
-			URL:       pb.URL,
-			Env:       pb.Env,
-			Timeout:   config.Duration(30 * time.Second),
+			ID:            backendID,
+			Namespace:     backendID,
+			URL:           pb.URL,
+			Env:           pb.Env,
+			BridgeManaged: pb.BridgeManaged,
+			BridgeRuntime: pb.Runtime,
+			Timeout:       config.Duration(30 * time.Second),
 		}
 		if pb.Command != "" {
-			sc.Command = append([]string{pb.Command}, pb.Args...)
+			sc.OriginalCommand = append([]string{pb.Command}, pb.Args...)
+			if g.bridgeURL != "" {
+				endpoint, err := g.spawnBridgeBackend(ctx, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime)
+				if err != nil {
+					g.logger.Warn("failed to delegate persisted backend to bridge", "id", backendID, "error", err)
+					continue
+				}
+				sc.URL = endpoint
+				sc.BridgeManaged = true
+			} else {
+				sc.Command = append([]string{pb.Command}, pb.Args...)
+			}
 		}
 
 		if err := g.ConnectBackend(ctx, sc); err != nil {
@@ -285,6 +314,50 @@ func (g *Gateway) LoadPersistedBackends(ctx context.Context) {
 			continue
 		}
 		g.logger.Info("restored persisted backend", "id", backendID)
+	}
+}
+
+// HasPersistedBackends returns true if the KV store has any persisted backend configs.
+func (g *Gateway) HasPersistedBackends() bool {
+	if g.kvStore == nil {
+		return false
+	}
+	keys, err := g.kvStore.List(backendKVPrefix)
+	if err != nil {
+		return false
+	}
+	return len(keys) > 0
+}
+
+// SeedBackends persists config-defined backends to KV (one-time seed on first boot).
+// Does NOT connect them -- LoadPersistedBackends handles that.
+func (g *Gateway) SeedBackends(_ context.Context, servers []config.ServerConfig) {
+	for i := range servers {
+		s := &servers[i]
+		pb := &persistedBackend{
+			URL: s.URL,
+		}
+		if s.IsStdio() {
+			pb.Command = s.Command[0]
+			if len(s.Command) > 1 {
+				pb.Args = s.Command[1:]
+			}
+			pb.Env = s.Env
+		}
+		g.persistBackend(s.ID, pb)
+
+		// Also persist credentials if configured.
+		if s.Credentials != nil {
+			g.persistCredential(s.ID, &persistedCredential{
+				Type:    s.Credentials.InferredType(),
+				Header:  s.Credentials.Header,
+				Value:   s.Credentials.Value,
+				Env:     s.Credentials.Env,
+				Command: s.Credentials.Command,
+			})
+		}
+
+		g.logger.Info("seeded backend from config", "id", s.ID)
 	}
 }
 
@@ -420,6 +493,7 @@ func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) 
 				Base:      http.DefaultTransport,
 				Store:     g.credStore,
 				BackendID: cfg.ID,
+				Logger:    g.logger,
 			},
 		}
 
@@ -702,6 +776,8 @@ type BackendStatus struct {
 	CircuitBreaker string                 `json:"circuit_breaker,omitempty"`
 	Credential     *BackendCredentialInfo `json:"credential,omitempty"`
 	Tools          []BackendToolInfo      `json:"tools,omitempty"`
+	BridgeManaged  bool                   `json:"bridge_managed,omitempty"`
+	Runtime        string                 `json:"runtime,omitempty"`
 }
 
 // RegisterCredential registers a credential for a backend in the credential store.
@@ -738,10 +814,12 @@ func (g *Gateway) Status() []BackendStatus {
 	statuses := make([]BackendStatus, 0, len(g.backends))
 	for _, b := range g.backends {
 		s := BackendStatus{
-			ID:        b.Config.ID,
-			Namespace: b.Config.Namespace,
-			URL:       b.Config.URL,
-			Tools:     b.Tools,
+			ID:            b.Config.ID,
+			Namespace:     b.Config.Namespace,
+			URL:           b.Config.URL,
+			Tools:         b.Tools,
+			BridgeManaged: b.Config.BridgeManaged,
+			Runtime:       b.Config.BridgeRuntime,
 		}
 		if b.CB != nil {
 			s.CircuitBreaker = b.CB.State().String()
