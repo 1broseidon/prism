@@ -230,9 +230,20 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	}
 
 	// Resolve the redirect URI for this flow.
-	callbackURL := afm.callbackURL
-	if opts.CallbackOverride != "" {
+	// Precedence:
+	//   1. Operator-pinned admin_public_url (afm.callbackURL is non-empty
+	//      only when the config explicitly set it).
+	//   2. Request-derived host (works out of the box for any inbound host).
+	//   3. Fail — there's no sensible default once the operator runs prism
+	//      from a non-loopback address.
+	var callbackURL string
+	switch {
+	case afm.callbackURL != "":
+		callbackURL = afm.callbackURL
+	case opts.CallbackOverride != "":
 		callbackURL = strings.TrimRight(opts.CallbackOverride, "/") + "/oauth/callback"
+	default:
+		return nil, fmt.Errorf("no callback URL available: set admin_public_url in the prism config")
 	}
 
 	// Obtain client credentials: prefer manual when supplied, otherwise DCR.
@@ -575,10 +586,14 @@ func fetchAuthServerMeta(ctx context.Context, metadataURL string) (*oauthex.Auth
 	return &asm, nil
 }
 
-// adminPublicURL is the externally-reachable base URL for the admin API
-// (e.g., "http://172.16.30.90:9086").
+// adminPublicURL is the operator-configured admin public URL, or empty.
+// When non-empty it pins the OAuth redirect_uri for every flow; when empty,
+// each flow uses the inbound admin request's Host header instead.
 func (g *Gateway) InitAuthFlows(adminPublicURL string) {
-	callbackURL := adminPublicURL + "/oauth/callback"
+	callbackURL := ""
+	if adminPublicURL != "" {
+		callbackURL = strings.TrimRight(adminPublicURL, "/") + "/oauth/callback"
+	}
 
 	g.authFlows = newAuthFlowManager(callbackURL, g.logger)
 
@@ -611,25 +626,76 @@ func (g *Gateway) cleanupAuthFlows() {
 // OAuthCallbackHandler returns an http.HandlerFunc for GET /oauth/callback.
 func (g *Gateway) OAuthCallbackHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		state := r.URL.Query().Get("state")
+		q := r.URL.Query()
+		code := q.Get("code")
+		state := q.Get("state")
+
+		// Provider returned an error instead of a code. Show it verbatim
+		// plus, for the common "redirect_uri rejected because http+non-localhost"
+		// case (Clerk, Auth0, many others), a concrete remediation hint.
+		if errCode := q.Get("error"); errCode != "" {
+			desc := q.Get("error_description")
+			hint := ""
+			descLower := strings.ToLower(desc)
+			if strings.Contains(descLower, "insecure") ||
+				strings.Contains(descLower, "redirect_uri") ||
+				strings.Contains(descLower, "redirect url") {
+				hint = "Most providers reject http:// redirect URIs unless the host ends in '.localhost'. " +
+					"Either: (a) add an /etc/hosts entry like '" + r.Host + " prism.localhost', " +
+					"set admin_public_url to 'http://prism.localhost:<port>' in the prism config, and retry; " +
+					"or (b) put prism behind TLS (reverse proxy or built-in TLS) and use https://."
+			}
+			g.setAuthStatus(stateBackend(g, state), "failed:"+errCode+":"+desc)
+			renderCallbackError(w, errCode, desc, hint)
+			return
+		}
 
 		if code == "" || state == "" {
-			http.Error(w, "missing code or state parameter", http.StatusBadRequest)
+			renderCallbackError(w, "invalid_response", "Provider redirected without a code or state parameter.", "")
 			return
 		}
 
 		if err := g.CompleteAuthFlow(r.Context(), state, code); err != nil {
 			g.logger.Error("OAuth callback failed", "error", err)
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, `<html><body><h3>Authentication failed</h3><p>%s</p><script>setTimeout(function(){window.close()},3000)</script></body></html>`, html.EscapeString(err.Error()))
+			renderCallbackError(w, "exchange_failed", err.Error(), "")
 			return
 		}
 
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<html><body><h3>Authenticated</h3><p>You can close this window.</p><script>window.close()</script></body></html>`)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><body style="font-family:system-ui;padding:24px;background:#050505;color:#ebebeb"><h3>Authenticated</h3><p>You can close this window.</p><script>window.close()</script></body></html>`)
 	}
+}
+
+// stateBackend resolves the backendID for a given OAuth state, used to mark
+// status when the provider returns an error before we've called CompleteAuthFlow.
+// Returns "" if no flow matches — setAuthStatus tolerates that.
+func stateBackend(g *Gateway, state string) string {
+	afm := g.getAuthFlows()
+	if afm == nil {
+		return ""
+	}
+	afm.mu.Lock()
+	defer afm.mu.Unlock()
+	if f, ok := afm.flows[state]; ok {
+		return f.BackendID
+	}
+	return ""
+}
+
+func renderCallbackError(w http.ResponseWriter, code, desc, hint string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusBadRequest)
+	hintHTML := ""
+	if hint != "" {
+		hintHTML = `<p style="background:#1a1a1a;border-left:3px solid #6366f1;padding:12px 14px;border-radius:4px;line-height:1.5">` + html.EscapeString(hint) + `</p>`
+	}
+	fmt.Fprintf(w, `<!doctype html><html><body style="font-family:system-ui;padding:24px;background:#050505;color:#ebebeb;max-width:640px;margin:32px auto">
+<h3 style="margin:0 0 8px">Authentication failed</h3>
+<p style="font-family:monospace;font-size:11px;text-transform:uppercase;letter-spacing:0.15em;color:#888;margin:0 0 16px">%s</p>
+<p style="line-height:1.6;margin:0 0 16px">%s</p>
+%s
+<p style="margin-top:24px;font-size:12px;color:#888">You can close this window and try again from the prism console.</p>
+</body></html>`, html.EscapeString(code), html.EscapeString(desc), hintHTML)
 }
 
 // ─── OAuth token KV persistence ─────────────────────────────────────────────

@@ -95,7 +95,10 @@ func runServe() {
 	// Initialize OAuth client support for upstream MCP servers that require authentication.
 	// This must happen after SetStore (needs KV for persisted tokens) and before LoadPersistedBackends
 	// (so OAuth credentials are registered before backends try to connect).
-	oauthCallback := gw.SetupOAuth(cfg.AdminPublicURL)
+	// Pass the *configured* admin URL (empty when unset). When empty, OAuth
+	// callbacks derive from the inbound admin request's Host header so the
+	// flow returns to the same host the operator hit.
+	oauthCallback := gw.SetupOAuth(cfg.AdminPublicURLConfigured)
 
 	gw.LoadPersistedBackends(ctx)
 

@@ -353,19 +353,23 @@ type EmbeddedClient struct {
 
 // Loaded is the fully-resolved configuration returned by Load().
 type Loaded struct {
-	Listen          string
-	Admin           string
-	PublicURL       string // Externally-reachable base URL for the MCP gateway (OAuth issuer).
-	AdminPublicURL  string // Externally-reachable base URL for the admin API (OAuth callbacks).
-	BridgeURL       string
-	Servers         []ServerConfig
-	EmbeddedAuth    *EmbeddedAuthConfig
-	Store           *StoreConfig
-	TLS             *TLSConfig
-	Audit           *AuditConfig
-	RateLimit       *RateLimitConfig
-	AdminAuth       *AdminAuthConfig
-	ShutdownTimeout Duration
+	Listen         string
+	Admin          string
+	PublicURL      string // Externally-reachable base URL for the MCP gateway (OAuth issuer).
+	AdminPublicURL string // Externally-reachable base URL for the admin API (OAuth callbacks).
+	// AdminPublicURLConfigured is the raw config value, empty when not set.
+	// Lets callers (OAuth flow init) distinguish operator-pinned URLs from
+	// addresses we guessed by looking at the listen interface.
+	AdminPublicURLConfigured string
+	BridgeURL                string
+	Servers                  []ServerConfig
+	EmbeddedAuth             *EmbeddedAuthConfig
+	Store                    *StoreConfig
+	TLS                      *TLSConfig
+	Audit                    *AuditConfig
+	RateLimit                *RateLimitConfig
+	AdminAuth                *AdminAuthConfig
+	ShutdownTimeout          Duration
 }
 
 // --- Loading ---
@@ -597,6 +601,11 @@ func expand(cfg *Config) (*Loaded, error) {
 	// Derive PublicURL: explicit config > concrete listen address > localhost fallback.
 	loaded.PublicURL = derivePublicURL(cfg.PublicURL, loaded.Listen, cfg.TLS != nil, "public_url", "listen")
 	loaded.AdminPublicURL = derivePublicURL(cfg.AdminPublicURL, loaded.Admin, cfg.TLS != nil, "admin_public_url", "admin")
+	// Keep the raw configured value separately so OAuth callback logic can
+	// tell explicit ("operator pinned this URL") from derived ("we guessed").
+	// Explicit values force the redirect_uri; derived values lose to the
+	// inbound request's Host header.
+	loaded.AdminPublicURLConfigured = strings.TrimRight(cfg.AdminPublicURL, "/")
 
 	// Expand mcpServers map → ServerConfig slice.
 	for name, srv := range cfg.McpServers {
