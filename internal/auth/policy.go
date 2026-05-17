@@ -31,10 +31,10 @@ type PolicyResolver interface {
 
 // BackendPolicy is a stackable per-backend rule. Policies stack:
 // agent → groups (alphabetical) → defaults → backend static floor.
-// The first non-empty selector at each dimension wins.
+// The first non-empty value at each dimension wins.
 //
-// Future dimensions (rate_limit, transport, audience enforcement) live on
-// the same struct so the resolution algorithm scales without new layers.
+// Each dimension resolves independently — an agent-layer RateLimit and a
+// defaults-layer WorkspaceSelector both apply on the same call.
 type BackendPolicy struct {
 	// WorkspaceSelector controls which workspace a tool call attaches to.
 	// Empty means inherit from the next layer.
@@ -44,6 +44,19 @@ type BackendPolicy struct {
 	//   "agent"         — resolve to the workspace owned by the calling agent
 	//   "id:<id>"       — pin to a specific registered workspace id
 	WorkspaceSelector string `json:"workspace_selector,omitempty"`
+
+	// RateLimit caps how often the bound caller may call this backend.
+	// Nil means inherit from the next layer; pointer (not zero-value) is
+	// used so a layer can intentionally "no rate limit, override anything
+	// below" by setting RPS=0.
+	RateLimit *BackendRateLimit `json:"rate_limit,omitempty"`
+}
+
+// BackendRateLimit caps call frequency per (agent, backend) tuple.
+// RPS=0 means unlimited; Burst defaults to ceil(RPS) when zero.
+type BackendRateLimit struct {
+	RPS   float64 `json:"rps"`
+	Burst int     `json:"burst,omitempty"`
 }
 
 // BackendPolicyLayer is one tier of the stacked backend policy resolution.

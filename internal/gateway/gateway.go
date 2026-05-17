@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 )
 
 const namespaceSeparator = "__"
@@ -73,6 +74,15 @@ type backendPolicyResolverBox struct{ r auth.BackendPolicyResolver }
 // is accepted.
 type tokenValidatorBox struct{ v *auth.TokenValidator }
 
+// backendRateLimitEntry holds an x/time/rate limiter alongside the spec it
+// was configured for, so the cache invalidates a stale bucket when policy
+// changes the RPS/burst.
+type backendRateLimitEntry struct {
+	rps     float64
+	burst   int
+	limiter *rate.Limiter
+}
+
 // Gateway aggregates multiple MCP backends behind a single server.
 type Gateway struct {
 	mu                    sync.RWMutex
@@ -86,12 +96,15 @@ type Gateway struct {
 	policyResolver        atomic.Pointer[policyResolverBox]
 	backendPolicyResolver atomic.Pointer[backendPolicyResolverBox]
 	tokenValidator        atomic.Pointer[tokenValidatorBox]
-	authFlows             any //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
-	bridgeURL             string
-	bridgeURLs            []string
-	stdioDisabled         string
-	network               *networkRuntime
-	workspace             *workspaceBridgeManager
+
+	rateLimitMu    sync.Mutex
+	rateLimitCache map[string]*backendRateLimitEntry
+	authFlows      any //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
+	bridgeURL      string
+	bridgeURLs     []string
+	stdioDisabled  string
+	network        *networkRuntime
+	workspace      *workspaceBridgeManager
 }
 
 // New creates a new Gateway.
@@ -100,12 +113,13 @@ func New(logger *slog.Logger) *Gateway {
 		logger = slog.Default()
 	}
 	g := &Gateway{
-		backends:      make(map[string]*Backend),
-		workspaceInst: make(map[string]*Backend),
-		logger:        logger,
-		auditor:       audit.Noop(), // replaced via SetAuditLogger if audit is configured
-		credStore:     credentials.NewStore(),
-		network:       newNetworkRuntime(nil),
+		backends:       make(map[string]*Backend),
+		workspaceInst:  make(map[string]*Backend),
+		logger:         logger,
+		auditor:        audit.Noop(), // replaced via SetAuditLogger if audit is configured
+		credStore:      credentials.NewStore(),
+		network:        newNetworkRuntime(nil),
+		rateLimitCache: make(map[string]*backendRateLimitEntry),
 	}
 	g.workspace = newWorkspaceBridgeManager(g)
 
@@ -1138,6 +1152,39 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}
 	}
 
+	// Per-(agent, backend) rate-limit enforcement from policy stack.
+	callerClaims := auth.ClaimsFromContext(ctx)
+	if limit, rlRes := g.ResolveBackendRateLimit(callerClaims, b); limit != nil {
+		if !g.allowBackendCall(callerClaims, backendID, limit) {
+			span.SetAttributes(
+				attribute.Bool("tool.allowed", false),
+				attribute.Float64("ratelimit.rps", limit.RPS),
+				attribute.Int("ratelimit.burst", limit.Burst),
+				attribute.String("ratelimit.source", rlRes.Source),
+			)
+			span.SetStatus(codes.Error, "rate limited")
+			g.logger.Warn("tool call denied by rate limit",
+				"backend", backendID,
+				"tool", toolName,
+				"policy_source", rlRes.Source,
+				"rps", limit.RPS,
+				"burst", limit.Burst,
+			)
+			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, credInjected, 0, nil)
+			metrics.RecordScopeDenial(b.Config.Namespace, toolName)
+			metrics.RecordToolCall(b.Config.Namespace, toolName, backendID, false, 0)
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: fmt.Sprintf(
+						"rate limit exceeded for backend %q (source: %s, rps: %g)",
+						backendID, rlRes.Source, limit.RPS,
+					)},
+				},
+			}, nil
+		}
+	}
+
 	span.SetAttributes(attribute.Bool("tool.allowed", true))
 	if effectiveWorkspaceID != "" {
 		span.SetAttributes(attribute.String("workspace.id", effectiveWorkspaceID))
@@ -1430,6 +1477,101 @@ func (g *Gateway) applyWorkspaceSelector(
 	default:
 		return nil, res, fmt.Sprintf("unknown workspace selector %q", res.Selector)
 	}
+}
+
+// allowBackendCall checks the per-(caller, backend) rate limiter. Returns
+// true (allowed) when no policy limit is configured or RPS=0. Buckets are
+// keyed by the caller's most-stable identifier and the backend id so the
+// same agent gets independent quotas across backends.
+func (g *Gateway) allowBackendCall(claims *auth.Claims, backendID string, limit *auth.BackendRateLimit) bool {
+	if limit == nil || limit.RPS <= 0 {
+		return true
+	}
+	callerID := ""
+	if claims != nil {
+		switch {
+		case claims.PrismID != "":
+			callerID = claims.PrismID
+		case claims.ClientID != "":
+			callerID = claims.ClientID
+		default:
+			callerID = claims.Subject
+		}
+	}
+	if callerID == "" {
+		callerID = "anonymous"
+	}
+	key := callerID + "|" + backendID
+	burst := limit.Burst
+	if burst <= 0 {
+		burst = int(limit.RPS)
+		if burst < 1 {
+			burst = 1
+		}
+	}
+
+	g.rateLimitMu.Lock()
+	entry := g.rateLimitCache[key]
+	// Rebuild the limiter if the policy spec changed; otherwise reuse it
+	// so we don't lose accumulated tokens between calls.
+	if entry == nil || entry.rps != limit.RPS || entry.burst != burst {
+		entry = &backendRateLimitEntry{
+			rps:     limit.RPS,
+			burst:   burst,
+			limiter: rate.NewLimiter(rate.Limit(limit.RPS), burst),
+		}
+		g.rateLimitCache[key] = entry
+	}
+	limiter := entry.limiter
+	g.rateLimitMu.Unlock()
+
+	return limiter.Allow()
+}
+
+// BackendRateLimitResolution captures the rate-limit decision the gateway
+// made for an (agent, backend) tuple plus the layer chain. Mirrors
+// BackendWorkspaceResolution.
+type BackendRateLimitResolution struct {
+	Limit  *auth.BackendRateLimit `json:"limit,omitempty"`
+	Source string                 `json:"source"` // policy layer or ""
+	Layers []ResolutionLayerTrace `json:"layers,omitempty"`
+}
+
+// ResolveBackendRateLimit walks the layered backend policy and returns the
+// effective rate limit for a tool call. Nil means "no limit applies"
+// (callers should fall through to whatever global limiter exists).
+//
+// Per-layer override semantics: a RateLimit set anywhere wins from the
+// agent layer down; a layer can intentionally clear inherited limits by
+// setting RPS=0 (Burst is ignored).
+func (g *Gateway) ResolveBackendRateLimit(
+	claims *auth.Claims, backend *Backend,
+) (limit *auth.BackendRateLimit, res BackendRateLimitResolution) {
+	if backend == nil || backend.Config == nil {
+		return nil, BackendRateLimitResolution{}
+	}
+	resolver := g.getBackendPolicyResolver()
+	if resolver == nil || claims == nil {
+		return nil, BackendRateLimitResolution{}
+	}
+	for _, layer := range resolver.ResolveBackendPolicy(claims) {
+		rule, hasRule := layer.Policies[backend.Config.ID]
+		var traceSelector string
+		if hasRule && rule.RateLimit != nil {
+			traceSelector = fmt.Sprintf("rps=%g burst=%d", rule.RateLimit.RPS, rule.RateLimit.Burst)
+		}
+		res.Layers = append(res.Layers, ResolutionLayerTrace{
+			Source:   layer.Source,
+			Selector: traceSelector,
+		})
+		if !hasRule || rule.RateLimit == nil || limit != nil {
+			continue
+		}
+		limit = rule.RateLimit
+		res.Limit = rule.RateLimit
+		res.Source = layer.Source
+	}
+	return limit, res
 }
 
 // auditTraceFromResolution converts the gateway's internal trace structure

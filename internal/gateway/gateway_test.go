@@ -848,6 +848,101 @@ func TestPersistProxiedRegistryEntryPreservesExistingMetadata(t *testing.T) {
 	}
 }
 
+func TestResolveBackendRateLimitStackOrder(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+
+	backend := &Backend{Config: &config.ServerConfig{ID: "brainfile"}}
+	claims := &auth.Claims{PrismID: "prism-a"}
+
+	tests := []struct {
+		name       string
+		layers     []auth.BackendPolicyLayer
+		wantRPS    float64
+		wantSource string
+	}{
+		{
+			name:       "no policy = no limit",
+			layers:     nil,
+			wantRPS:    0,
+			wantSource: "",
+		},
+		{
+			name: "agent layer wins over defaults",
+			layers: []auth.BackendPolicyLayer{
+				{Source: "agent:prism-a", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {RateLimit: &auth.BackendRateLimit{RPS: 5, Burst: 5}},
+				}},
+				{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {RateLimit: &auth.BackendRateLimit{RPS: 100, Burst: 100}},
+				}},
+			},
+			wantRPS:    5,
+			wantSource: "agent:prism-a",
+		},
+		{
+			name: "group fills in when agent has no rule",
+			layers: []auth.BackendPolicyLayer{
+				{Source: "group:engineering", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {RateLimit: &auth.BackendRateLimit{RPS: 20, Burst: 20}},
+				}},
+				{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {RateLimit: &auth.BackendRateLimit{RPS: 100, Burst: 100}},
+				}},
+			},
+			wantRPS:    20,
+			wantSource: "group:engineering",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gw.SetBackendPolicyResolver(&stubBackendPolicyResolver{layers: tc.layers})
+			limit, res := gw.ResolveBackendRateLimit(claims, backend)
+			if tc.wantRPS == 0 {
+				if limit != nil {
+					t.Fatalf("expected nil limit, got %+v", limit)
+				}
+				return
+			}
+			if limit == nil || limit.RPS != tc.wantRPS {
+				t.Fatalf("limit = %+v, want RPS=%v", limit, tc.wantRPS)
+			}
+			if res.Source != tc.wantSource {
+				t.Errorf("source = %q, want %q", res.Source, tc.wantSource)
+			}
+		})
+	}
+}
+
+func TestAllowBackendCallExhaustsBucket(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+
+	limit := &auth.BackendRateLimit{RPS: 0.001, Burst: 2}
+	claims := &auth.Claims{PrismID: "prism-rl"}
+
+	// Burst lets through exactly 2 calls; the third gets denied.
+	if !gw.allowBackendCall(claims, "brainfile", limit) {
+		t.Fatal("first call should be allowed")
+	}
+	if !gw.allowBackendCall(claims, "brainfile", limit) {
+		t.Fatal("second call should be allowed (within burst)")
+	}
+	if gw.allowBackendCall(claims, "brainfile", limit) {
+		t.Fatal("third call should be denied")
+	}
+
+	// A different backend has its own bucket — call against linear succeeds.
+	if !gw.allowBackendCall(claims, "linear", limit) {
+		t.Fatal("call against a different backend should be allowed independently")
+	}
+
+	// Nil limit always allows.
+	if !gw.allowBackendCall(claims, "brainfile", nil) {
+		t.Fatal("nil limit should always allow")
+	}
+}
+
 func TestWorkspaceHealth(t *testing.T) {
 	cases := []struct {
 		name      string

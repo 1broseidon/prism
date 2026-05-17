@@ -93,8 +93,14 @@ export interface Backend {
   disconnected?: boolean;
 }
 
+export interface BackendRateLimit {
+  rps: number;
+  burst?: number;
+}
+
 export interface BackendPolicy {
   workspace_selector?: string;
+  rate_limit?: BackendRateLimit;
 }
 
 export interface Group {
