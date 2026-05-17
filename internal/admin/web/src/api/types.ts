@@ -73,6 +73,8 @@ export interface WorkspaceConfig {
   include?: string[];
   exclude?: string[];
   max_bytes?: number;
+  quota_bytes?: number;
+  retention_seconds?: number;
 }
 
 export interface Backend {

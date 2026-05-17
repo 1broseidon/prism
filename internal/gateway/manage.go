@@ -454,6 +454,9 @@ func (g *Gateway) spawnBridgeBackendAt(ctx context.Context, bridgeURL, id, comma
 		payload["sandbox"] = sandbox
 	}
 	if workspaceCfg != nil {
+		cfg := *workspaceCfg
+		g.applyRegisteredWorkspaceConfig(&cfg)
+		workspaceCfg = &cfg
 		snap, err := g.snapshotWorkspaceForBackend(ctx, workspaceCfg)
 		if err != nil {
 			return bridgeSpawnResult{}, err

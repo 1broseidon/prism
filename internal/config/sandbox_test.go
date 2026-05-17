@@ -53,7 +53,7 @@ func TestParseMemoryBytes(t *testing.T) {
 
 func TestWorkspaceConfigDefaultsAndValidation(t *testing.T) {
 	cfg := NormalizeWorkspaceConfig(&WorkspaceConfig{ID: "repo"})
-	if cfg == nil || cfg.Type != WorkspaceTypeProxied || cfg.Mode != WorkspaceModeSnapshot || cfg.WriteMode != WorkspaceWriteStage || cfg.MaxBytes != DefaultWorkspaceMaxBytes {
+	if cfg == nil || cfg.Type != WorkspaceTypeProxied || cfg.Mode != WorkspaceModeSnapshot || cfg.WriteMode != WorkspaceWriteStage || cfg.MaxBytes != DefaultWorkspaceMaxBytes || cfg.QuotaBytes != 0 || cfg.RetentionSeconds != 0 {
 		t.Fatalf("workspace defaults = %+v", cfg)
 	}
 
@@ -63,6 +63,8 @@ func TestWorkspaceConfigDefaultsAndValidation(t *testing.T) {
 		{ID: "repo", Mode: "live"},
 		{ID: "repo", WriteMode: "unsafe"},
 		{ID: "repo", MaxBytes: 513 << 20},
+		{ID: "repo", QuotaBytes: -1},
+		{ID: "repo", RetentionSeconds: -1},
 	}
 	for _, tc := range invalid {
 		if err := ValidateWorkspaceConfig(&tc); err == nil {

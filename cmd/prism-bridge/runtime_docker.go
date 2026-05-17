@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,14 +53,17 @@ type dockerBackend struct {
 }
 
 type dockerWorkspace struct {
-	id           string
-	typ          string
-	volumeName   string
-	baseSnapshot *ws.Snapshot
-	changes      *ws.ChangeSet
-	refs         map[string]struct{}
-	ready        chan struct{}
-	initErr      error
+	id               string
+	typ              string
+	volumeName       string
+	quotaBytes       int64
+	retentionSeconds int64
+	retentionTimer   *time.Timer
+	baseSnapshot     *ws.Snapshot
+	changes          *ws.ChangeSet
+	refs             map[string]struct{}
+	ready            chan struct{}
+	initErr          error
 }
 
 type dockerSpec struct {
@@ -288,6 +292,12 @@ func (d *DockerRuntime) buildSpec(req *SpawnRequest) *dockerSpec {
 	if workspaceCfg != nil {
 		labels[d.labelPrefix+".workspace_id"] = workspaceCfg.ID
 		labels[d.labelPrefix+".workspace_type"] = workspaceCfg.Type
+		if workspaceCfg.QuotaBytes > 0 {
+			labels[d.labelPrefix+".workspace_quota_bytes"] = strconv.FormatInt(workspaceCfg.QuotaBytes, 10)
+		}
+		if workspaceCfg.RetentionSeconds > 0 {
+			labels[d.labelPrefix+".workspace_retention_seconds"] = strconv.FormatInt(workspaceCfg.RetentionSeconds, 10)
+		}
 	}
 	env := envFromMap(req.Env)
 	endpoint := fmt.Sprintf("http://%s:%s/mcp", name, managedBackendPort)
@@ -360,6 +370,12 @@ func (d *DockerRuntime) ensureWorkspace(ctx context.Context, spec *dockerSpec, r
 		d.workspaces = make(map[string]*dockerWorkspace)
 	}
 	if existing := d.workspaces[cfg.ID]; existing != nil {
+		if existing.retentionTimer != nil {
+			existing.retentionTimer.Stop()
+			existing.retentionTimer = nil
+		}
+		existing.quotaBytes = cfg.QuotaBytes
+		existing.retentionSeconds = cfg.RetentionSeconds
 		existing.refs[req.ID] = struct{}{}
 		ready := existing.ready
 		d.mu.Unlock()
@@ -368,14 +384,20 @@ func (d *DockerRuntime) ensureWorkspace(ctx context.Context, spec *dockerSpec, r
 			_ = d.releaseWorkspaceRef(context.Background(), cfg.ID, req.ID)
 			return existing.initErr
 		}
+		if err := d.checkWorkspaceQuota(ctx, spec, cfg); err != nil {
+			_ = d.releaseWorkspaceRef(context.Background(), cfg.ID, req.ID)
+			return err
+		}
 		return nil
 	}
 	state := &dockerWorkspace{
-		id:         cfg.ID,
-		typ:        cfg.Type,
-		volumeName: spec.volumeName,
-		refs:       map[string]struct{}{req.ID: {}},
-		ready:      make(chan struct{}),
+		id:               cfg.ID,
+		typ:              cfg.Type,
+		volumeName:       spec.volumeName,
+		quotaBytes:       cfg.QuotaBytes,
+		retentionSeconds: cfg.RetentionSeconds,
+		refs:             map[string]struct{}{req.ID: {}},
+		ready:            make(chan struct{}),
 	}
 	d.workspaces[cfg.ID] = state
 	d.mu.Unlock()
@@ -421,7 +443,7 @@ func (d *DockerRuntime) initializeWorkspace(ctx context.Context, spec *dockerSpe
 			return err
 		}
 	}
-	return nil
+	return d.checkWorkspaceQuota(ctx, spec, cfg)
 }
 
 func (d *DockerRuntime) copyWorkspaceSnapshotToVolume(ctx context.Context, spec *dockerSpec, req *SpawnRequest) error {
@@ -458,15 +480,39 @@ func (d *DockerRuntime) releaseWorkspaceRef(ctx context.Context, workspaceID, ba
 	}
 	delete(state.refs, backendID)
 	remove := len(state.refs) == 0 && state.typ != config.WorkspaceTypeVirtual
+	scheduleRetention := len(state.refs) == 0 && state.typ == config.WorkspaceTypeVirtual && state.retentionSeconds > 0
 	volumeName := state.volumeName
 	if remove {
 		delete(d.workspaces, workspaceID)
+	} else if scheduleRetention {
+		if state.retentionTimer != nil {
+			state.retentionTimer.Stop()
+		}
+		retention := time.Duration(state.retentionSeconds) * time.Second
+		state.retentionTimer = time.AfterFunc(retention, func() {
+			d.removeIdleWorkspace(context.Background(), workspaceID)
+		})
 	}
 	d.mu.Unlock()
 	if remove {
 		return d.removeVolume(ctx, volumeName)
 	}
 	return nil
+}
+
+func (d *DockerRuntime) removeIdleWorkspace(ctx context.Context, workspaceID string) {
+	d.mu.Lock()
+	state := d.workspaces[workspaceID]
+	if state == nil || len(state.refs) > 0 {
+		d.mu.Unlock()
+		return
+	}
+	volumeName := state.volumeName
+	delete(d.workspaces, workspaceID)
+	d.mu.Unlock()
+	if err := d.removeVolume(ctx, volumeName); err != nil {
+		d.logger.Warn("failed to remove retained workspace volume", "workspace", workspaceID, "error", err)
+	}
 }
 
 func wrapWorkspaceEntrypoint(req *SpawnRequest, sandbox *config.SandboxConfig, cfg *container.Config, hostCfg *container.HostConfig) {
@@ -574,6 +620,67 @@ func (d *DockerRuntime) runWorkspaceVolumeInit(ctx context.Context, spec *docker
 		return ctx.Err()
 	}
 	return nil
+}
+
+func (d *DockerRuntime) checkWorkspaceQuota(ctx context.Context, spec *dockerSpec, cfg *config.WorkspaceConfig) error {
+	if cfg == nil || cfg.QuotaBytes <= 0 || spec.volumeName == "" {
+		return nil
+	}
+	used, err := d.workspaceDiskUsage(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("check workspace quota: %w", err)
+	}
+	if used > cfg.QuotaBytes {
+		return fmt.Errorf("workspace %q exceeds quota: %d bytes used, %d bytes allowed", cfg.ID, used, cfg.QuotaBytes)
+	}
+	return nil
+}
+
+func (d *DockerRuntime) workspaceDiskUsage(ctx context.Context, spec *dockerSpec) (int64, error) {
+	cfg := &container.Config{
+		Image:      spec.image,
+		Entrypoint: []string{"sh", "-c"},
+		Cmd:        []string{"du -sk /workspace | cut -f1"},
+		Labels:     spec.labels,
+		Tty:        true,
+	}
+	hostCfg := &container.HostConfig{
+		SecurityOpt: []string{"no-new-privileges:true"},
+		Mounts: []mounttypes.Mount{{
+			Type:     mounttypes.TypeVolume,
+			Source:   spec.volumeName,
+			Target:   "/workspace",
+			ReadOnly: true,
+		}},
+	}
+	resp, err := d.client.ContainerCreate(ctx, cfg, hostCfg, spec.networking, nil, spec.name+"-workspace-du")
+	if err != nil {
+		return 0, fmt.Errorf("create workspace quota container: %w", err)
+	}
+	defer func() { _ = d.stopAndRemove(context.Background(), resp.ID) }()
+	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return 0, fmt.Errorf("start workspace quota container: %w", err)
+	}
+	statusCh, errCh := d.client.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return 0, fmt.Errorf("wait workspace quota container: %w", err)
+		}
+	case status := <-statusCh:
+		logs := d.containerLogs(ctx, resp.ID)
+		if status.StatusCode != 0 {
+			return 0, fmt.Errorf("workspace quota container exited with status %d: %s", status.StatusCode, logs)
+		}
+		kib, err := strconv.ParseInt(strings.TrimSpace(logs), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse workspace disk usage %q: %w", logs, err)
+		}
+		return kib * 1024, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	return 0, nil
 }
 
 func sandboxUserForSpec(user string) (uid, gid int) {

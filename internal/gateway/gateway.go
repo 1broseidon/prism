@@ -1127,6 +1127,7 @@ func (g *Gateway) ensureWorkspaceBackendInstance(ctx context.Context, template *
 	}
 	workspaceCfg := *baseWorkspace
 	workspaceCfg.ID = workspaceID
+	g.applyRegisteredWorkspaceConfig(&workspaceCfg)
 
 	key := workspaceInstanceKey(template.Config.ID, workspaceID)
 	g.mu.RLock()
@@ -1219,6 +1220,21 @@ func (g *Gateway) authorizeWorkspaceRegistry(ctx context.Context, b *Backend, wo
 		}
 	}
 	return ""
+}
+
+func (g *Gateway) applyRegisteredWorkspaceConfig(cfg *config.WorkspaceConfig) {
+	if cfg == nil || cfg.ID == "" {
+		return
+	}
+	entry, ok := g.registeredWorkspace(cfg.ID)
+	if !ok {
+		return
+	}
+	if entry.Type != "" {
+		cfg.Type = entry.Type
+	}
+	cfg.QuotaBytes = entry.QuotaBytes
+	cfg.RetentionSeconds = entry.RetentionSeconds
 }
 
 func workspaceValueAllowed(allowed []string, candidates ...string) bool {

@@ -495,7 +495,7 @@ func TestRouteToolCallEnforcesWorkspaceRegistryAgentPolicy(t *testing.T) {
 	}
 }
 
-func TestRouteToolCallCanAttachAlternateWorkspaceInstance(t *testing.T) {
+func TestRouteToolCallCanAttachAlternateWorkspaceInstance(t *testing.T) { //nolint:gocyclo // exercises spawn, routing, schema stripping, and registry overlay together
 	var mu sync.Mutex
 	var spawnPayloads []map[string]any
 	var callArgs []string
@@ -541,7 +541,16 @@ func TestRouteToolCallCanAttachAlternateWorkspaceInstance(t *testing.T) {
 
 	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
 	gw.SetBridgeURL(bridge.URL)
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:               "other",
+		Type:             config.WorkspaceTypeEphemeral,
+		QuotaBytes:       99,
+		RetentionSeconds: 60,
+	}); err != nil {
+		t.Fatalf("create remote workspace: %v", err)
+	}
 	if err := gw.ConnectBackendViaBridge(context.Background(), &config.ServerConfig{
 		ID:              "brainfile",
 		Namespace:       "brainfile",
@@ -579,6 +588,9 @@ func TestRouteToolCallCanAttachAlternateWorkspaceInstance(t *testing.T) {
 	workspace, _ := spawnPayloads[1]["workspace"].(map[string]any)
 	if workspace["id"] != "other" {
 		t.Fatalf("dynamic workspace payload = %+v", workspace)
+	}
+	if workspace["type"] != config.WorkspaceTypeEphemeral || workspace["quota_bytes"] != float64(99) || workspace["retention_seconds"] != float64(60) {
+		t.Fatalf("registered workspace metadata was not applied: %+v", workspace)
 	}
 	if len(callArgs) != 2 || strings.Contains(callArgs[0], prismWorkspaceArg) || strings.Contains(callArgs[1], prismWorkspaceArg) {
 		t.Fatalf("forwarded call args = %+v", callArgs)

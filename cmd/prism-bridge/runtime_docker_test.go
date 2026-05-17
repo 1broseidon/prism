@@ -266,8 +266,10 @@ func TestDockerSpecMountsVirtualWorkspaceWithoutSnapshot(t *testing.T) {
 		Command: "npx",
 		Args:    []string{"team-notes", "mcp"},
 		Workspace: &config.WorkspaceConfig{
-			ID:   "team-a",
-			Type: config.WorkspaceTypeVirtual,
+			ID:               "team-a",
+			Type:             config.WorkspaceTypeVirtual,
+			QuotaBytes:       4096,
+			RetentionSeconds: 120,
 		},
 	})
 
@@ -279,6 +281,10 @@ func TestDockerSpecMountsVirtualWorkspaceWithoutSnapshot(t *testing.T) {
 	}
 	if spec.containerCfg.Labels["prism.bridge.workspace_type"] != config.WorkspaceTypeVirtual {
 		t.Fatalf("workspace type label = %q", spec.containerCfg.Labels["prism.bridge.workspace_type"])
+	}
+	if spec.containerCfg.Labels["prism.bridge.workspace_quota_bytes"] != "4096" ||
+		spec.containerCfg.Labels["prism.bridge.workspace_retention_seconds"] != "120" {
+		t.Fatalf("workspace lifecycle labels = %+v", spec.containerCfg.Labels)
 	}
 }
 

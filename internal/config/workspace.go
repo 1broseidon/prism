@@ -35,13 +35,15 @@ var workspaceConfigIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // agent. The sandbox receives a snapshot copy; local mutation only happens
 // through staged or auto-applied changes.
 type WorkspaceConfig struct {
-	ID        string   `json:"id,omitempty"`
-	Type      string   `json:"type,omitempty"`
-	Mode      string   `json:"mode,omitempty"`
-	WriteMode string   `json:"write_mode,omitempty"`
-	Include   []string `json:"include,omitempty"`
-	Exclude   []string `json:"exclude,omitempty"`
-	MaxBytes  int64    `json:"max_bytes,omitempty"`
+	ID               string   `json:"id,omitempty"`
+	Type             string   `json:"type,omitempty"`
+	Mode             string   `json:"mode,omitempty"`
+	WriteMode        string   `json:"write_mode,omitempty"`
+	Include          []string `json:"include,omitempty"`
+	Exclude          []string `json:"exclude,omitempty"`
+	MaxBytes         int64    `json:"max_bytes,omitempty"`
+	QuotaBytes       int64    `json:"quota_bytes,omitempty"`
+	RetentionSeconds int64    `json:"retention_seconds,omitempty"`
 }
 
 // NormalizeWorkspaceConfig fills defaults and returns nil when no workspace is configured.
@@ -50,13 +52,15 @@ func NormalizeWorkspaceConfig(input *WorkspaceConfig) *WorkspaceConfig {
 		return nil
 	}
 	out := &WorkspaceConfig{
-		ID:        strings.TrimSpace(input.ID),
-		Type:      strings.TrimSpace(input.Type),
-		Mode:      strings.TrimSpace(input.Mode),
-		WriteMode: strings.TrimSpace(input.WriteMode),
-		Include:   cleanStringSlice(input.Include),
-		Exclude:   cleanStringSlice(input.Exclude),
-		MaxBytes:  input.MaxBytes,
+		ID:               strings.TrimSpace(input.ID),
+		Type:             strings.TrimSpace(input.Type),
+		Mode:             strings.TrimSpace(input.Mode),
+		WriteMode:        strings.TrimSpace(input.WriteMode),
+		Include:          cleanStringSlice(input.Include),
+		Exclude:          cleanStringSlice(input.Exclude),
+		MaxBytes:         input.MaxBytes,
+		QuotaBytes:       input.QuotaBytes,
+		RetentionSeconds: input.RetentionSeconds,
 	}
 	if out.Type == "" {
 		out.Type = WorkspaceTypeProxied
@@ -100,6 +104,12 @@ func ValidateWorkspaceConfig(input *WorkspaceConfig) error {
 	}
 	if cfg.MaxBytes > 512<<20 {
 		return errors.New("workspace.max_bytes must be <= 512MiB")
+	}
+	if cfg.QuotaBytes < 0 {
+		return errors.New("workspace.quota_bytes must be >= 0")
+	}
+	if cfg.RetentionSeconds < 0 {
+		return errors.New("workspace.retention_seconds must be >= 0")
 	}
 	return nil
 }
