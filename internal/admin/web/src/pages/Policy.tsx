@@ -321,10 +321,10 @@ function StoragePolicySection({ groups: gr }: { groups: Group[] }) {
   return (
     <div class="section">
       <div class="section-header">
-        <span class="section-title">storage policy</span>
+        <span class="section-title">backend policy</span>
         <span class="section-sub">
-          per-backend workspace selection. layers stack agent → groups
-          (alphabetical) → defaults → backend static floor.
+          per-backend workspace selection and rate limits. layers stack agent →
+          groups (alphabetical) → defaults → backend static floor.
         </span>
       </div>
 
@@ -362,6 +362,65 @@ function StoragePolicySection({ groups: gr }: { groups: Group[] }) {
               }
             />
           ))}
+        </div>
+      )}
+
+      <AgentOverridesSubsection />
+    </div>
+  );
+}
+
+function AgentOverridesSubsection() {
+  const list = agents.data.value || [];
+  const overrides = list.filter((a) => {
+    const bp = a.policy?.backend_policies || {};
+    return Object.keys(bp).length > 0;
+  });
+
+  return (
+    <div class="storage-layer">
+      <div class="storage-layer-head">
+        <span class="storage-layer-title">per-agent overrides</span>
+        <span class="storage-layer-sub">
+          edit on each agent's detail page. listed here so you can see who
+          deviates from group/defaults.
+        </span>
+      </div>
+      {overrides.length === 0 ? (
+        <div class="empty-state">
+          no agents have per-agent backend overrides.
+        </div>
+      ) : (
+        <div class="storage-layer-rows">
+          {overrides.map((a) => {
+            const bp = a.policy?.backend_policies || {};
+            const ids = Object.keys(bp).sort();
+            const name = a.label || a.description || a.client_id;
+            const route = a.prism_id || a.client_id;
+            return (
+              <div class="storage-layer-row" key={route}>
+                <a
+                  class="storage-layer-backend link-accent"
+                  href={`/agents/${encodeURIComponent(route)}`}
+                >
+                  {name}
+                </a>
+                <span class="hint-text">
+                  {ids
+                    .map((id) => {
+                      const rule = bp[id];
+                      const parts: string[] = [];
+                      if (rule.workspace_selector)
+                        parts.push(rule.workspace_selector);
+                      if (rule.rate_limit?.rps)
+                        parts.push(`${rule.rate_limit.rps} rps`);
+                      return `${id}: ${parts.join(" · ") || "—"}`;
+                    })
+                    .join("    ")}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -411,25 +470,71 @@ function StoragePolicyLayer({
 
   const virtualOptions = workspaces.filter((w) => w.type === "virtual");
 
-  const setSelector = (backendID: string, kind: Selector, id: string) => {
+  const updateRule = (
+    backendID: string,
+    patch: (prev: BackendPolicy) => BackendPolicy,
+  ) => {
     const next = { ...draft };
-    if (kind === "") {
+    const updated = patch(next[backendID] || {});
+    if (!updated.workspace_selector && !updated.rate_limit) {
       delete next[backendID];
-    } else if (kind === "id") {
-      next[backendID] = { workspace_selector: id ? `id:${id}` : "" };
     } else {
-      next[backendID] = { workspace_selector: kind };
+      next[backendID] = updated;
     }
     setDraft(next);
     setDirty(true);
   };
 
+  const setSelector = (backendID: string, kind: Selector, id: string) => {
+    updateRule(backendID, (prev) => {
+      const selector =
+        kind === ""
+          ? undefined
+          : kind === "id"
+            ? id
+              ? `id:${id}`
+              : ""
+            : kind;
+      return { ...prev, workspace_selector: selector };
+    });
+  };
+
+  const setRPS = (backendID: string, raw: string) => {
+    updateRule(backendID, (prev) => {
+      const n = Number(raw);
+      if (!raw.trim() || !Number.isFinite(n) || n <= 0) {
+        const next = { ...prev };
+        delete next.rate_limit;
+        return next;
+      }
+      return {
+        ...prev,
+        rate_limit: { rps: n, burst: prev.rate_limit?.burst },
+      };
+    });
+  };
+
+  const setBurst = (backendID: string, raw: string) => {
+    updateRule(backendID, (prev) => {
+      if (!prev.rate_limit) return prev;
+      const n = Number(raw);
+      return {
+        ...prev,
+        rate_limit: {
+          rps: prev.rate_limit.rps,
+          burst: Number.isFinite(n) && n > 0 ? n : undefined,
+        },
+      };
+    });
+  };
+
   const save = async () => {
     setSaving(true);
-    // Drop empty / cleared entries.
     const clean: Record<string, BackendPolicy> = {};
     for (const [id, rule] of Object.entries(draft)) {
-      if (rule && rule.workspace_selector) clean[id] = rule;
+      if (rule && (rule.workspace_selector || rule.rate_limit)) {
+        clean[id] = rule;
+      }
     }
     await onSave(clean);
     setSaving(false);
@@ -447,7 +552,8 @@ function StoragePolicyLayer({
       ) : (
         <div class="storage-layer-rows">
           {backendList.map((b) => {
-            const parsed = parseSelector(draft[b.id]?.workspace_selector);
+            const rule = draft[b.id] || {};
+            const parsed = parseSelector(rule.workspace_selector);
             return (
               <div class="storage-layer-row" key={b.id}>
                 <span class="storage-layer-backend">{b.id}</span>
@@ -482,6 +588,32 @@ function StoragePolicyLayer({
                     ))}
                   </select>
                 )}
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  class="config-input"
+                  style="width:90px"
+                  value={rule.rate_limit?.rps ?? ""}
+                  placeholder="rps"
+                  disabled={readOnly || saving}
+                  onInput={(e) =>
+                    setRPS(b.id, (e.target as HTMLInputElement).value)
+                  }
+                />
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="config-input"
+                  style="width:90px"
+                  value={rule.rate_limit?.burst ?? ""}
+                  placeholder="burst"
+                  disabled={readOnly || saving || !rule.rate_limit}
+                  onInput={(e) =>
+                    setBurst(b.id, (e.target as HTMLInputElement).value)
+                  }
+                />
               </div>
             );
           })}

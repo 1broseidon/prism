@@ -458,7 +458,7 @@ type backendPolicyTraceProvider struct {
 	srv *authserver.Server
 }
 
-func (p *backendPolicyTraceProvider) AgentStorageResolutions(prismID string) []admin.AgentStorageResolution {
+func (p *backendPolicyTraceProvider) AgentPolicyResolutions(prismID string) []admin.AgentPolicyResolution {
 	if p.gw == nil || p.srv == nil {
 		return nil
 	}
@@ -470,23 +470,47 @@ func (p *backendPolicyTraceProvider) AgentStorageResolutions(prismID string) []a
 		claims.Groups = append(claims.Groups, pol.Groups...)
 	}
 	gateways := p.gw.PreviewAgentBackendResolutions(claims)
-	out := make([]admin.AgentStorageResolution, 0, len(gateways))
+	out := make([]admin.AgentPolicyResolution, 0, len(gateways))
 	for _, g := range gateways {
-		layers := make([]admin.AgentStorageResolutionLayer, 0, len(g.Layers))
+		entry := admin.AgentPolicyResolution{BackendID: g.BackendID}
+		// Workspace dimension (always present in PreviewAgentBackendResolutions).
+		wsLayers := make([]admin.AgentPolicyResolutionLayer, 0, len(g.Layers))
 		for _, l := range g.Layers {
-			layers = append(layers, admin.AgentStorageResolutionLayer{
-				Source:   l.Source,
-				Selector: l.Selector,
+			wsLayers = append(wsLayers, admin.AgentPolicyResolutionLayer{
+				Source: l.Source, Selector: l.Selector,
 			})
 		}
-		out = append(out, admin.AgentStorageResolution{
-			BackendID:   g.BackendID,
+		entry.Workspace = &admin.AgentWorkspaceResolution{
 			WorkspaceID: g.WorkspaceID,
 			Selector:    g.Selector,
 			Source:      g.Source,
-			Layers:      layers,
+			Layers:      wsLayers,
 			DenyReason:  g.DenyReason,
-		})
+		}
+		// Rate-limit dimension (per-backend; nil when no layer set one).
+		// We need the actual Backend to call ResolveBackendRateLimit; look it
+		// up by id.
+		if be := p.gw.BackendByID(g.BackendID); be != nil {
+			limit, rlRes := p.gw.ResolveBackendRateLimit(claims, be)
+			if limit != nil || len(rlRes.Layers) > 0 {
+				rlLayers := make([]admin.AgentPolicyResolutionLayer, 0, len(rlRes.Layers))
+				for _, l := range rlRes.Layers {
+					rlLayers = append(rlLayers, admin.AgentPolicyResolutionLayer{
+						Source: l.Source, Selector: l.Selector,
+					})
+				}
+				rl := &admin.AgentRateLimitResolution{
+					Source: rlRes.Source,
+					Layers: rlLayers,
+				}
+				if limit != nil {
+					rl.RPS = limit.RPS
+					rl.Burst = limit.Burst
+				}
+				entry.RateLimit = rl
+			}
+		}
+		out = append(out, entry)
 	}
 	return out
 }

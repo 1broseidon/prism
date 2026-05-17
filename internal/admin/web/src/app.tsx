@@ -9,9 +9,9 @@ import { Agents } from "./pages/Agents";
 import { AgentDetail } from "./pages/AgentDetail";
 import { Policy } from "./pages/Policy";
 import { GroupDetail } from "./pages/GroupDetail";
-import { Audit } from "./pages/Audit";
+import { Activity } from "./pages/Activity";
 import { SettingsNetwork } from "./pages/SettingsNetwork";
-import { SettingsWorkspaces } from "./pages/SettingsWorkspaces";
+import { SettingsStorage } from "./pages/SettingsStorage";
 import { WorkspaceDetail } from "./pages/WorkspaceDetail";
 import { SettingsSignIn } from "./pages/SettingsSignIn";
 import { Login } from "./pages/Login";
@@ -46,10 +46,10 @@ export function App() {
           <Route path="/agents/:prismId" component={AgentDetail} />
           <Route path="/policy" component={Policy} />
           <Route path="/policy/groups/:name" component={GroupDetail} />
-          <Route path="/activity" component={Audit} />
+          <Route path="/activity" component={Activity} />
           <Route path="/settings/network" component={SettingsNetwork} />
-          <Route path="/settings/workspaces" component={SettingsWorkspaces} />
-          <Route path="/settings/workspaces/:id" component={WorkspaceDetail} />
+          <Route path="/settings/storage" component={SettingsStorage} />
+          <Route path="/settings/storage/:id" component={WorkspaceDetail} />
           <Route
             path="/settings/sign-in"
             component={SettingsSignIn}

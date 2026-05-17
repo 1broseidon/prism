@@ -61,7 +61,7 @@ function UsageBar({ used, quota }: { used?: number; quota?: number }) {
   );
 }
 
-export function SettingsWorkspaces() {
+export function SettingsStorage() {
   const mutate = canMutate();
   const [config, setConfig] = useState<WorkspaceBridgeConfig | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -103,7 +103,7 @@ export function SettingsWorkspaces() {
       <div>
         <div class="page-header">
           <div>
-            <div class="page-title">workspaces</div>
+            <div class="page-title">storage</div>
           </div>
         </div>
         <div class="empty-state">loading…</div>
@@ -115,7 +115,7 @@ export function SettingsWorkspaces() {
     <div>
       <div class="page-header">
         <div>
-          <div class="page-title">workspaces</div>
+          <div class="page-title">storage</div>
           <div class="page-subtitle">
             storage attached to mcp servers. virtual workspaces persist on the
             gateway; proxied bridges sync from local repos; ephemeral storage
@@ -234,7 +234,10 @@ function LocalBridgesSection({
   };
 
   const gatewayURL = window.location.origin;
-  const installCommand =
+  const agentInstallCommand =
+    `prism-bridge workspace install --gateway ${gatewayURL} ` +
+    `--agent-token <agent-oauth-token> --root "$PWD" --files-only`;
+  const opsInstallCommand =
     `prism-bridge workspace install --gateway ${gatewayURL} ` +
     `--token <workspace-token> --root "$PWD" --files-only`;
 
@@ -293,8 +296,21 @@ function LocalBridgesSection({
         </Field>
 
         <div class="workspace-install">
-          <div class="workspace-install-label">install command</div>
-          <code>{installCommand}</code>
+          <div class="workspace-install-label">per-agent bridge</div>
+          <div class="hint-text" style="margin-bottom:6px">
+            preferred. each agent stamps its own identity, so policy can route
+            tools to its bridge via the "agent" workspace selector.
+          </div>
+          <code>{agentInstallCommand}</code>
+        </div>
+
+        <div class="workspace-install">
+          <div class="workspace-install-label">ops bridge (shared token)</div>
+          <div class="hint-text" style="margin-bottom:6px">
+            legacy. all bridges share one token and register under a single
+            owner — use only when an agent oauth token isn't available.
+          </div>
+          <code>{opsInstallCommand}</code>
         </div>
 
         {mutate && (
@@ -557,7 +573,7 @@ function WorkspaceRow({
       <div class="workspace-row-main">
         <div class="workspace-title">
           <a
-            href={`/settings/workspaces/${encodeURIComponent(ws.id)}`}
+            href={`/settings/storage/${encodeURIComponent(ws.id)}`}
             class="workspace-title-link"
           >
             {ws.id}

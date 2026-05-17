@@ -496,7 +496,7 @@ function BackendSettingsSection({ backend }: { backend: Backend }) {
   );
 }
 
-type StorageType = "" | "ephemeral" | "virtual" | "proxied";
+type StorageType = "" | "ephemeral" | "virtual";
 
 function StorageSection({ backend }: { backend: Backend }) {
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
@@ -539,10 +539,16 @@ function StorageSection({ backend }: { backend: Backend }) {
     () => (workspaces || []).filter((w) => w.type === "virtual"),
     [workspaces],
   );
-  const proxiedOptions = useMemo(
+
+  // Workspaces currently attached to this server. Includes proxied per-agent
+  // bridges that registered themselves with an --agent-token, plus any static
+  // ephemeral/virtual attachment from the storage fallback.
+  const attached = useMemo(
     () =>
-      (workspaces || []).filter((w) => (w.type || "proxied") === "proxied"),
-    [workspaces],
+      (workspaces || []).filter((w) =>
+        (w.backends || []).some((b) => b.id === backend.id),
+      ),
+    [workspaces, backend.id],
   );
 
   const dirty =
@@ -556,8 +562,7 @@ function StorageSection({ backend }: { backend: Backend }) {
     (storageType === "" ||
       storageType === "ephemeral" ||
       (storageType === "virtual" &&
-        (creatingNew ? newId.trim() !== "" : workspaceId !== "")) ||
-      (storageType === "proxied" && workspaceId !== ""));
+        (creatingNew ? newId.trim() !== "" : workspaceId !== "")));
 
   const onTypeChange = (next: StorageType) => {
     setStorageType(next);
@@ -568,9 +573,6 @@ function StorageSection({ backend }: { backend: Backend }) {
       return;
     }
     if (next === "virtual") {
-      // Keep existing selection when it's still valid; otherwise default to
-      // the first available virtual workspace (if any), else open the create
-      // form.
       const stillValid = virtualOptions.some((w) => w.id === workspaceId);
       if (!stillValid) {
         if (virtualOptions.length > 0) {
@@ -581,14 +583,6 @@ function StorageSection({ backend }: { backend: Backend }) {
           setCreatingNew(true);
         }
       }
-      return;
-    }
-    if (next === "proxied") {
-      const stillValid = proxiedOptions.some((w) => w.id === workspaceId);
-      if (!stillValid) {
-        setWorkspaceId(proxiedOptions[0]?.id || "");
-        setCreatingNew(false);
-      }
     }
   };
 
@@ -598,7 +592,6 @@ function StorageSection({ backend }: { backend: Backend }) {
     try {
       let nextId = workspaceId;
 
-      // If creating a virtual workspace inline, do that first.
       if (storageType === "virtual" && creatingNew) {
         const trimmed = newId.trim();
         const quotaN = Number(newQuotaMB);
@@ -614,7 +607,6 @@ function StorageSection({ backend }: { backend: Backend }) {
         await loadWorkspaces();
       }
 
-      // Build the workspace patch. Empty id clears the binding.
       const workspace: WorkspaceConfig =
         storageType === ""
           ? { id: "" }
@@ -644,14 +636,17 @@ function StorageSection({ backend }: { backend: Backend }) {
       <div class="section-header">
         <span class="section-title">storage</span>
         <span class="section-sub">
-          attach this server to a workspace volume. virtual workspaces persist
-          across restarts; ephemeral storage is auto-managed; proxied syncs
-          from a local repo via prism-bridge.
+          fallback workspace used when no policy applies. per-agent routing
+          (including local bridges via --agent-token) is governed by{" "}
+          <a href="/policy" class="link-accent">
+            Policy → Storage
+          </a>
+          .
         </span>
       </div>
       <div class="card runtime-card">
         <div class="storage-row">
-          <label class="config-label">storage type</label>
+          <label class="config-label">fallback type</label>
           <select
             class="config-input"
             value={storageType}
@@ -663,7 +658,6 @@ function StorageSection({ backend }: { backend: Backend }) {
             <option value="">none</option>
             <option value="ephemeral">ephemeral (auto scratch)</option>
             <option value="virtual">virtual (persistent gateway storage)</option>
-            <option value="proxied">proxied (local bridge)</option>
           </select>
         </div>
 
@@ -747,33 +741,6 @@ function StorageSection({ backend }: { backend: Backend }) {
           </div>
         )}
 
-        {storageType === "proxied" && (
-          <div class="storage-row">
-            <label class="config-label">local bridge</label>
-            <select
-              class="config-input"
-              value={workspaceId}
-              disabled={busy || proxiedOptions.length === 0}
-              onChange={(e) =>
-                setWorkspaceId((e.target as HTMLSelectElement).value)
-              }
-            >
-              {proxiedOptions.length === 0 && (
-                <option value="">
-                  no local bridges connected — install one in Settings
-                </option>
-              )}
-              {proxiedOptions.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.id}
-                  {w.hostname ? ` · ${w.hostname}` : ""}
-                  {w.root ? ` · ${w.root}` : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
         <div class="config-actions">
           <button class="save-btn" onClick={save} disabled={!canSave}>
             {busy ? "saving…" : "save"}
@@ -784,6 +751,58 @@ function StorageSection({ backend }: { backend: Backend }) {
         </div>
         {error && <div class="error-text">{error}</div>}
       </div>
+
+      <div class="section-header" style="margin-top:16px">
+        <span class="section-title">active workspaces ({attached.length})</span>
+        <span class="section-sub">
+          workspaces currently bound to this server, including per-agent
+          bridges. resolution at call time follows the policy stack.
+        </span>
+      </div>
+      {attached.length === 0 ? (
+        <div class="empty-state">
+          no workspaces attached. agents will use the fallback above when no
+          policy applies.
+        </div>
+      ) : (
+        <div class="card">
+          <table class="storage-resolution-table">
+            <thead>
+              <tr>
+                <th>workspace</th>
+                <th>type</th>
+                <th>owner</th>
+                <th>usage</th>
+                <th>last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {attached.map((w) => (
+                <tr key={w.id}>
+                  <td>
+                    <a
+                      href={`/settings/storage/${encodeURIComponent(w.id)}`}
+                      class="link-accent"
+                    >
+                      {w.id}
+                    </a>
+                  </td>
+                  <td>{w.type || "proxied"}</td>
+                  <td>{w.owner || "—"}</td>
+                  <td>
+                    {w.quota_bytes
+                      ? `${fmtBytes(w.used_bytes)} / ${fmtBytes(w.quota_bytes)}`
+                      : w.used_bytes
+                        ? `${fmtBytes(w.used_bytes)}`
+                        : "—"}
+                  </td>
+                  <td>{w.last_seen ? fmtAge(w.last_seen) : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

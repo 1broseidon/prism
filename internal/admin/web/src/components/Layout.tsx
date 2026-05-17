@@ -26,7 +26,7 @@ const CONSOLE_FOOTER: NavItem[] = [{ href: "/settings/network", label: "Settings
 
 const SETTINGS_NAV: NavItem[] = [
   { href: "/settings/network", label: "Network" },
-  { href: "/settings/workspaces", label: "Workspaces" },
+  { href: "/settings/storage", label: "Storage" },
   { href: "/settings/sign-in", label: "Sign-in" },
 ];
 

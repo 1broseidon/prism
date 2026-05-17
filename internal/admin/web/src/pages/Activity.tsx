@@ -23,7 +23,7 @@ const RANGE_MS: Record<Range, number | null> = {
   all: null,
 };
 
-export function Audit() {
+export function Activity() {
   const ev = events.data.value || [];
   const ag = agents.data.value || [];
   const loc = useLocation();
@@ -330,6 +330,10 @@ function EventDetail({
   event: AuditEvent;
   fullName: string;
 }) {
+  const trace = event.policy_trace;
+  const hasTrace =
+    trace && (trace.workspace_id || trace.selector || trace.source);
+
   return (
     <div class="audit-detail">
       <DetailRow label="timestamp" value={event.ts} mono />
@@ -346,6 +350,36 @@ function EventDetail({
         label="latency"
         value={event.allowed ? `${event.latency_ms}ms` : "—"}
       />
+      {hasTrace && (
+        <>
+          {trace.workspace_id && (
+            <DetailRow label="workspace" value={trace.workspace_id} mono />
+          )}
+          {trace.selector && (
+            <DetailRow label="selector" value={trace.selector} mono />
+          )}
+          {trace.source && (
+            <DetailRow label="decided by" value={trace.source} />
+          )}
+          {(trace.layers || []).length > 0 && (
+            <div class="audit-detail-row">
+              <span class="audit-detail-label">policy stack</span>
+              <span class="audit-detail-value">
+                {(trace.layers || []).map((l, i) => (
+                  <span class="audit-trace-layer" key={`${l.source}-${i}`}>
+                    <span class="audit-trace-source">{l.source}</span>
+                    {l.selector ? (
+                      <code class="audit-trace-selector">{l.selector}</code>
+                    ) : (
+                      <span class="hint-text">no rule</span>
+                    )}
+                  </span>
+                ))}
+              </span>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

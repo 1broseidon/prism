@@ -16,28 +16,45 @@ type AgentPolicy struct {
 	BackendPolicies map[string]auth.BackendPolicy `json:"backend_policies,omitempty"`
 }
 
-// AgentStorageResolution describes the workspace policy decision for a single
-// (agent, backend) pair, including the layer chain that produced it.
-type AgentStorageResolution struct {
-	BackendID   string                        `json:"backend_id"`
-	WorkspaceID string                        `json:"workspace_id,omitempty"`
-	Selector    string                        `json:"selector"`
-	Source      string                        `json:"source"`
-	Layers      []AgentStorageResolutionLayer `json:"layers,omitempty"`
-	DenyReason  string                        `json:"deny_reason,omitempty"`
+// AgentPolicyResolution describes the full per-backend policy decision for
+// a single agent — workspace selection plus rate-limit, each with its own
+// source and layer chain.
+type AgentPolicyResolution struct {
+	BackendID string                    `json:"backend_id"`
+	Workspace *AgentWorkspaceResolution `json:"workspace,omitempty"`
+	RateLimit *AgentRateLimitResolution `json:"rate_limit,omitempty"`
 }
 
-// AgentStorageResolutionLayer is one tier of the resolution trace.
-type AgentStorageResolutionLayer struct {
+// AgentWorkspaceResolution is the workspace-dimension trace.
+type AgentWorkspaceResolution struct {
+	WorkspaceID string                       `json:"workspace_id,omitempty"`
+	Selector    string                       `json:"selector"`
+	Source      string                       `json:"source"`
+	Layers      []AgentPolicyResolutionLayer `json:"layers,omitempty"`
+	DenyReason  string                       `json:"deny_reason,omitempty"`
+}
+
+// AgentRateLimitResolution is the rate-limit-dimension trace. Limit is nil
+// when no policy layer set one.
+type AgentRateLimitResolution struct {
+	RPS    float64                      `json:"rps,omitempty"`
+	Burst  int                          `json:"burst,omitempty"`
+	Source string                       `json:"source,omitempty"`
+	Layers []AgentPolicyResolutionLayer `json:"layers,omitempty"`
+}
+
+// AgentPolicyResolutionLayer is one tier of the resolution trace, shared
+// across dimensions.
+type AgentPolicyResolutionLayer struct {
 	Source   string `json:"source"`
 	Selector string `json:"selector,omitempty"`
 }
 
-// BackendPolicyTraceProvider returns the layered workspace resolution for an
-// agent across all known backends. Powers the admin "why this workspace?"
+// BackendPolicyTraceProvider returns the full layered policy resolution for
+// an agent across all known backends. Powers the admin "why this decision?"
 // view on Agent detail.
 type BackendPolicyTraceProvider interface {
-	AgentStorageResolutions(prismID string) []AgentStorageResolution
+	AgentPolicyResolutions(prismID string) []AgentPolicyResolution
 }
 
 // AgentManager is the interface the admin API uses to manage agents and policy.
@@ -146,19 +163,19 @@ func (a *API) handleSetAgentBackendPolicies(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "prism_id": prismID})
 }
 
-// handleAgentStorageResolution handles GET /agents/{prism_id}/storage-resolution.
-func (a *API) handleAgentStorageResolution(w http.ResponseWriter, r *http.Request) {
+// handleAgentPolicyResolution handles GET /agents/{prism_id}/policy-resolution.
+func (a *API) handleAgentPolicyResolution(w http.ResponseWriter, r *http.Request) {
 	if a.traceProvider == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage resolution preview not available"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy resolution preview not available"})
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/agents/")
-	prismID := strings.TrimSuffix(path, "/storage-resolution")
+	prismID := strings.TrimSuffix(path, "/policy-resolution")
 	if prismID == path || !isValidID(prismID) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/storage-resolution with a valid prism_id"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/policy-resolution with a valid prism_id"})
 		return
 	}
-	writeJSON(w, http.StatusOK, a.traceProvider.AgentStorageResolutions(prismID))
+	writeJSON(w, http.StatusOK, a.traceProvider.AgentPolicyResolutions(prismID))
 }
 
 // handleDeleteAgentPolicy handles DELETE /agents/{prism_id}/policy — remove custom policy.

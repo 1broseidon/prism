@@ -138,7 +138,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /backends", a.session(http.HandlerFunc(a.handleBackends)))
 	mux.Handle("GET /info", a.session(http.HandlerFunc(a.handleInfo)))
 	mux.Handle("GET /agents", a.session(http.HandlerFunc(a.handleAgents)))
-	mux.Handle("GET /agents/{prism_id}/storage-resolution", a.session(http.HandlerFunc(a.handleAgentStorageResolution)))
+	mux.Handle("GET /agents/{prism_id}/policy-resolution", a.session(http.HandlerFunc(a.handleAgentPolicyResolution)))
 	mux.Handle("GET /agents/", a.session(http.HandlerFunc(a.handleAgentByPrismID)))
 	mux.Handle("GET /events", a.session(http.HandlerFunc(a.handleEvents)))
 	mux.Handle("GET /groups", a.session(http.HandlerFunc(a.handleListGroups)))

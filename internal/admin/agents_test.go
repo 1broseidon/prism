@@ -128,9 +128,9 @@ func newTestAPI() (*API, *mockAgentManager) {
 	return api, mgr
 }
 
-type stubTraceProvider struct{ resolutions []AgentStorageResolution }
+type stubTraceProvider struct{ resolutions []AgentPolicyResolution }
 
-func (s *stubTraceProvider) AgentStorageResolutions(_ string) []AgentStorageResolution {
+func (s *stubTraceProvider) AgentPolicyResolutions(_ string) []AgentPolicyResolution {
 	return s.resolutions
 }
 
@@ -153,25 +153,35 @@ func TestSetAgentBackendPolicies(t *testing.T) {
 	}
 }
 
-func TestAgentStorageResolutionEndpoint(t *testing.T) {
+func TestAgentPolicyResolutionEndpoint(t *testing.T) {
 	api, _ := newTestAPI()
 	api.SetBackendPolicyTraceProvider(&stubTraceProvider{
-		resolutions: []AgentStorageResolution{
-			{BackendID: "brainfile", Selector: "agent", Source: "defaults", WorkspaceID: "a-repo"},
+		resolutions: []AgentPolicyResolution{
+			{
+				BackendID: "brainfile",
+				Workspace: &AgentWorkspaceResolution{
+					Selector: "agent", Source: "defaults", WorkspaceID: "a-repo",
+				},
+				RateLimit: &AgentRateLimitResolution{
+					RPS: 10, Burst: 20, Source: "group:engineering",
+				},
+			},
 		},
 	})
 
-	r := httptest.NewRequest(http.MethodGet, "/agents/prism-uuid-1/storage-resolution", nil)
+	r := httptest.NewRequest(http.MethodGet, "/agents/prism-uuid-1/policy-resolution", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	var got []AgentStorageResolution
+	var got []AgentPolicyResolution
 	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got) != 1 || got[0].BackendID != "brainfile" || got[0].WorkspaceID != "a-repo" {
+	if len(got) != 1 || got[0].BackendID != "brainfile" ||
+		got[0].Workspace == nil || got[0].Workspace.WorkspaceID != "a-repo" ||
+		got[0].RateLimit == nil || got[0].RateLimit.RPS != 10 {
 		t.Fatalf("trace = %+v", got)
 	}
 }

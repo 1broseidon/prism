@@ -47,7 +47,7 @@ export function WorkspaceDetail() {
     return (
       <div>
         <div class="detail-breadcrumb">
-          <a href="/settings/workspaces">workspaces</a>
+          <a href="/settings/storage">workspaces</a>
           <span class="breadcrumb-sep">/</span>
           <span class="breadcrumb-current">{id}</span>
         </div>
@@ -59,7 +59,7 @@ export function WorkspaceDetail() {
     return (
       <div>
         <div class="detail-breadcrumb">
-          <a href="/settings/workspaces">workspaces</a>
+          <a href="/settings/storage">workspaces</a>
           <span class="breadcrumb-sep">/</span>
           <span class="breadcrumb-current">{id}</span>
         </div>
@@ -74,7 +74,7 @@ export function WorkspaceDetail() {
   return (
     <div>
       <div class="detail-breadcrumb">
-        <a href="/settings/workspaces">workspaces</a>
+        <a href="/settings/storage">workspaces</a>
         <span class="breadcrumb-sep">/</span>
         <span class="breadcrumb-current">{ws.id}</span>
       </div>
@@ -197,7 +197,7 @@ export function WorkspaceDetail() {
       <div class="section">
         <button
           class="section-btn"
-          onClick={() => loc.route("/settings/workspaces")}
+          onClick={() => loc.route("/settings/storage")}
         >
           ← back to workspaces
         </button>

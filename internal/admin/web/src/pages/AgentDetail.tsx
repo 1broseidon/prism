@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { useLocation, useRoute } from "preact-iso";
 import { agents, groups, backends, events } from "../state";
 import { deleteJSON, getJSON, putJSON } from "../api/client";
@@ -12,7 +12,9 @@ import { decodeAgentRouteID, findAgentForRoute } from "../util/agentRoute";
 import type {
   Agent,
   AgentPolicy,
-  AgentStorageResolution,
+  AgentPolicyResolution,
+  BackendPolicy,
+  Workspace,
 } from "../api/types";
 
 const SYSTEM_SCOPE = "mcp:connect";
@@ -93,7 +95,8 @@ export function AgentDetail() {
 
       <MetaRow agent={agent} />
       <PolicySection agent={agent} />
-      <StorageResolutionSection agent={agent} />
+      <BackendPolicySection agent={agent} />
+      <PolicyResolutionSection agent={agent} />
       <ActivitySection agent={agent} />
       {agent.dynamic && canMutate() && (
         <DangerSection
@@ -583,8 +586,241 @@ function DangerSection({
 }
 
 
-function StorageResolutionSection({ agent }: { agent: Agent }) {
-  const [items, setItems] = useState<AgentStorageResolution[] | null>(null);
+type SelectorKind = "" | "static" | "agent" | "id";
+
+function parseSelector(raw: string | undefined): {
+  kind: SelectorKind;
+  id: string;
+} {
+  if (!raw) return { kind: "", id: "" };
+  if (raw === "static" || raw === "agent") return { kind: raw, id: "" };
+  if (raw.startsWith("id:")) return { kind: "id", id: raw.slice("id:".length) };
+  return { kind: "", id: "" };
+}
+
+function BackendPolicySection({ agent }: { agent: Agent }) {
+  const mutate = canMutate();
+  const backendList = backends.data.value || [];
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const initial = agent.policy?.backend_policies || {};
+  const [draft, setDraft] = useState<Record<string, BackendPolicy>>(initial);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDraft(agent.policy?.backend_policies || {});
+    setDirty(false);
+  }, [agent.prism_id, JSON.stringify(agent.policy?.backend_policies || {})]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const ws = await getJSON<Workspace[]>("/workspaces");
+        if (!cancelled) setWorkspaces(ws);
+      } catch {
+        // silent — only used to populate workspace picker
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const virtualOptions = useMemo(
+    () => workspaces.filter((w) => w.type === "virtual"),
+    [workspaces],
+  );
+
+  if (!agent.dynamic || !agent.prism_id) {
+    return null;
+  }
+
+  const setRule = (backendID: string, next: BackendPolicy | undefined) => {
+    const nextDraft = { ...draft };
+    if (!next || (!next.workspace_selector && !next.rate_limit)) {
+      delete nextDraft[backendID];
+    } else {
+      nextDraft[backendID] = next;
+    }
+    setDraft(nextDraft);
+    setDirty(true);
+  };
+
+  const setSelector = (backendID: string, kind: SelectorKind, id: string) => {
+    const current = draft[backendID] || {};
+    const selector =
+      kind === ""
+        ? undefined
+        : kind === "id"
+          ? id
+            ? `id:${id}`
+            : ""
+          : kind;
+    setRule(backendID, {
+      ...current,
+      workspace_selector: selector,
+    });
+  };
+
+  const setRPS = (backendID: string, raw: string) => {
+    const current = draft[backendID] || {};
+    const n = Number(raw);
+    if (!raw.trim() || !Number.isFinite(n) || n <= 0) {
+      const next = { ...current };
+      delete next.rate_limit;
+      setRule(backendID, next);
+      return;
+    }
+    setRule(backendID, {
+      ...current,
+      rate_limit: { rps: n, burst: current.rate_limit?.burst },
+    });
+  };
+
+  const setBurst = (backendID: string, raw: string) => {
+    const current = draft[backendID] || {};
+    if (!current.rate_limit) return;
+    const n = Number(raw);
+    setRule(backendID, {
+      ...current,
+      rate_limit: {
+        rps: current.rate_limit.rps,
+        burst: Number.isFinite(n) && n > 0 ? n : undefined,
+      },
+    });
+  };
+
+  const save = async () => {
+    if (!agent.prism_id) return;
+    setSaving(true);
+    const clean: Record<string, BackendPolicy> = {};
+    for (const [id, rule] of Object.entries(draft)) {
+      if (rule && (rule.workspace_selector || rule.rate_limit)) {
+        clean[id] = rule;
+      }
+    }
+    await withToast(async () => {
+      await putJSON(
+        `/agents/${encodeURIComponent(agent.prism_id!)}/backend-policies`,
+        clean,
+      );
+      await agents.refresh();
+    });
+    setSaving(false);
+    setDirty(false);
+  };
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">storage & rate limits</span>
+        <span class="section-sub">
+          per-agent overrides for each backend. stacks on top of group →
+          defaults → backend static floor. leave blank to inherit.
+        </span>
+      </div>
+      {backendList.length === 0 ? (
+        <div class="empty-state">no backends registered yet.</div>
+      ) : (
+        <div class="card">
+          <div class="storage-layer-rows">
+            {backendList.map((b) => {
+              const rule = draft[b.id] || {};
+              const parsed = parseSelector(rule.workspace_selector);
+              return (
+                <div class="storage-layer-row" key={b.id}>
+                  <span class="storage-layer-backend">{b.id}</span>
+                  <select
+                    class="config-input"
+                    value={parsed.kind}
+                    disabled={!mutate || saving}
+                    onChange={(e) =>
+                      setSelector(
+                        b.id,
+                        (e.target as HTMLSelectElement).value as SelectorKind,
+                        parsed.id,
+                      )
+                    }
+                  >
+                    <option value="">inherit</option>
+                    <option value="static">static (backend floor)</option>
+                    <option value="agent">agent (bring your own)</option>
+                    <option value="id">id (pin workspace)</option>
+                  </select>
+                  {parsed.kind === "id" && (
+                    <select
+                      class="config-input"
+                      value={parsed.id}
+                      disabled={!mutate || saving}
+                      onChange={(e) =>
+                        setSelector(
+                          b.id,
+                          "id",
+                          (e.target as HTMLSelectElement).value,
+                        )
+                      }
+                    >
+                      <option value="">— select workspace —</option>
+                      {virtualOptions.map((w) => (
+                        <option value={w.id} key={w.id}>
+                          {w.id}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    class="config-input"
+                    style="width:90px"
+                    value={rule.rate_limit?.rps ?? ""}
+                    placeholder="rps"
+                    disabled={!mutate || saving}
+                    onInput={(e) =>
+                      setRPS(b.id, (e.target as HTMLInputElement).value)
+                    }
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    class="config-input"
+                    style="width:90px"
+                    value={rule.rate_limit?.burst ?? ""}
+                    placeholder="burst"
+                    disabled={!mutate || saving || !rule.rate_limit}
+                    onInput={(e) =>
+                      setBurst(b.id, (e.target as HTMLInputElement).value)
+                    }
+                  />
+                </div>
+              );
+            })}
+          </div>
+          {mutate && (
+            <div class="config-actions">
+              <button
+                class="save-btn"
+                onClick={save}
+                disabled={!dirty || saving}
+              >
+                {saving ? "saving…" : "save"}
+              </button>
+              {dirty && !saving && (
+                <span class="config-dirty-marker">unsaved changes</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PolicyResolutionSection({ agent }: { agent: Agent }) {
+  const [items, setItems] = useState<AgentPolicyResolution[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -595,27 +831,26 @@ function StorageResolutionSection({ agent }: { agent: Agent }) {
     let cancelled = false;
     (async () => {
       try {
-        const data = await getJSON<AgentStorageResolution[]>(
-          `/agents/${encodeURIComponent(agent.prism_id!)}/storage-resolution`,
+        const data = await getJSON<AgentPolicyResolution[]>(
+          `/agents/${encodeURIComponent(agent.prism_id!)}/policy-resolution`,
         );
         if (!cancelled) setItems(data);
       } catch (e) {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [agent.prism_id]);
+  }, [agent.prism_id, JSON.stringify(agent.policy?.backend_policies || {})]);
 
   return (
     <div class="section">
       <div class="section-header">
-        <span class="section-title">storage resolution</span>
+        <span class="section-title">policy resolution</span>
         <span class="section-sub">
-          which workspace each backend would attach to for this agent, with the
-          policy layer that decided.
+          how each backend resolves for this agent right now — workspace
+          selection and rate limit, with the layer that decided.
         </span>
       </div>
       {error && <div class="error-text">{error}</div>}
@@ -634,27 +869,37 @@ function StorageResolutionSection({ agent }: { agent: Agent }) {
                 <th>workspace</th>
                 <th>selector</th>
                 <th>source</th>
+                <th>rate limit</th>
+                <th>source</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((r) => (
-                <tr key={r.backend_id}>
-                  <td class="storage-resolution-backend">{r.backend_id}</td>
-                  <td>
-                    {r.deny_reason ? (
-                      <span class="storage-resolution-deny">
-                        {r.deny_reason}
-                      </span>
-                    ) : (
-                      r.workspace_id || "—"
-                    )}
-                  </td>
-                  <td>
-                    <code>{r.selector}</code>
-                  </td>
-                  <td class="storage-resolution-source">{r.source}</td>
-                </tr>
-              ))}
+              {items.map((r) => {
+                const ws = r.workspace;
+                const rl = r.rate_limit;
+                const wsValue = ws?.deny_reason ? (
+                  <span class="storage-resolution-deny">{ws.deny_reason}</span>
+                ) : (
+                  ws?.workspace_id || "—"
+                );
+                const rlValue = rl?.rps
+                  ? `${rl.rps} rps${rl.burst ? ` · burst ${rl.burst}` : ""}`
+                  : "unlimited";
+                return (
+                  <tr key={r.backend_id}>
+                    <td class="storage-resolution-backend">{r.backend_id}</td>
+                    <td>{wsValue}</td>
+                    <td>{ws?.selector ? <code>{ws.selector}</code> : "—"}</td>
+                    <td class="storage-resolution-source">
+                      {ws?.source || "—"}
+                    </td>
+                    <td>{rlValue}</td>
+                    <td class="storage-resolution-source">
+                      {rl?.source || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -662,4 +907,3 @@ function StorageResolutionSection({ agent }: { agent: Agent }) {
     </div>
   );
 }
-

@@ -1704,6 +1704,15 @@ type AgentBackendResolution struct {
 	DenyReason  string                 `json:"deny_reason,omitempty"`
 }
 
+// BackendByID returns the connected Backend for the given id, or nil. Read-
+// only accessor for admin/UI machinery that needs to feed a backend into
+// the resolver functions.
+func (g *Gateway) BackendByID(id string) *Backend {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.backends[id]
+}
+
 // PreviewAgentBackendResolutions returns, for each currently-known backend,
 // what workspace policy resolution would pick for the given agent identity.
 // Used by the admin UI to render the "why" view; pure preview, no side

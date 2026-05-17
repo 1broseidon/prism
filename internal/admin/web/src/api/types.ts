@@ -115,18 +115,30 @@ export interface DefaultsResponse {
   backend_policies?: Record<string, BackendPolicy>;
 }
 
-export interface AgentStorageResolutionLayer {
+export interface AgentPolicyResolutionLayer {
   source: string;
   selector?: string;
 }
 
-export interface AgentStorageResolution {
-  backend_id: string;
+export interface AgentWorkspaceResolution {
   workspace_id?: string;
   selector: string;
   source: string;
-  layers?: AgentStorageResolutionLayer[];
+  layers?: AgentPolicyResolutionLayer[];
   deny_reason?: string;
+}
+
+export interface AgentRateLimitResolution {
+  rps?: number;
+  burst?: number;
+  source?: string;
+  layers?: AgentPolicyResolutionLayer[];
+}
+
+export interface AgentPolicyResolution {
+  backend_id: string;
+  workspace?: AgentWorkspaceResolution;
+  rate_limit?: AgentRateLimitResolution;
 }
 
 export interface PolicyTraceLayer {
