@@ -18,6 +18,7 @@ import (
 
 	"github.com/1broseidon/prism/internal/admin"
 	"github.com/1broseidon/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/metrics"
 	"github.com/1broseidon/prism/internal/store"
 	ws "github.com/1broseidon/prism/internal/workspace"
@@ -25,9 +26,10 @@ import (
 )
 
 const (
-	workspaceSettingsKVKey = "gateway/workspace_bridge/v1"
-	workspacePollTimeout   = 25 * time.Second
-	workspaceCallTimeout   = 60 * time.Second
+	workspaceSettingsKVKey  = "gateway/workspace_bridge/v1"
+	workspaceRegistryPrefix = "gateway/workspaces/"
+	workspacePollTimeout    = 25 * time.Second
+	workspaceCallTimeout    = 60 * time.Second
 )
 
 var workspaceIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
@@ -35,6 +37,12 @@ var workspaceIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 type workspaceBridgeSettings struct {
 	Enabled   bool   `json:"enabled"`
 	TokenHash string `json:"token_hash,omitempty"`
+}
+
+type workspaceRegistryEntry struct {
+	ID        string    `json:"id"`
+	Type      string    `json:"type"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type workspaceBridgeManager struct {
@@ -652,10 +660,101 @@ func (m *workspaceBridgeManager) handleUnregister(w http.ResponseWriter, r *http
 
 // ListWorkspaces returns connected workspace bridge status for the admin API.
 func (g *Gateway) ListWorkspaces() []admin.WorkspaceStatus {
-	if g.workspace == nil {
+	statuses := make([]admin.WorkspaceStatus, 0)
+	if g.workspace != nil {
+		statuses = append(statuses, g.workspace.list()...)
+	}
+	if g.kvStore != nil {
+		statuses = mergeWorkspaceRegistryStatuses(statuses, g.loadRegisteredWorkspaces())
+	}
+	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ID < statuses[j].ID })
+	return statuses
+}
+
+// CreateWorkspace persists a remote-only workspace. Proxied workspaces are
+// created by running a local workspace bridge.
+func (g *Gateway) CreateWorkspace(_ context.Context, req admin.WorkspaceCreateRequest) (admin.WorkspaceStatus, error) {
+	if g.kvStore == nil {
+		return admin.WorkspaceStatus{}, errors.New("workspace persistence is not configured")
+	}
+	id := strings.TrimSpace(req.ID)
+	if !workspaceIDRE.MatchString(id) {
+		return admin.WorkspaceStatus{}, errors.New("workspace id must match ^[A-Za-z0-9_.-]{1,64}$")
+	}
+	typ := strings.TrimSpace(req.Type)
+	switch typ {
+	case config.WorkspaceTypeVirtual, config.WorkspaceTypeEphemeral:
+	case "", config.WorkspaceTypeProxied:
+		return admin.WorkspaceStatus{}, errors.New("remote workspaces must be virtual or ephemeral")
+	default:
+		return admin.WorkspaceStatus{}, fmt.Errorf("workspace type must be %q or %q", config.WorkspaceTypeVirtual, config.WorkspaceTypeEphemeral)
+	}
+	entry := workspaceRegistryEntry{
+		ID:        id,
+		Type:      typ,
+		CreatedAt: time.Now().UTC(),
+	}
+	data, err := json.Marshal(&entry)
+	if err != nil {
+		return admin.WorkspaceStatus{}, err
+	}
+	if err := g.kvStore.Set(workspaceRegistryPrefix+id, data); err != nil {
+		return admin.WorkspaceStatus{}, err
+	}
+	return workspaceStatusFromRegistry(entry), nil
+}
+
+func (g *Gateway) loadRegisteredWorkspaces() []admin.WorkspaceStatus {
+	keys, err := g.kvStore.List(workspaceRegistryPrefix)
+	if err != nil {
+		g.logger.Warn("failed to list workspace registry", "error", err)
 		return nil
 	}
-	return g.workspace.list()
+	out := make([]admin.WorkspaceStatus, 0, len(keys))
+	for _, key := range keys {
+		data, err := g.kvStore.Get(key)
+		if err != nil {
+			g.logger.Warn("failed to read workspace registry entry", "key", key, "error", err)
+			continue
+		}
+		var entry workspaceRegistryEntry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			g.logger.Warn("failed to decode workspace registry entry", "key", key, "error", err)
+			continue
+		}
+		out = append(out, workspaceStatusFromRegistry(entry))
+	}
+	return out
+}
+
+func mergeWorkspaceRegistryStatuses(live, registered []admin.WorkspaceStatus) []admin.WorkspaceStatus {
+	seen := make(map[string]int, len(live))
+	for i := range live {
+		seen[live[i].ID] = i
+	}
+	for i := range registered {
+		status := &registered[i]
+		if idx, ok := seen[status.ID]; ok {
+			if live[idx].Type == "" {
+				live[idx].Type = status.Type
+			}
+			if live[idx].CreatedAt.IsZero() {
+				live[idx].CreatedAt = status.CreatedAt
+			}
+			continue
+		}
+		live = append(live, *status)
+	}
+	return live
+}
+
+func workspaceStatusFromRegistry(entry workspaceRegistryEntry) admin.WorkspaceStatus {
+	return admin.WorkspaceStatus{
+		ID:        entry.ID,
+		Type:      entry.Type,
+		CreatedAt: entry.CreatedAt,
+		Connected: entry.Type == config.WorkspaceTypeVirtual,
+	}
 }
 
 func (m *workspaceBridgeManager) list() []admin.WorkspaceStatus {
@@ -668,6 +767,7 @@ func (m *workspaceBridgeManager) list() []admin.WorkspaceStatus {
 		copy(backends, conn.backends)
 		out = append(out, admin.WorkspaceStatus{
 			ID:        conn.id,
+			Type:      config.WorkspaceTypeProxied,
 			Hostname:  conn.hostname,
 			Root:      conn.root,
 			Version:   conn.version,
@@ -682,10 +782,19 @@ func (m *workspaceBridgeManager) list() []admin.WorkspaceStatus {
 
 // DisconnectWorkspace removes a workspace bridge and its registered tools.
 func (g *Gateway) DisconnectWorkspace(id string) bool {
-	if g.workspace == nil {
-		return false
+	disconnected := false
+	if g.workspace != nil {
+		disconnected = g.workspace.disconnectWorkspace(id)
 	}
-	return g.workspace.disconnectWorkspace(id)
+	deleted := false
+	if g.kvStore != nil && workspaceIDRE.MatchString(id) {
+		key := workspaceRegistryPrefix + id
+		if _, err := g.kvStore.Get(key); err == nil {
+			_ = g.kvStore.Delete(key)
+			deleted = true
+		}
+	}
+	return disconnected || deleted
 }
 
 func (m *workspaceBridgeManager) disconnectWorkspace(id string) bool {

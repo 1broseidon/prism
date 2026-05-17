@@ -370,6 +370,36 @@ func TestWorkspaceSelectorHelpers(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRegistryCreatesListsDeletesRemoteWorkspaces(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:   "team-a",
+		Type: config.WorkspaceTypeVirtual,
+	}); err != nil {
+		t.Fatalf("create virtual workspace: %v", err)
+	}
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:   "local",
+		Type: config.WorkspaceTypeProxied,
+	}); err == nil {
+		t.Fatal("expected proxied registry create to be rejected")
+	}
+
+	list := gw.ListWorkspaces()
+	if len(list) != 1 || list[0].ID != "team-a" || list[0].Type != config.WorkspaceTypeVirtual || !list[0].Connected {
+		t.Fatalf("workspace list = %+v", list)
+	}
+	if !gw.DisconnectWorkspace("team-a") {
+		t.Fatal("expected registry workspace delete to succeed")
+	}
+	if gw.DisconnectWorkspace("team-a") {
+		t.Fatal("second delete should report not found")
+	}
+}
+
 func TestRouteToolCallCanAttachAlternateWorkspaceInstance(t *testing.T) {
 	var mu sync.Mutex
 	var spawnPayloads []map[string]any

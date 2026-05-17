@@ -143,6 +143,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /groups/", a.admin(http.HandlerFunc(a.handleSetGroup)))
 	mux.Handle("DELETE /groups/", a.admin(http.HandlerFunc(a.handleDeleteGroup)))
 	mux.Handle("PUT /defaults", a.admin(http.HandlerFunc(a.handleSetDefaults)))
+	mux.Handle("POST /workspaces", a.admin(http.HandlerFunc(a.handleCreateWorkspace)))
 	mux.Handle("DELETE /workspaces/", a.admin(http.HandlerFunc(a.handleDeleteWorkspace)))
 	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
 	mux.Handle("PATCH /backends/", a.admin(http.HandlerFunc(a.handlePatchBackend)))

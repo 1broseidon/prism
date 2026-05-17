@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -22,6 +23,12 @@ type WorkspaceBridgeUpdate struct {
 	Token   string `json:"token,omitempty"`
 }
 
+// WorkspaceCreateRequest creates a remote-only workspace registry entry.
+type WorkspaceCreateRequest struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
 // WorkspaceToolStatus is a tool exposed by a connected workspace bridge.
 type WorkspaceToolStatus struct {
 	Name        string `json:"name"`
@@ -39,9 +46,11 @@ type WorkspaceBackendStatus struct {
 // WorkspaceStatus is shown in the admin console.
 type WorkspaceStatus struct {
 	ID        string                   `json:"id"`
+	Type      string                   `json:"type,omitempty"`
 	Hostname  string                   `json:"hostname,omitempty"`
 	Root      string                   `json:"root,omitempty"`
 	Version   string                   `json:"version,omitempty"`
+	CreatedAt time.Time                `json:"created_at,omitempty"`
 	LastSeen  time.Time                `json:"last_seen,omitempty"`
 	Connected bool                     `json:"connected"`
 	Backends  []WorkspaceBackendStatus `json:"backends,omitempty"`
@@ -51,6 +60,7 @@ type WorkspaceStatus struct {
 type WorkspaceBridgeManager interface {
 	WorkspaceBridgeConfig() WorkspaceBridgeConfigView
 	SetWorkspaceBridgeConfig(WorkspaceBridgeUpdate) (WorkspaceBridgeConfigView, error)
+	CreateWorkspace(context.Context, WorkspaceCreateRequest) (WorkspaceStatus, error)
 	ListWorkspaces() []WorkspaceStatus
 	DisconnectWorkspace(id string) bool
 }
@@ -91,6 +101,26 @@ func (a *API) handleListWorkspaces(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, mgr.ListWorkspaces())
+}
+
+func (a *API) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
+	mgr, ok := a.backendMgr.(WorkspaceBridgeManager)
+	if !ok {
+		http.Error(w, "workspace bridge settings not available", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	var req WorkspaceCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	status, err := mgr.CreateWorkspace(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, status)
 }
 
 func (a *API) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {

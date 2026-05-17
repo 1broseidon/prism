@@ -580,6 +580,8 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [workspaceID, setWorkspaceID] = useState("");
+  const [workspaceType, setWorkspaceType] = useState<"virtual" | "ephemeral">("virtual");
 
   const load = async () => {
     try {
@@ -620,6 +622,17 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
   const disconnect = async (id: string) => {
     await withToast(async () => {
       await deleteJSON(`/workspaces/${encodeURIComponent(id)}`);
+      await load();
+    });
+  };
+
+  const createWorkspace = async () => {
+    await withToast(async () => {
+      await postJSON<Workspace>("/workspaces", {
+        id: workspaceID.trim(),
+        type: workspaceType,
+      });
+      setWorkspaceID("");
       await load();
     });
   };
@@ -690,6 +703,37 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
         </div>
 
         {mutate && (
+          <div class="inline-form server-workspace-form">
+            <input
+              type="text"
+              class="config-input"
+              value={workspaceID}
+              placeholder="remote workspace id"
+              spellcheck={false}
+              onInput={(e) => setWorkspaceID((e.target as HTMLInputElement).value)}
+            />
+            <select
+              value={workspaceType}
+              onChange={(e) =>
+                setWorkspaceType(
+                  (e.target as HTMLSelectElement).value as "virtual" | "ephemeral",
+                )
+              }
+            >
+              <option value="virtual">remote persistent</option>
+              <option value="ephemeral">temporary scratch</option>
+            </select>
+            <button
+              class="section-btn"
+              disabled={!workspaceID.trim()}
+              onClick={createWorkspace}
+            >
+              create workspace
+            </button>
+          </div>
+        )}
+
+        {mutate && (
           <div class="config-actions">
             <button
               class="save-btn"
@@ -719,6 +763,7 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
                 <div class="workspace-row-main">
                   <div class="workspace-title">
                     <span>{ws.id}</span>
+                    <span class="pill pill-neutral">{ws.type || "proxied"}</span>
                     <span class={ws.connected ? "pill pill-ok" : "pill pill-warn"}>
                       {ws.connected ? "connected" : "stale"}
                     </span>

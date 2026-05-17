@@ -337,6 +337,9 @@ function AddBackend({
     authServer: string;
     callbackUrl: string;
   } | null>(null);
+  const proxiedWorkspaces = workspaces.filter(
+    (ws) => (ws.type || "proxied") === "proxied",
+  );
 
   const scheduleRefresh = () => {
     [1000, 2500, 5000, 9000, 15000].forEach((delay) => {
@@ -530,7 +533,7 @@ function AddBackend({
           {workspace.type === "proxied" ? (
             <select
               value={workspace.id || ""}
-              disabled={workspaces.length === 0}
+              disabled={proxiedWorkspaces.length === 0}
               onChange={(e) =>
                 setWorkspace({
                   ...workspace,
@@ -540,11 +543,11 @@ function AddBackend({
               }
             >
               <option value="">
-                {workspaces.length === 0
+                {proxiedWorkspaces.length === 0
                   ? "no local bridges connected"
                   : "select workspace"}
               </option>
-              {workspaces.map((ws) => (
+              {proxiedWorkspaces.map((ws) => (
                 <option value={ws.id} key={ws.id}>
                   {ws.id}
                 </option>
