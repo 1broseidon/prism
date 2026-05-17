@@ -488,6 +488,61 @@ func TestWorkspaceBridgeRecordsUsedBytesFromPoll(t *testing.T) {
 	}
 }
 
+func TestValidateBackendWorkspaceBinding(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+
+	// Register a virtual workspace.
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:   "shared",
+		Type: config.WorkspaceTypeVirtual,
+	}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		cfg     *config.WorkspaceConfig
+		wantErr bool
+	}{
+		{
+			name:    "nil config is allowed",
+			cfg:     nil,
+			wantErr: false,
+		},
+		{
+			name:    "no id is allowed (lazy)",
+			cfg:     &config.WorkspaceConfig{Type: config.WorkspaceTypeVirtual},
+			wantErr: false,
+		},
+		{
+			name:    "unregistered id is allowed (lazy)",
+			cfg:     &config.WorkspaceConfig{ID: "new-one", Type: config.WorkspaceTypeVirtual},
+			wantErr: false,
+		},
+		{
+			name:    "type matches registry",
+			cfg:     &config.WorkspaceConfig{ID: "shared", Type: config.WorkspaceTypeVirtual},
+			wantErr: false,
+		},
+		{
+			name:    "type mismatch is rejected",
+			cfg:     &config.WorkspaceConfig{ID: "shared", Type: config.WorkspaceTypeEphemeral},
+			wantErr: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := gw.validateBackendWorkspaceBinding(c.cfg)
+			if (err != nil) != c.wantErr {
+				t.Errorf("validateBackendWorkspaceBinding(%+v) error = %v, wantErr = %v",
+					c.cfg, err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestWorkspaceHealth(t *testing.T) {
 	cases := []struct {
 		name      string

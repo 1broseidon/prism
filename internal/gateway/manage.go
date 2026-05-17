@@ -84,6 +84,9 @@ func (g *Gateway) AddBackend(ctx context.Context, id string, cfg admin.BackendCo
 		Workspace: config.NormalizeWorkspaceConfig(cfg.Workspace),
 		Timeout:   config.Duration(30 * time.Second),
 	}
+	if err := g.validateBackendWorkspaceBinding(sc.Workspace); err != nil {
+		return err
+	}
 	if cfg.Enabled != nil {
 		sc.Enabled = *cfg.Enabled
 	}
@@ -259,6 +262,9 @@ func (g *Gateway) UpdateBackend(ctx context.Context, id string, update admin.Bac
 	}
 	if update.Workspace != nil {
 		pb.Workspace = config.NormalizeWorkspaceConfig(update.Workspace)
+		if err := g.validateBackendWorkspaceBinding(pb.Workspace); err != nil {
+			return err
+		}
 	}
 	if update.Enabled != nil {
 		pb.Enabled = boolPtr(*update.Enabled)

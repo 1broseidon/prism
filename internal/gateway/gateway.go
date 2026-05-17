@@ -1237,6 +1237,27 @@ func (g *Gateway) applyRegisteredWorkspaceConfig(cfg *config.WorkspaceConfig) {
 	cfg.RetentionSeconds = entry.RetentionSeconds
 }
 
+// validateBackendWorkspaceBinding rejects a backend configuration whose
+// declared workspace type conflicts with an existing registry entry. Lazy
+// references (workspace.id set but no registry entry yet) are allowed — the
+// entry can be created later via POST /workspaces.
+func (g *Gateway) validateBackendWorkspaceBinding(cfg *config.WorkspaceConfig) error {
+	if cfg == nil || cfg.ID == "" || cfg.Type == "" {
+		return nil
+	}
+	entry, ok := g.registeredWorkspace(cfg.ID)
+	if !ok {
+		return nil
+	}
+	if entry.Type != "" && entry.Type != cfg.Type {
+		return fmt.Errorf(
+			"workspace %q is registered as %q; cannot attach as %q",
+			cfg.ID, entry.Type, cfg.Type,
+		)
+	}
+	return nil
+}
+
 func workspaceValueAllowed(allowed []string, candidates ...string) bool {
 	for _, value := range allowed {
 		if value == "*" {
