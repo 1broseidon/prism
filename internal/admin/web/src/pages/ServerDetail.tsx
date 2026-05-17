@@ -111,7 +111,7 @@ export function ServerDetail() {
 
       <MetaRow backend={backend} />
       {canMutate() && <BackendSettingsSection backend={backend} />}
-      {canMutate() && <StorageSection backend={backend} />}
+      {isStdio(backend) && canMutate() && <StorageSection backend={backend} />}
       {backend.workspace && <WorkspaceChangesSection backend={backend} />}
       {backend.disconnected && canMutate() && (
         <ReconnectSection backend={backend} />
@@ -119,6 +119,7 @@ export function ServerDetail() {
       <ToolsSection backend={backend} />
       <CredentialSection backend={backend} />
       <ActivitySection backendId={backend.id} backend={backend} />
+      <AdvancedSection backend={backend} />
       {canMutate() && (
         <DangerSection
           backendId={backend.id}
@@ -176,8 +177,14 @@ function StatusPill({ backend }: { backend: Backend }) {
   return <span class="pill pill-neutral">idle</span>;
 }
 
+// Bridge-managed backends are stdio even though the gateway reaches them over
+// HTTP internally — the user thinks of them as commands, not URLs.
+function isStdio(backend: Backend): boolean {
+  return backend.bridge_managed === true || !backend.url;
+}
+
 function MetaRow({ backend }: { backend: Backend }) {
-  const transport = backend.url ? "http" : "stdio";
+  const stdio = isStdio(backend);
   const toolCount = backend.tools?.length ?? 0;
   const credType = backend.credential?.configured
     ? backend.credential.type
@@ -185,15 +192,63 @@ function MetaRow({ backend }: { backend: Backend }) {
 
   return (
     <div class="meta-row">
-      <MetaItem label="transport" value={transport} />
-      <MetaItem label="endpoint" value={backend.url || "stdio"} mono />
+      <MetaItem label="transport" value={stdio ? "stdio" : "http"} />
+      {!stdio && backend.url && (
+        <MetaItem label="endpoint" value={backend.url} mono />
+      )}
+      {stdio && backend.runtime && (
+        <MetaItem label="runtime" value={backend.runtime} />
+      )}
       <MetaItem label="tools" value={String(toolCount)} />
       <MetaItem label="credential" value={credType} />
-      {backend.bridge_managed && (
-        <MetaItem label="bridge" value={backend.runtime || "managed"} />
-      )}
       {backend.circuit_breaker && (
         <MetaItem label="breaker" value={backend.circuit_breaker} />
+      )}
+    </div>
+  );
+}
+
+function AdvancedSection({ backend }: { backend: Backend }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div class="section">
+      <div class="section-header">
+        <button
+          class="section-btn"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+        >
+          {open ? "− advanced" : "+ advanced"}
+        </button>
+        <span class="section-sub">
+          internal routing details — useful for debugging, not normally needed.
+        </span>
+      </div>
+      {open && (
+        <div class="card">
+          <div class="card-row">
+            <span class="meta-label">internal endpoint</span>
+            <span class="meta-value-mono">{backend.url || "—"}</span>
+          </div>
+          {backend.bridge_managed && (
+            <div class="card-row">
+              <span class="meta-label">bridge runtime</span>
+              <span class="meta-value-mono">
+                {backend.runtime || "managed"}
+              </span>
+            </div>
+          )}
+          <div class="card-row">
+            <span class="meta-label">namespace</span>
+            <span class="meta-value-mono">
+              {backend.namespace || backend.id}
+            </span>
+          </div>
+          <div class="card-row">
+            <span class="meta-label">id</span>
+            <span class="meta-value-mono">{backend.id}</span>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -260,7 +260,10 @@ function ServerRow({
   lastCall: string | undefined;
   onClick: () => void;
 }) {
-  const transport = backend.url ? "http" : "stdio";
+  // Bridge-managed backends are conceptually stdio even though the gateway
+  // talks to them over HTTP internally — the user sees a command, not a URL.
+  const transport =
+    backend.bridge_managed || !backend.url ? "stdio" : "http";
   const toolCount = backend.tools?.length ?? 0;
   const statusKind: "ok" | "warn" | "error" | "neutral" = (() => {
     const cb = backend.circuit_breaker;
@@ -271,6 +274,18 @@ function ServerRow({
     if (toolCount > 0) return "ok";
     return "neutral";
   })();
+  const stateLabel =
+    backend.enabled === false
+      ? "disabled"
+      : backend.disconnected
+        ? "disconnected"
+        : null;
+  const detail =
+    transport === "http"
+      ? backend.url
+      : backend.runtime
+        ? `stdio · ${backend.runtime}`
+        : "stdio process";
 
   return (
     <button class="server-row" onClick={onClick}>
@@ -285,12 +300,8 @@ function ServerRow({
         </div>
         <div class="server-row-meta">
           <span class="server-row-url">
-            {backend.enabled === false
-              ? "disabled · "
-              : backend.disconnected
-                ? "disconnected · "
-                : ""}
-            {backend.url || "stdio process"}
+            {stateLabel ? `${stateLabel} · ` : ""}
+            {detail}
           </span>
         </div>
       </div>
