@@ -743,6 +743,67 @@ func TestValidateBackendWorkspaceBinding(t *testing.T) {
 	}
 }
 
+func TestPersistProxiedRegistryEntryStampsOwner(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	kv := store.NewMemoryStore()
+	gw.SetStore(kv)
+
+	if err := gw.persistProxiedRegistryEntry("repo-a", "prism-uuid-x"); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	entry, ok := gw.registeredWorkspace("repo-a")
+	if !ok || entry.Owner != "prism-uuid-x" {
+		t.Fatalf("registry entry = %+v", entry)
+	}
+	if entry.Type != config.WorkspaceTypeProxied {
+		t.Errorf("type = %q, want proxied", entry.Type)
+	}
+
+	// agent selector should now resolve to this workspace for that prism_id.
+	backend := &Backend{Config: &config.ServerConfig{ID: "brainfile", Namespace: "Brainfile"}}
+	gw.SetBackendPolicyResolver(&stubBackendPolicyResolver{layers: []auth.BackendPolicyLayer{
+		{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+			"brainfile": {WorkspaceSelector: "agent"},
+		}},
+	}})
+	cfg, _, deny := gw.ResolveBackendWorkspace(&auth.Claims{PrismID: "prism-uuid-x"}, backend)
+	if deny != "" || cfg == nil || cfg.ID != "repo-a" {
+		t.Fatalf("resolve cfg=%+v deny=%q", cfg, deny)
+	}
+}
+
+func TestPersistProxiedRegistryEntryPreservesExistingMetadata(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+
+	// Pre-seed an entry with non-default fields.
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:               "shared",
+		Type:             config.WorkspaceTypeVirtual,
+		QuotaBytes:       4096,
+		RetentionSeconds: 60,
+	}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	// Re-stamp ownership. Quota/retention should survive.
+	if err := gw.persistProxiedRegistryEntry("shared", "prism-uuid-y"); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	entry, ok := gw.registeredWorkspace("shared")
+	if !ok {
+		t.Fatal("entry missing after re-stamp")
+	}
+	if entry.Owner != "prism-uuid-y" {
+		t.Errorf("owner = %q, want prism-uuid-y", entry.Owner)
+	}
+	if entry.QuotaBytes != 4096 || entry.RetentionSeconds != 60 {
+		t.Errorf("metadata not preserved: %+v", entry)
+	}
+}
+
 func TestWorkspaceHealth(t *testing.T) {
 	cases := []struct {
 		name      string

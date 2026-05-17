@@ -574,6 +574,9 @@ func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, auth
 
 	logger.Info("OAuth 2.1 token validation enabled", "issuer", ea.Issuer)
 	middlewares = append(middlewares, auth.Middleware(validator, resourceURI))
+	// Share the validator with the workspace bridge handler so agent-
+	// authenticated bridges can register without the shared workspace token.
+	gw.SetTokenValidator(validator)
 
 	if cfg.RateLimit != nil {
 		middlewares = append(middlewares, middleware.RateLimit(middleware.RateLimitConfig{

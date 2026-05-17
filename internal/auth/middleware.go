@@ -27,6 +27,14 @@ func ClaimsFromContext(ctx context.Context) *Claims {
 	return c
 }
 
+// ContextWithClaims returns a derived context that carries the validated
+// claims. Use this when a handler validates a token itself rather than
+// going through the standard Middleware (e.g., the workspace bridge
+// endpoint, which accepts either OAuth or a shared token).
+func ContextWithClaims(ctx context.Context, c *Claims) context.Context {
+	return context.WithValue(ctx, claimsKey, c)
+}
+
 // PolicyFromContext returns the access policy from the request context.
 func PolicyFromContext(ctx context.Context) *Policy {
 	p, _ := ctx.Value(policyKey).(*Policy)

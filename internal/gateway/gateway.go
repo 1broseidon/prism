@@ -68,6 +68,11 @@ type policyResolverBox struct{ r auth.PolicyResolver }
 // per-backend resolver consulted at tool-call time.
 type backendPolicyResolverBox struct{ r auth.BackendPolicyResolver }
 
+// tokenValidatorBox lets the workspace bridge handler verify agent OAuth
+// tokens lock-free. Optional; when unset, only the shared workspace token
+// is accepted.
+type tokenValidatorBox struct{ v *auth.TokenValidator }
+
 // Gateway aggregates multiple MCP backends behind a single server.
 type Gateway struct {
 	mu                    sync.RWMutex
@@ -80,6 +85,7 @@ type Gateway struct {
 	kvStore               store.Store // optional KV store for persisting runtime credential configs
 	policyResolver        atomic.Pointer[policyResolverBox]
 	backendPolicyResolver atomic.Pointer[backendPolicyResolverBox]
+	tokenValidator        atomic.Pointer[tokenValidatorBox]
 	authFlows             any //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
 	bridgeURL             string
 	bridgeURLs            []string
@@ -152,6 +158,21 @@ func (g *Gateway) getBackendPolicyResolver() auth.BackendPolicyResolver {
 		return nil
 	}
 	return b.r
+}
+
+// SetTokenValidator wires an OAuth token validator into the workspace
+// bridge handler so agent-authenticated bridges can register without the
+// shared workspace token. Optional.
+func (g *Gateway) SetTokenValidator(v *auth.TokenValidator) {
+	g.tokenValidator.Store(&tokenValidatorBox{v: v})
+}
+
+func (g *Gateway) getTokenValidator() *auth.TokenValidator {
+	b := g.tokenValidator.Load()
+	if b == nil {
+		return nil
+	}
+	return b.v
 }
 
 // NotifyToolsChanged triggers a tools/list_changed notification to all MCP sessions.

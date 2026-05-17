@@ -66,6 +66,7 @@ type workspaceConnection struct {
 	hostname  string
 	root      string
 	version   string
+	owner     string // OAuth-stamped owner identifier (PrismID / ClientID / Subject); empty for ops bridges
 	lastSeen  time.Time
 	usedBytes int64
 	backends  []admin.WorkspaceBackendStatus
@@ -248,9 +249,14 @@ func (g *Gateway) WorkspaceBridgeHandler() http.Handler {
 }
 
 func (m *workspaceBridgeManager) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if !m.authorized(r) {
+	claims, ok := m.authorize(r)
+	if !ok {
 		writeWorkspaceError(w, http.StatusUnauthorized, "workspace bridge is disabled or token is invalid")
 		return
+	}
+	// Stash claims so handleRegister can stamp owner on the registration.
+	if claims != nil {
+		r = r.WithContext(auth.ContextWithClaims(r.Context(), claims))
 	}
 
 	switch {
@@ -267,23 +273,39 @@ func (m *workspaceBridgeManager) serveHTTP(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func (m *workspaceBridgeManager) authorized(r *http.Request) bool {
+// authorize verifies the bearer on a workspace-bridge request. It accepts
+// EITHER a valid agent OAuth token (preferred — caller is an identifiable
+// agent, claims returned) OR the shared workspace token (legacy ops bridge,
+// claims nil). The second bool is the auth verdict.
+func (m *workspaceBridgeManager) authorize(r *http.Request) (*auth.Claims, bool) {
 	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" {
 		token = r.URL.Query().Get("token")
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return false
+		return nil, false
 	}
 
+	// Prefer OAuth: any valid agent token authenticates the bridge as that
+	// agent and lets the gateway stamp owner on the registered workspace.
+	if v := m.gateway.getTokenValidator(); v != nil {
+		if claims, _, err := v.Validate(r.Context(), token); err == nil {
+			return claims, true
+		}
+	}
+
+	// Fall back to the shared workspace token (ops-managed bridge).
 	m.mu.Lock()
 	settings := m.settings
 	m.mu.Unlock()
 	if !settings.Enabled || settings.TokenHash == "" {
-		return false
+		return nil, false
 	}
-	return verifyWorkspaceToken(token, settings.TokenHash)
+	if verifyWorkspaceToken(token, settings.TokenHash) {
+		return nil, true
+	}
+	return nil, false
 }
 
 func bearerToken(header string) string {
@@ -317,11 +339,13 @@ func (m *workspaceBridgeManager) register(ctx context.Context, req *workspaceReg
 		return nil, errors.New("too many workspace backends")
 	}
 
+	owner := agentOwnerFromContext(ctx)
 	conn := &workspaceConnection{
 		id:       req.WorkspaceID,
 		hostname: strings.TrimSpace(req.Hostname),
 		root:     strings.TrimSpace(req.Root),
 		version:  strings.TrimSpace(req.Version),
+		owner:    owner,
 		lastSeen: time.Now(),
 		queue:    make(chan workspaceCallRequest, 64),
 		pending:  make(map[string]chan workspaceCallResult),
@@ -391,6 +415,8 @@ func (m *workspaceBridgeManager) register(ctx context.Context, req *workspaceReg
 	}
 	m.workspaces[req.WorkspaceID] = conn
 	m.mu.Unlock()
+
+	m.persistOwnerIfPresent(req.WorkspaceID, owner)
 
 	for _, reg := range toolRegs {
 		workspaceID := reg.workspaceID
@@ -846,6 +872,70 @@ func mergeWorkspaceRegistryStatuses(live, registered []admin.WorkspaceStatus) []
 	return live
 }
 
+// persistOwnerIfPresent stamps the workspace's owner into the registry when
+// the bridge authenticated as an agent. Failures are logged but do not abort
+// registration — the in-memory connection still works; the owner just won't
+// survive a gateway restart.
+func (m *workspaceBridgeManager) persistOwnerIfPresent(workspaceID, owner string) {
+	if owner == "" {
+		return
+	}
+	if err := m.gateway.persistProxiedRegistryEntry(workspaceID, owner); err != nil {
+		m.gateway.logger.Warn("failed to persist proxied workspace ownership",
+			"workspace", workspaceID, "owner", owner, "error", err)
+	}
+}
+
+// agentOwnerFromContext returns the most-stable identifier on the validated
+// claims, preferring PrismID, then ClientID, then Subject. Empty if no
+// claims are attached (workspace-token / ops-bridge path).
+func agentOwnerFromContext(ctx context.Context) string {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return ""
+	}
+	switch {
+	case claims.PrismID != "":
+		return claims.PrismID
+	case claims.ClientID != "":
+		return claims.ClientID
+	default:
+		return claims.Subject
+	}
+}
+
+// persistProxiedRegistryEntry stores ownership metadata for a proxied
+// workspace so resolveAgentWorkspace can look it up by owner. Existing
+// entries are upgraded with the owner if it's missing; type/quota/etc.
+// are preserved.
+func (g *Gateway) persistProxiedRegistryEntry(id, owner string) error {
+	if g.kvStore == nil || !workspaceIDRE.MatchString(id) || strings.TrimSpace(owner) == "" {
+		return nil
+	}
+	key := workspaceRegistryPrefix + id
+	entry := workspaceRegistryEntry{
+		ID:        id,
+		Type:      config.WorkspaceTypeProxied,
+		Owner:     owner,
+		CreatedAt: time.Now().UTC(),
+	}
+	if existing, err := g.kvStore.Get(key); err == nil {
+		var prev workspaceRegistryEntry
+		if jsonErr := json.Unmarshal(existing, &prev); jsonErr == nil {
+			entry = prev
+			if entry.Type == "" {
+				entry.Type = config.WorkspaceTypeProxied
+			}
+			entry.Owner = owner
+		}
+	}
+	data, err := json.Marshal(&entry)
+	if err != nil {
+		return err
+	}
+	return g.kvStore.Set(key, data)
+}
+
 func workspaceStatusFromRegistry(entry *workspaceRegistryEntry) admin.WorkspaceStatus {
 	// Virtual workspaces are considered "connected" (gateway-resident storage
 	// that exists whether or not a bridge is actively polling). Ephemeral
@@ -877,6 +967,7 @@ func (m *workspaceBridgeManager) list() []admin.WorkspaceStatus {
 		out = append(out, admin.WorkspaceStatus{
 			ID:        conn.id,
 			Type:      config.WorkspaceTypeProxied,
+			Owner:     conn.owner,
 			Hostname:  conn.hostname,
 			Root:      conn.root,
 			Version:   conn.version,

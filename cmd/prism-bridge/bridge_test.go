@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -303,4 +304,50 @@ func TestToolManifestJSON(t *testing.T) {
 // Needed to use slog in tests.
 func init() {
 	_ = fmt.Sprintf // silence unused import
+}
+
+func TestParseWorkspaceOptionsAgentToken(t *testing.T) {
+	t.Setenv("PRISM_WORKSPACE_TOKEN", "")
+	t.Setenv("PRISM_AGENT_TOKEN", "")
+
+	// --agent-token alone is sufficient.
+	opts, err := parseWorkspaceOptions([]string{
+		"--gateway", "http://gw.example",
+		"--agent-token", "oauth-jwt-xyz",
+		"--id", "repo",
+		"--files-only",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.token != "oauth-jwt-xyz" {
+		t.Errorf("token = %q, want oauth-jwt-xyz", opts.token)
+	}
+
+	// Agent token wins when both are set.
+	opts, err = parseWorkspaceOptions([]string{
+		"--gateway", "http://gw.example",
+		"--token", "shared-token-min-length-1234567",
+		"--agent-token", "oauth-jwt-xyz",
+		"--id", "repo",
+		"--files-only",
+	})
+	if err != nil {
+		t.Fatalf("parse with both: %v", err)
+	}
+	if opts.token != "oauth-jwt-xyz" {
+		t.Errorf("agent-token should win; got token=%q", opts.token)
+	}
+
+	// Missing both fails with a message that names both flags.
+	_, err = parseWorkspaceOptions([]string{
+		"--gateway", "http://gw.example",
+		"--id", "repo",
+		"--files-only",
+	})
+	if err == nil ||
+		!strings.Contains(err.Error(), "--token") ||
+		!strings.Contains(err.Error(), "--agent-token") {
+		t.Fatalf("missing-token error = %v", err)
+	}
 }

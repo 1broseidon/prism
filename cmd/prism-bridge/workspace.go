@@ -31,14 +31,15 @@ const workspaceBridgeVersion = "0.1.0"
 var workspaceServiceIDRE = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 
 type workspaceOptions struct {
-	gateway   string
-	token     string
-	id        string
-	backendID string
-	namespace string
-	root      string
-	filesOnly bool
-	command   []string
+	gateway    string
+	token      string
+	agentToken string
+	id         string
+	backendID  string
+	namespace  string
+	root       string
+	filesOnly  bool
+	command    []string
 }
 
 type workspaceRegisterRequest struct {
@@ -114,7 +115,8 @@ func parseWorkspaceOptions(args []string) (*workspaceOptions, error) {
 
 	opts := &workspaceOptions{}
 	fs.StringVar(&opts.gateway, "gateway", envOrDefault("PRISM_GATEWAY_URL", ""), "Prism gateway base URL")
-	fs.StringVar(&opts.token, "token", envOrDefault("PRISM_WORKSPACE_TOKEN", ""), "workspace bridge token")
+	fs.StringVar(&opts.token, "token", envOrDefault("PRISM_WORKSPACE_TOKEN", ""), "shared workspace bridge token (ops-managed bridges)")
+	fs.StringVar(&opts.agentToken, "agent-token", envOrDefault("PRISM_AGENT_TOKEN", ""), "agent OAuth access token (per-agent bridges; gateway stamps the workspace owner from the token claims)")
 	fs.StringVar(&opts.id, "id", envOrDefault("PRISM_WORKSPACE_ID", defaultID), "workspace id")
 	fs.StringVar(&opts.backendID, "backend", envOrDefault("PRISM_WORKSPACE_BACKEND", "Brainfile"), "backend id")
 	fs.StringVar(&opts.namespace, "namespace", envOrDefault("PRISM_WORKSPACE_NAMESPACE", ""), "tool namespace")
@@ -133,6 +135,11 @@ func parseWorkspaceOptions(args []string) (*workspaceOptions, error) {
 	opts.command = command
 	opts.gateway = strings.TrimRight(strings.TrimSpace(opts.gateway), "/")
 	opts.token = strings.TrimSpace(opts.token)
+	opts.agentToken = strings.TrimSpace(opts.agentToken)
+	// Agent token takes precedence; if both are set, log a warning later.
+	if opts.agentToken != "" {
+		opts.token = opts.agentToken
+	}
 	opts.id = sanitizeWorkspaceServiceID(opts.id)
 	opts.backendID = sanitizeWorkspaceServiceID(opts.backendID)
 	opts.root = strings.TrimSpace(opts.root)
@@ -145,7 +152,7 @@ func parseWorkspaceOptions(args []string) (*workspaceOptions, error) {
 	case opts.gateway == "":
 		return nil, errors.New("--gateway or PRISM_GATEWAY_URL is required")
 	case opts.token == "":
-		return nil, errors.New("--token or PRISM_WORKSPACE_TOKEN is required")
+		return nil, errors.New("one of --token (shared) or --agent-token (OAuth) is required")
 	case opts.id == "":
 		return nil, errors.New("--id is invalid")
 	case opts.backendID == "":
