@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -19,17 +20,23 @@ const tokenGenKeyPrefix = "token_gen/"
 // groupKeyPrefix is the KV key prefix for dynamically-created groups.
 const groupKeyPrefix = "group/"
 
+// BackendPolicy is the per-backend stackable rule. Aliased to auth.BackendPolicy
+// so the gateway can consume the same shape without importing authserver.
+type BackendPolicy = auth.BackendPolicy
+
 // GroupConfig defines a named set of scopes, mirroring config.GroupConfig.
 // Copied here to avoid a dependency on the config package from authserver.
 type GroupConfig struct {
-	Scopes []string `json:"scopes"`
+	Scopes          []string                 `json:"scopes"`
+	BackendPolicies map[string]BackendPolicy `json:"backend_policies,omitempty"`
 }
 
 // GroupInfo describes a group with its source (config or dynamic).
 type GroupInfo struct {
-	Name   string   `json:"name"`
-	Scopes []string `json:"scopes"`
-	Source string   `json:"source"` // "config" or "dynamic"
+	Name            string                   `json:"name"`
+	Scopes          []string                 `json:"scopes"`
+	Source          string                   `json:"source"` // "config" or "dynamic"
+	BackendPolicies map[string]BackendPolicy `json:"backend_policies,omitempty"`
 }
 
 // PolicyBreakdown shows how an agent's effective scopes are computed.
@@ -44,9 +51,10 @@ type PolicyBreakdown struct {
 // AgentPolicy is the per-agent policy stored in KV at policy/agent/{prism_id}.
 // Same shape as config.AgentConfig (groups, grant, deny).
 type AgentPolicy struct {
-	Groups []string `json:"groups"`
-	Grant  []string `json:"grant,omitempty"`
-	Deny   []string `json:"deny,omitempty"`
+	Groups          []string                 `json:"groups"`
+	Grant           []string                 `json:"grant,omitempty"`
+	Deny            []string                 `json:"deny,omitempty"`
+	BackendPolicies map[string]BackendPolicy `json:"backend_policies,omitempty"`
 }
 
 // bumpTokenGeneration increments the generation counter for a client.
@@ -203,6 +211,112 @@ func (s *Server) resolvePolicy(p *AgentPolicy) []string {
 	return scopes
 }
 
+// ResolveBackendPolicy returns the stacked per-backend rules for a caller,
+// ordered from highest priority (agent) to lowest (defaults). Satisfies
+// auth.BackendPolicyResolver.
+//
+// Group membership is the union of:
+//   - claims.Groups (from the OAuth token, when the provider supplies them)
+//   - the agent's persisted policy.Groups (operator-assigned)
+//
+// Within the group tier, groups are walked alphabetically so the same input
+// produces the same trace every time.
+func (s *Server) ResolveBackendPolicy(claims *auth.Claims) []auth.BackendPolicyLayer {
+	if claims == nil {
+		return nil
+	}
+	layers := make([]auth.BackendPolicyLayer, 0, 4)
+
+	// Tier 1: agent policy keyed by PrismID.
+	var staticGroups []string
+	if claims.PrismID != "" {
+		if p, err := s.GetAgentPolicy(claims.PrismID); err == nil && p != nil {
+			if len(p.BackendPolicies) > 0 {
+				layers = append(layers, auth.BackendPolicyLayer{
+					Source:   "agent:" + claims.PrismID,
+					Policies: copyBackendPolicies(p.BackendPolicies),
+				})
+			}
+			staticGroups = p.Groups
+		}
+	}
+
+	// Tier 2: group policies. Union of claim-derived and static groups,
+	// deduped, walked alphabetically.
+	groupNames := dedupSorted(append(append([]string(nil), claims.Groups...), staticGroups...))
+	s.mu.RLock()
+	configGroups := s.groups
+	s.mu.RUnlock()
+	for _, name := range groupNames {
+		var g GroupConfig
+		// KV (dynamic) wins over config when the same name exists in both,
+		// matching ListGroups semantics.
+		if dyn, err := s.GetGroup(name); err == nil && dyn != nil {
+			g = *dyn
+		} else if cfg, ok := configGroups[name]; ok {
+			g = cfg
+		} else {
+			continue
+		}
+		if len(g.BackendPolicies) == 0 {
+			continue
+		}
+		layers = append(layers, auth.BackendPolicyLayer{
+			Source:   "group:" + name,
+			Policies: copyBackendPolicies(g.BackendPolicies),
+		})
+	}
+
+	// Tier 3: defaults.
+	if defs := s.DefaultBackendPolicies(); len(defs) > 0 {
+		layers = append(layers, auth.BackendPolicyLayer{
+			Source:   "defaults",
+			Policies: copyBackendPolicies(defs),
+		})
+	}
+	return layers
+}
+
+func copyBackendPolicies(src map[string]auth.BackendPolicy) map[string]auth.BackendPolicy {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]auth.BackendPolicy, len(src))
+	maps.Copy(out, src)
+	return out
+}
+
+func dedupSorted(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, name := range in {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sortStrings(out)
+	return out
+}
+
+// sortStrings is a tiny stable wrapper so the package doesn't grow a sort
+// import just for this one call site.
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}
+
 // ResolvePolicy returns the current effective policy for a client.
 // Satisfies auth.PolicyResolver. Uses PrismID for DCR agents,
 // falls back to the client's configured scopes for static agents.
@@ -243,6 +357,45 @@ func (s *Server) DefaultScopes() []string {
 
 // defaultScopesKey is the KV key for persisted runtime default scopes.
 const defaultScopesKey = "policy/defaults"
+
+// defaultBackendPoliciesKey is the KV key for persisted default backend policies.
+// Stored separately from defaultScopesKey so the existing []string format on
+// that key doesn't need a migration.
+const defaultBackendPoliciesKey = "policy/defaults/backend_policies"
+
+// DefaultBackendPolicies returns the persisted default backend policies, or
+// nil if none have been set.
+func (s *Server) DefaultBackendPolicies() map[string]BackendPolicy {
+	if s.store == nil {
+		return nil
+	}
+	data, err := s.store.Get(defaultBackendPoliciesKey)
+	if err != nil {
+		return nil
+	}
+	var out map[string]BackendPolicy
+	if err := json.Unmarshal(data, &out); err != nil {
+		s.logger.Warn("failed to unmarshal default backend policies", "error", err)
+		return nil
+	}
+	return out
+}
+
+// SetDefaultBackendPolicies replaces the default backend policies map.
+// Passing nil or an empty map clears the entry.
+func (s *Server) SetDefaultBackendPolicies(policies map[string]BackendPolicy) error {
+	if s.store == nil {
+		return errors.New("no KV store configured")
+	}
+	if len(policies) == 0 {
+		return s.store.Delete(defaultBackendPoliciesKey)
+	}
+	data, err := json.Marshal(policies)
+	if err != nil {
+		return fmt.Errorf("marshal default backend policies: %w", err)
+	}
+	return s.store.Set(defaultBackendPoliciesKey, data)
+}
 
 // SetDefaultScopes updates the runtime default scopes.
 // Persists to KV and updates in-memory config.

@@ -488,6 +488,206 @@ func TestWorkspaceBridgeRecordsUsedBytesFromPoll(t *testing.T) {
 	}
 }
 
+// stubBackendPolicyResolver lets tests inject a static set of layers.
+type stubBackendPolicyResolver struct {
+	layers []auth.BackendPolicyLayer
+}
+
+func (s *stubBackendPolicyResolver) ResolveBackendPolicy(_ *auth.Claims) []auth.BackendPolicyLayer {
+	return s.layers
+}
+
+func TestResolveBackendWorkspaceStackOrder(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+
+	// Register a virtual workspace so id:<X> selector has a target.
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:   "team-virtual",
+		Type: config.WorkspaceTypeVirtual,
+	}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	backend := &Backend{Config: &config.ServerConfig{
+		ID:        "brainfile",
+		Namespace: "Brainfile",
+		Workspace: &config.WorkspaceConfig{ID: "static-floor", Type: config.WorkspaceTypeProxied},
+	}}
+	claims := &auth.Claims{PrismID: "prism-a", ClientID: "client-a"}
+
+	tests := []struct {
+		name       string
+		layers     []auth.BackendPolicyLayer
+		wantWS     string
+		wantSel    string
+		wantSource string
+		wantDeny   string
+	}{
+		{
+			name:       "no policy uses backend static floor",
+			layers:     nil,
+			wantWS:     "static-floor",
+			wantSel:    "static",
+			wantSource: "backend.static",
+		},
+		{
+			name: "agent layer overrides group and defaults",
+			layers: []auth.BackendPolicyLayer{
+				{Source: "agent:prism-a", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {WorkspaceSelector: "id:team-virtual"},
+				}},
+				{Source: "group:engineering", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {WorkspaceSelector: "static"},
+				}},
+				{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {WorkspaceSelector: "static"},
+				}},
+			},
+			wantWS:     "team-virtual",
+			wantSel:    "id:team-virtual",
+			wantSource: "agent:prism-a",
+		},
+		{
+			name: "group layer wins over defaults when agent has no rule",
+			layers: []auth.BackendPolicyLayer{
+				{Source: "group:engineering", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {WorkspaceSelector: "id:team-virtual"},
+				}},
+				{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {WorkspaceSelector: "static"},
+				}},
+			},
+			wantWS:     "team-virtual",
+			wantSel:    "id:team-virtual",
+			wantSource: "group:engineering",
+		},
+		{
+			name: "id selector missing workspace is denied",
+			layers: []auth.BackendPolicyLayer{
+				{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {WorkspaceSelector: "id:does-not-exist"},
+				}},
+			},
+			wantDeny: `policy pins workspace "does-not-exist" but it is not registered`,
+		},
+		{
+			name: "static selector at a layer falls back to backend floor",
+			layers: []auth.BackendPolicyLayer{
+				{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+					"brainfile": {WorkspaceSelector: "static"},
+				}},
+			},
+			wantWS:     "static-floor",
+			wantSel:    "static",
+			wantSource: "defaults",
+		},
+		{
+			name: "rules for other backends are ignored",
+			layers: []auth.BackendPolicyLayer{
+				{Source: "agent:prism-a", Policies: map[string]auth.BackendPolicy{
+					"linear": {WorkspaceSelector: "agent"},
+				}},
+			},
+			wantWS:     "static-floor",
+			wantSel:    "static",
+			wantSource: "backend.static",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gw.SetBackendPolicyResolver(&stubBackendPolicyResolver{layers: tc.layers})
+			cfg, res, deny := gw.ResolveBackendWorkspace(claims, backend)
+			if tc.wantDeny != "" {
+				if deny != tc.wantDeny {
+					t.Fatalf("deny = %q, want %q", deny, tc.wantDeny)
+				}
+				return
+			}
+			if deny != "" {
+				t.Fatalf("unexpected deny: %s", deny)
+			}
+			if cfg == nil || cfg.ID != tc.wantWS {
+				t.Fatalf("workspace = %+v, want id=%q", cfg, tc.wantWS)
+			}
+			if res.WorkspaceID != tc.wantWS {
+				t.Errorf("trace.WorkspaceID = %q, want %q", res.WorkspaceID, tc.wantWS)
+			}
+			if res.Selector != tc.wantSel {
+				t.Errorf("trace.Selector = %q, want %q", res.Selector, tc.wantSel)
+			}
+			if res.Source != tc.wantSource {
+				t.Errorf("trace.Source = %q, want %q", res.Source, tc.wantSource)
+			}
+		})
+	}
+}
+
+func TestResolveBackendWorkspaceAgentSelector(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+
+	backend := &Backend{Config: &config.ServerConfig{
+		ID:        "brainfile",
+		Namespace: "Brainfile",
+	}}
+	gw.SetBackendPolicyResolver(&stubBackendPolicyResolver{layers: []auth.BackendPolicyLayer{
+		{Source: "defaults", Policies: map[string]auth.BackendPolicy{
+			"brainfile": {WorkspaceSelector: "agent"},
+		}},
+	}})
+
+	// Zero registered workspaces for the agent → clear error.
+	_, _, deny := gw.ResolveBackendWorkspace(
+		&auth.Claims{PrismID: "agent-zero"},
+		backend,
+	)
+	if deny == "" || !strings.Contains(deny, "no workspace is registered") {
+		t.Fatalf("expected zero-match deny, got %q", deny)
+	}
+
+	// Register one workspace owned by the agent.
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:    "agent-a-repo",
+		Type:  config.WorkspaceTypeVirtual,
+		Owner: "prism-a",
+	}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	cfg, res, deny := gw.ResolveBackendWorkspace(
+		&auth.Claims{PrismID: "prism-a"},
+		backend,
+	)
+	if deny != "" {
+		t.Fatalf("unexpected deny: %s", deny)
+	}
+	if cfg == nil || cfg.ID != "agent-a-repo" {
+		t.Fatalf("workspace = %+v, want agent-a-repo", cfg)
+	}
+	if res.Source != "defaults" || res.Selector != "agent" {
+		t.Fatalf("trace = %+v, want defaults/agent", res)
+	}
+
+	// Register a second workspace owned by the same agent → disambiguation error.
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:    "agent-a-repo-two",
+		Type:  config.WorkspaceTypeVirtual,
+		Owner: "prism-a",
+	}); err != nil {
+		t.Fatalf("create second workspace: %v", err)
+	}
+	_, _, deny = gw.ResolveBackendWorkspace(
+		&auth.Claims{PrismID: "prism-a"},
+		backend,
+	)
+	if deny == "" || !strings.Contains(deny, "2 workspaces") {
+		t.Fatalf("expected multi-match deny, got %q", deny)
+	}
+}
+
 func TestValidateBackendWorkspaceBinding(t *testing.T) {
 	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer gw.Close()

@@ -20,15 +20,16 @@ import (
 
 // Claims represents the validated claims from an OAuth 2.1 access token.
 type Claims struct {
-	Subject  string `json:"sub"`
-	Issuer   string `json:"iss"`
-	Audience string `json:"aud"`
-	Scope    string `json:"scope"`
-	ClientID string `json:"client_id,omitempty"`
-	PrismID  string `json:"prism_id,omitempty"` // Audit enrichment only — gateway MUST ignore.
-	TokenGen int64  `json:"token_gen,omitempty"`
-	Exp      int64  `json:"exp"`
-	Iat      int64  `json:"iat"`
+	Subject  string   `json:"sub"`
+	Issuer   string   `json:"iss"`
+	Audience string   `json:"aud"`
+	Scope    string   `json:"scope"`
+	ClientID string   `json:"client_id,omitempty"`
+	PrismID  string   `json:"prism_id,omitempty"` // Audit enrichment only — gateway MUST ignore.
+	Groups   []string `json:"groups,omitempty"`   // OAuth/OIDC group claim; participates in BackendPolicyResolver group resolution.
+	TokenGen int64    `json:"token_gen,omitempty"`
+	Exp      int64    `json:"exp"`
+	Iat      int64    `json:"iat"`
 }
 
 // GenerationChecker validates token generation counters.

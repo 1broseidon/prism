@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,23 +64,28 @@ type BackendToolInfo struct {
 // value lock-free. The hot-path scope filter loads this on every tools/list.
 type policyResolverBox struct{ r auth.PolicyResolver }
 
+// backendPolicyResolverBox is the analogous wrapper for the layered
+// per-backend resolver consulted at tool-call time.
+type backendPolicyResolverBox struct{ r auth.BackendPolicyResolver }
+
 // Gateway aggregates multiple MCP backends behind a single server.
 type Gateway struct {
-	mu             sync.RWMutex
-	backends       map[string]*Backend // keyed by server ID
-	workspaceInst  map[string]*Backend // keyed by backend ID + workspace ID; tools are not registered
-	server         *mcp.Server
-	logger         *slog.Logger
-	auditor        *audit.Logger
-	credStore      *credentials.Store
-	kvStore        store.Store // optional KV store for persisting runtime credential configs
-	policyResolver atomic.Pointer[policyResolverBox]
-	authFlows      any //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
-	bridgeURL      string
-	bridgeURLs     []string
-	stdioDisabled  string
-	network        *networkRuntime
-	workspace      *workspaceBridgeManager
+	mu                    sync.RWMutex
+	backends              map[string]*Backend // keyed by server ID
+	workspaceInst         map[string]*Backend // keyed by backend ID + workspace ID; tools are not registered
+	server                *mcp.Server
+	logger                *slog.Logger
+	auditor               *audit.Logger
+	credStore             *credentials.Store
+	kvStore               store.Store // optional KV store for persisting runtime credential configs
+	policyResolver        atomic.Pointer[policyResolverBox]
+	backendPolicyResolver atomic.Pointer[backendPolicyResolverBox]
+	authFlows             any //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
+	bridgeURL             string
+	bridgeURLs            []string
+	stdioDisabled         string
+	network               *networkRuntime
+	workspace             *workspaceBridgeManager
 }
 
 // New creates a new Gateway.
@@ -128,6 +134,20 @@ func (g *Gateway) SetPolicyResolver(pr auth.PolicyResolver) {
 // Lock-free read; safe under SetPolicyResolver concurrent with hot-path reads.
 func (g *Gateway) getPolicyResolver() auth.PolicyResolver {
 	b := g.policyResolver.Load()
+	if b == nil {
+		return nil
+	}
+	return b.r
+}
+
+// SetBackendPolicyResolver wires the layered per-backend resolver used at
+// tool-call time to stack agent → groups → defaults workspace rules.
+func (g *Gateway) SetBackendPolicyResolver(r auth.BackendPolicyResolver) {
+	g.backendPolicyResolver.Store(&backendPolicyResolverBox{r: r})
+}
+
+func (g *Gateway) getBackendPolicyResolver() auth.BackendPolicyResolver {
+	b := g.backendPolicyResolver.Load()
 	if b == nil {
 		return nil
 	}
@@ -950,7 +970,40 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		forwardedReq = req
 	}
 
+	// Workspace resolution: explicit _prism_workspace selector wins; otherwise
+	// walk the policy stack (agent → groups → defaults) and fall back to the
+	// backend's static workspace config as the floor.
 	workspaceCfg := config.NormalizeWorkspaceConfig(b.Config.Workspace)
+	resolution := BackendWorkspaceResolution{Source: "backend.static"}
+	if workspaceCfg != nil {
+		resolution.Selector = "static"
+		resolution.WorkspaceID = workspaceCfg.ID
+	}
+	if requestedWorkspaceID == "" {
+		callerClaims := auth.ClaimsFromContext(ctx)
+		resolvedCfg, res, denyReason := g.ResolveBackendWorkspace(callerClaims, b)
+		if denyReason != "" {
+			span.SetAttributes(attribute.Bool("tool.allowed", false))
+			span.SetStatus(codes.Error, "workspace policy denied")
+			g.logger.Warn("tool call denied by workspace policy",
+				"backend", backendID,
+				"tool", toolName,
+				"reason", denyReason,
+				"policy_source", res.Source,
+			)
+			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, credInjected, 0, nil)
+			metrics.RecordScopeDenial(b.Config.Namespace, toolName)
+			metrics.RecordToolCall(b.Config.Namespace, toolName, backendID, false, 0)
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: denyReason}},
+			}, nil
+		}
+		if resolvedCfg != nil {
+			workspaceCfg = resolvedCfg
+		}
+		resolution = res
+	}
 	effectiveWorkspaceID := ""
 	if workspaceCfg != nil {
 		effectiveWorkspaceID = workspaceCfg.ID
@@ -969,6 +1022,18 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 			}, nil
 		}
 		effectiveWorkspaceID = requestedWorkspaceID
+		resolution = BackendWorkspaceResolution{
+			Selector:    "request",
+			Source:      "_prism_workspace",
+			WorkspaceID: requestedWorkspaceID,
+		}
+	}
+	if effectiveWorkspaceID != "" {
+		span.SetAttributes(
+			attribute.String("workspace.id", effectiveWorkspaceID),
+			attribute.String("workspace.policy.source", resolution.Source),
+			attribute.String("workspace.policy.selector", resolution.Selector),
+		)
 	}
 
 	// Scope enforcement: check if the caller has permission for this tool.
@@ -1235,6 +1300,206 @@ func (g *Gateway) applyRegisteredWorkspaceConfig(cfg *config.WorkspaceConfig) {
 	}
 	cfg.QuotaBytes = entry.QuotaBytes
 	cfg.RetentionSeconds = entry.RetentionSeconds
+}
+
+// BackendWorkspaceResolution captures the workspace decision the gateway
+// made for a tool call plus the layer chain that produced it. The trace is
+// emitted in audit events so operators can answer "why" without diffing
+// state.
+type BackendWorkspaceResolution struct {
+	WorkspaceID string                 `json:"workspace_id,omitempty"`
+	Selector    string                 `json:"selector"`
+	Source      string                 `json:"source"` // policy layer or "backend.static"
+	Layers      []ResolutionLayerTrace `json:"layers,omitempty"`
+}
+
+// ResolutionLayerTrace records what each layer of the stack contributed.
+type ResolutionLayerTrace struct {
+	Source   string `json:"source"`
+	Selector string `json:"selector,omitempty"` // empty = layer did not have a rule for this backend
+}
+
+// ResolveBackendWorkspace walks the layered backend policy (agent → groups →
+// defaults) and returns the effective workspace for a tool call to the given
+// backend. The backend's static workspace config is the floor.
+//
+// Selector semantics:
+//   - "" (no rule at any layer)       → use backend.workspace static (floor)
+//   - "static"                        → explicitly select the floor
+//   - "agent"                         → resolve from registry by claim ownership
+//   - "id:<workspace-id>"             → pin to that registered workspace
+//
+// Errors are returned as values (with a trace) rather than as Go errors so
+// the caller can attribute the denial to a specific policy source.
+func (g *Gateway) ResolveBackendWorkspace(
+	claims *auth.Claims, backend *Backend,
+) (cfg *config.WorkspaceConfig, res BackendWorkspaceResolution, denyReason string) {
+	if backend == nil || backend.Config == nil {
+		return nil, BackendWorkspaceResolution{Source: "backend.static"}, ""
+	}
+	staticCfg := config.NormalizeWorkspaceConfig(backend.Config.Workspace)
+	res = g.collectBackendPolicyTrace(claims, backend.Config.ID)
+	if res.Selector == "" {
+		res.Selector = "static"
+		if staticCfg != nil {
+			res.WorkspaceID = staticCfg.ID
+		}
+		return staticCfg, res, ""
+	}
+	return g.applyWorkspaceSelector(claims, staticCfg, res)
+}
+
+// collectBackendPolicyTrace walks every layer the resolver returns and
+// records what each layer said for the given backend. The first non-empty
+// selector wins, but the full trace is preserved for audit/UI purposes.
+func (g *Gateway) collectBackendPolicyTrace(
+	claims *auth.Claims, backendID string,
+) BackendWorkspaceResolution {
+	res := BackendWorkspaceResolution{Source: "backend.static"}
+	resolver := g.getBackendPolicyResolver()
+	if resolver == nil || claims == nil {
+		return res
+	}
+	for _, layer := range resolver.ResolveBackendPolicy(claims) {
+		rule, hasRule := layer.Policies[backendID]
+		selector := ""
+		if hasRule {
+			selector = strings.TrimSpace(rule.WorkspaceSelector)
+		}
+		res.Layers = append(res.Layers, ResolutionLayerTrace{
+			Source:   layer.Source,
+			Selector: selector,
+		})
+		if selector == "" || res.Selector != "" {
+			continue
+		}
+		res.Selector = selector
+		res.Source = layer.Source
+	}
+	return res
+}
+
+// applyWorkspaceSelector turns a resolved selector value into a concrete
+// WorkspaceConfig, attributing failures to the policy source for clean
+// operator feedback.
+func (g *Gateway) applyWorkspaceSelector(
+	claims *auth.Claims,
+	staticCfg *config.WorkspaceConfig,
+	res BackendWorkspaceResolution,
+) (*config.WorkspaceConfig, BackendWorkspaceResolution, string) {
+	switch {
+	case res.Selector == "static":
+		if staticCfg != nil {
+			res.WorkspaceID = staticCfg.ID
+		}
+		return staticCfg, res, ""
+	case res.Selector == "agent":
+		ws, reason := g.resolveAgentWorkspace(claims)
+		if reason != "" {
+			return nil, res, reason
+		}
+		res.WorkspaceID = ws.ID
+		return ws, res, ""
+	case strings.HasPrefix(res.Selector, "id:"):
+		return g.resolveIDSelector(res)
+	default:
+		return nil, res, fmt.Sprintf("unknown workspace selector %q", res.Selector)
+	}
+}
+
+func (g *Gateway) resolveIDSelector(
+	res BackendWorkspaceResolution,
+) (*config.WorkspaceConfig, BackendWorkspaceResolution, string) {
+	id := strings.TrimSpace(strings.TrimPrefix(res.Selector, "id:"))
+	if id == "" {
+		return nil, res, "policy selector 'id:' is missing a workspace id"
+	}
+	entry, ok := g.registeredWorkspace(id)
+	if !ok {
+		return nil, res, fmt.Sprintf("policy pins workspace %q but it is not registered", id)
+	}
+	res.WorkspaceID = entry.ID
+	return &config.WorkspaceConfig{
+		ID:               entry.ID,
+		Type:             entry.Type,
+		QuotaBytes:       entry.QuotaBytes,
+		RetentionSeconds: entry.RetentionSeconds,
+	}, res, ""
+}
+
+// resolveAgentWorkspace returns the single workspace registered with the
+// calling agent's identity as owner. Zero or many matches are explicit
+// errors so operators get clear feedback.
+func (g *Gateway) resolveAgentWorkspace(
+	claims *auth.Claims,
+) (cfg *config.WorkspaceConfig, denyReason string) {
+	if claims == nil {
+		return nil, "policy requires agent workspace but call has no identity"
+	}
+	if g.kvStore == nil {
+		return nil, "policy requires agent workspace but no workspace registry is configured"
+	}
+	candidates := []string{claims.PrismID, claims.ClientID, claims.Subject}
+	matches := make([]*workspaceRegistryEntry, 0, 2)
+	for _, entry := range g.loadAllRegisteredWorkspaceEntries() {
+		if entry.Owner == "" {
+			continue
+		}
+		for _, id := range candidates {
+			if id != "" && entry.Owner == id {
+				matches = append(matches, entry)
+				break
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, "no workspace is registered for the calling agent — install prism-bridge with --use-agent-credentials"
+	case 1:
+		e := matches[0]
+		return &config.WorkspaceConfig{
+			ID:               e.ID,
+			Type:             e.Type,
+			QuotaBytes:       e.QuotaBytes,
+			RetentionSeconds: e.RetentionSeconds,
+		}, ""
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, m := range matches {
+			ids = append(ids, m.ID)
+		}
+		sort.Strings(ids)
+		return nil, fmt.Sprintf(
+			"%d workspaces are registered for this agent (%s); set workspace_selector to id:<one> to disambiguate",
+			len(matches), strings.Join(ids, ", "),
+		)
+	}
+}
+
+// loadAllRegisteredWorkspaceEntries returns every registry entry. Unlike
+// loadRegisteredWorkspaces() which returns admin.WorkspaceStatus values, this
+// gives the raw entries so resolution can inspect ownership.
+func (g *Gateway) loadAllRegisteredWorkspaceEntries() []*workspaceRegistryEntry {
+	if g.kvStore == nil {
+		return nil
+	}
+	keys, err := g.kvStore.List(workspaceRegistryPrefix)
+	if err != nil {
+		return nil
+	}
+	out := make([]*workspaceRegistryEntry, 0, len(keys))
+	for _, key := range keys {
+		data, err := g.kvStore.Get(key)
+		if err != nil {
+			continue
+		}
+		var entry workspaceRegistryEntry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			continue
+		}
+		out = append(out, &entry)
+	}
+	return out
 }
 
 // validateBackendWorkspaceBinding rejects a backend configuration whose

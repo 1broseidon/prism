@@ -166,6 +166,9 @@ func runServe() {
 	// bypassing stale MCP session context. Cached 5 seconds to limit KV reads.
 	policyResolver := auth.NewCachedPolicyResolver(authSrv, 5*time.Second)
 	gw.SetPolicyResolver(policyResolver)
+	// Backend policy resolver: drives the stacked workspace selection at
+	// call time. Shares the same authserver as the scope resolver.
+	gw.SetBackendPolicyResolver(authSrv)
 
 	// Build admin API with agent/audit adapters.
 	agentsFn := func() []any {

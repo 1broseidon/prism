@@ -29,6 +29,39 @@ type PolicyResolver interface {
 	ResolvePolicy(clientID, prismID string) *Policy
 }
 
+// BackendPolicy is a stackable per-backend rule. Policies stack:
+// agent → groups (alphabetical) → defaults → backend static floor.
+// The first non-empty selector at each dimension wins.
+//
+// Future dimensions (rate_limit, transport, audience enforcement) live on
+// the same struct so the resolution algorithm scales without new layers.
+type BackendPolicy struct {
+	// WorkspaceSelector controls which workspace a tool call attaches to.
+	// Empty means inherit from the next layer.
+	//
+	// Values:
+	//   "static"        — use the backend's configured workspace (floor)
+	//   "agent"         — resolve to the workspace owned by the calling agent
+	//   "id:<id>"       — pin to a specific registered workspace id
+	WorkspaceSelector string `json:"workspace_selector,omitempty"`
+}
+
+// BackendPolicyLayer is one tier of the stacked backend policy resolution.
+// Sources are labeled so callers can attribute decisions back to the layer
+// that produced them ("agent:<prism_id>", "group:<name>", "defaults").
+type BackendPolicyLayer struct {
+	Source   string                   `json:"source"`
+	Policies map[string]BackendPolicy `json:"policies,omitempty"`
+}
+
+// BackendPolicyResolver returns the layered backend policy that applies to a
+// caller, ordered from highest priority (agent) to lowest (defaults).
+// Implementations should be cheap to call per request; cache at the
+// authserver layer if needed.
+type BackendPolicyResolver interface {
+	ResolveBackendPolicy(claims *Claims) []BackendPolicyLayer
+}
+
 // Policy defines what a client is allowed to do based on granted scopes.
 //
 // Scope format: "namespace:tool" or "namespace:*" for full namespace access.
