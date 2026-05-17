@@ -2529,6 +2529,28 @@ tr:hover .remove-btn {
 .workspace-create-card {
   padding: 12px;
 }
+.storage-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 12px;
+  align-items: center;
+  margin-top: 10px;
+}
+.storage-row:first-child {
+  margin-top: 0;
+}
+.storage-row .config-input {
+  width: 100%;
+}
+.storage-row .inline-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+.storage-create-form {
+  flex-wrap: wrap;
+}
 .storage-summary {
   display: grid;
   grid-template-columns: minmax(160px, auto) 1fr;

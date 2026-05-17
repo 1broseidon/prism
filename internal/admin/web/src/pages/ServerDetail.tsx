@@ -14,10 +14,13 @@ import type {
   CredentialInput,
   SandboxConfig,
   SandboxMount,
+  Workspace,
   WorkspaceApplyResult,
   WorkspaceChangeSet,
+  WorkspaceConfig,
 } from "../api/types";
 import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
+import { fmtBytes } from "../util/bytes";
 
 type CredType = "none" | "static" | "env" | "command";
 const BACKEND_REBUILD_TIMEOUT_MS = 60_000;
@@ -108,6 +111,7 @@ export function ServerDetail() {
 
       <MetaRow backend={backend} />
       {canMutate() && <BackendSettingsSection backend={backend} />}
+      {canMutate() && <StorageSection backend={backend} />}
       {backend.workspace && <WorkspaceChangesSection backend={backend} />}
       {backend.disconnected && canMutate() && (
         <ReconnectSection backend={backend} />
@@ -486,6 +490,298 @@ function BackendSettingsSection({ backend }: { backend: Backend }) {
             sandbox settings apply to stdio Docker backends.
           </div>
         )}
+        {error && <div class="error-text">{error}</div>}
+      </div>
+    </div>
+  );
+}
+
+type StorageType = "" | "ephemeral" | "virtual" | "proxied";
+
+function StorageSection({ backend }: { backend: Backend }) {
+  const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
+  const initialType: StorageType =
+    (backend.workspace?.type as StorageType) || "";
+  const [storageType, setStorageType] = useState<StorageType>(initialType);
+  const [workspaceId, setWorkspaceId] = useState<string>(
+    backend.workspace?.id || "",
+  );
+  const [creatingNew, setCreatingNew] = useState(false);
+  const [newId, setNewId] = useState("");
+  const [newQuotaMB, setNewQuotaMB] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadWorkspaces = async () => {
+    try {
+      const ws = await getJSON<Workspace[]>("/workspaces");
+      setWorkspaces(ws);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    loadWorkspaces();
+  }, []);
+
+  // Re-sync local state when the backend changes (e.g. after save reloads it).
+  useEffect(() => {
+    setStorageType((backend.workspace?.type as StorageType) || "");
+    setWorkspaceId(backend.workspace?.id || "");
+    setCreatingNew(false);
+    setNewId("");
+    setNewQuotaMB("");
+    setError(null);
+  }, [backend.id, backend.workspace?.id, backend.workspace?.type]);
+
+  const virtualOptions = useMemo(
+    () => (workspaces || []).filter((w) => w.type === "virtual"),
+    [workspaces],
+  );
+  const proxiedOptions = useMemo(
+    () =>
+      (workspaces || []).filter((w) => (w.type || "proxied") === "proxied"),
+    [workspaces],
+  );
+
+  const dirty =
+    storageType !== initialType ||
+    workspaceId !== (backend.workspace?.id || "") ||
+    creatingNew;
+
+  const canSave =
+    !busy &&
+    dirty &&
+    (storageType === "" ||
+      storageType === "ephemeral" ||
+      (storageType === "virtual" &&
+        (creatingNew ? newId.trim() !== "" : workspaceId !== "")) ||
+      (storageType === "proxied" && workspaceId !== ""));
+
+  const onTypeChange = (next: StorageType) => {
+    setStorageType(next);
+    setError(null);
+    if (next === "" || next === "ephemeral") {
+      setWorkspaceId("");
+      setCreatingNew(false);
+      return;
+    }
+    if (next === "virtual") {
+      // Keep existing selection when it's still valid; otherwise default to
+      // the first available virtual workspace (if any), else open the create
+      // form.
+      const stillValid = virtualOptions.some((w) => w.id === workspaceId);
+      if (!stillValid) {
+        if (virtualOptions.length > 0) {
+          setWorkspaceId(virtualOptions[0].id);
+          setCreatingNew(false);
+        } else {
+          setWorkspaceId("");
+          setCreatingNew(true);
+        }
+      }
+      return;
+    }
+    if (next === "proxied") {
+      const stillValid = proxiedOptions.some((w) => w.id === workspaceId);
+      if (!stillValid) {
+        setWorkspaceId(proxiedOptions[0]?.id || "");
+        setCreatingNew(false);
+      }
+    }
+  };
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      let nextId = workspaceId;
+
+      // If creating a virtual workspace inline, do that first.
+      if (storageType === "virtual" && creatingNew) {
+        const trimmed = newId.trim();
+        const quotaN = Number(newQuotaMB);
+        await postJSON("/workspaces", {
+          id: trimmed,
+          type: "virtual",
+          quota_bytes:
+            Number.isFinite(quotaN) && quotaN > 0
+              ? Math.round(quotaN * 1024 * 1024)
+              : undefined,
+        });
+        nextId = trimmed;
+        await loadWorkspaces();
+      }
+
+      // Build the workspace patch. Empty id clears the binding.
+      const workspace: WorkspaceConfig =
+        storageType === ""
+          ? { id: "" }
+          : storageType === "ephemeral"
+            ? { id: backend.id, type: "ephemeral" }
+            : { id: nextId, type: storageType };
+
+      await patchJSON<unknown>(
+        `/backends/${encodeURIComponent(backend.id)}`,
+        { workspace } satisfies BackendUpdateBody,
+      );
+      await backends.refresh();
+      setCreatingNew(false);
+      setNewId("");
+      setNewQuotaMB("");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      showError(message);
+      setError(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">storage</span>
+        <span class="section-sub">
+          attach this server to a workspace volume. virtual workspaces persist
+          across restarts; ephemeral storage is auto-managed; proxied syncs
+          from a local repo via prism-bridge.
+        </span>
+      </div>
+      <div class="card runtime-card">
+        <div class="storage-row">
+          <label class="config-label">storage type</label>
+          <select
+            class="config-input"
+            value={storageType}
+            disabled={busy}
+            onChange={(e) =>
+              onTypeChange((e.target as HTMLSelectElement).value as StorageType)
+            }
+          >
+            <option value="">none</option>
+            <option value="ephemeral">ephemeral (auto scratch)</option>
+            <option value="virtual">virtual (persistent gateway storage)</option>
+            <option value="proxied">proxied (local bridge)</option>
+          </select>
+        </div>
+
+        {storageType === "virtual" && (
+          <div class="storage-row">
+            <label class="config-label">workspace</label>
+            {creatingNew ? (
+              <div class="inline-form storage-create-form">
+                <input
+                  type="text"
+                  class="config-input"
+                  value={newId}
+                  placeholder="new workspace id"
+                  spellcheck={false}
+                  autoFocus
+                  onInput={(e) =>
+                    setNewId((e.target as HTMLInputElement).value)
+                  }
+                />
+                <input
+                  type="number"
+                  min="0"
+                  class="config-input"
+                  value={newQuotaMB}
+                  placeholder="quota mb (optional)"
+                  onInput={(e) =>
+                    setNewQuotaMB((e.target as HTMLInputElement).value)
+                  }
+                />
+                <button
+                  class="cancel-btn"
+                  onClick={() => {
+                    setCreatingNew(false);
+                    setNewId("");
+                    setNewQuotaMB("");
+                    if (virtualOptions.length > 0 && !workspaceId) {
+                      setWorkspaceId(virtualOptions[0].id);
+                    }
+                  }}
+                  disabled={busy}
+                >
+                  use existing
+                </button>
+              </div>
+            ) : (
+              <div class="inline-form">
+                <select
+                  class="config-input"
+                  value={workspaceId}
+                  disabled={busy || virtualOptions.length === 0}
+                  onChange={(e) =>
+                    setWorkspaceId((e.target as HTMLSelectElement).value)
+                  }
+                >
+                  {virtualOptions.length === 0 && (
+                    <option value="">no virtual workspaces</option>
+                  )}
+                  {virtualOptions.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.id}
+                      {w.quota_bytes
+                        ? ` · ${fmtBytes(w.used_bytes)} / ${fmtBytes(w.quota_bytes)}`
+                        : w.used_bytes
+                          ? ` · ${fmtBytes(w.used_bytes)} used`
+                          : ""}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  class="section-btn"
+                  onClick={() => {
+                    setCreatingNew(true);
+                    setWorkspaceId("");
+                  }}
+                  disabled={busy}
+                >
+                  + new
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {storageType === "proxied" && (
+          <div class="storage-row">
+            <label class="config-label">local bridge</label>
+            <select
+              class="config-input"
+              value={workspaceId}
+              disabled={busy || proxiedOptions.length === 0}
+              onChange={(e) =>
+                setWorkspaceId((e.target as HTMLSelectElement).value)
+              }
+            >
+              {proxiedOptions.length === 0 && (
+                <option value="">
+                  no local bridges connected — install one in Settings
+                </option>
+              )}
+              {proxiedOptions.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.id}
+                  {w.hostname ? ` · ${w.hostname}` : ""}
+                  {w.root ? ` · ${w.root}` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div class="config-actions">
+          <button class="save-btn" onClick={save} disabled={!canSave}>
+            {busy ? "saving…" : "save"}
+          </button>
+          {dirty && !busy && (
+            <span class="config-dirty-marker">unsaved changes</span>
+          )}
+        </div>
         {error && <div class="error-text">{error}</div>}
       </div>
     </div>
