@@ -161,6 +161,9 @@ type McpServerConfig struct {
 	// Env sets environment variables for the spawned process.
 	Env map[string]string `json:"env,omitempty"`
 
+	// Enabled controls whether Prism connects this backend. Omitted means true.
+	Enabled *bool `json:"enabled,omitempty"`
+
 	// --- HTTP transport (alternative to command) ---
 
 	// URL is the HTTP endpoint for an already-running MCP server.
@@ -179,6 +182,13 @@ type McpServerConfig struct {
 	CircuitBreaker *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
 	// Timeout is the per-request timeout for this backend. Default: "30s".
 	Timeout Duration `json:"timeout,omitempty"`
+
+	// Sandbox controls Docker isolation for stdio backends. Ignored for HTTP.
+	Sandbox *SandboxConfig `json:"sandbox,omitempty"`
+
+	// Workspace attaches a sandboxed stdio backend to a local workspace agent
+	// using a snapshot copy and policy-controlled patch-back.
+	Workspace *WorkspaceConfig `json:"workspace,omitempty"`
 }
 
 // IsStdio reports whether this server uses stdio transport (command-based).
@@ -319,6 +329,7 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 type ServerConfig struct {
 	ID        string
 	Namespace string
+	Enabled   bool
 
 	// Stdio transport
 	Command []string
@@ -331,6 +342,8 @@ type ServerConfig struct {
 	OriginalCommand []string
 	BridgeManaged   bool
 	BridgeRuntime   string
+	Sandbox         SandboxConfig
+	Workspace       *WorkspaceConfig
 
 	// Prism extensions
 	Credentials    *CredentialConfig
@@ -532,6 +545,12 @@ func validateServerTransport(name string, srv *McpServerConfig) error {
 	if hasCommand && srv.Credentials != nil {
 		return fmt.Errorf("mcpServers.%s: credentials are not supported for stdio backends (use env instead)", name)
 	}
+	if err := ValidateSandboxConfig(srv.Sandbox); err != nil {
+		return fmt.Errorf("mcpServers.%s.%w", name, err)
+	}
+	if err := ValidateWorkspaceConfig(srv.Workspace); err != nil {
+		return fmt.Errorf("mcpServers.%s.%w", name, err)
+	}
 	return nil
 }
 
@@ -639,12 +658,15 @@ func expand(cfg *Config) (*Loaded, error) {
 		sc := ServerConfig{
 			ID:             name,
 			Namespace:      name,
+			Enabled:        serverEnabled(srv.Enabled),
 			URL:            srv.URL,
 			Credentials:    srv.Credentials,
 			RateLimit:      srv.RateLimit,
 			CircuitBreaker: srv.CircuitBreaker,
 			Timeout:        srv.Timeout,
 			Env:            srv.Env,
+			Sandbox:        NormalizeSandboxConfig(srv.Sandbox, SandboxProfileDefault),
+			Workspace:      NormalizeWorkspaceConfig(srv.Workspace),
 		}
 
 		if srv.IsStdio() {
@@ -665,6 +687,10 @@ func expand(cfg *Config) (*Loaded, error) {
 	}
 
 	return loaded, nil
+}
+
+func serverEnabled(enabled *bool) bool {
+	return enabled == nil || *enabled
 }
 
 func normalizeStdioSpawnMode(mode string) string {

@@ -6,31 +6,29 @@
 #   /.well-known/oauth-protected-resource*      → gateway   (RFC 9728)
 #   /.well-known/oauth-authorization-server     → gateway   (RFC 8414)
 #   /.well-known/jwks.json                      → gateway
+#   /workspace/*                                → gateway   (local bridge control plane)
 #   everything else (/, /auth/*, /api-ish, ...) → admin     (prism:9086)
 #
 # Gateway and admin own non-overlapping paths so the split is safe.
 #
-# TLS: `tls internal` uses Caddy's self-signed CA — fine for an internal
-# network with mcp.dfam.one resolved on your own DNS. Trust the CA in
-# clients that need to verify (one-time):
-#   docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > caddy-root.crt
-#
-# Going public (Claude.ai needs this): drop `tls internal` and let Caddy
-# get a Let's Encrypt cert (requires ports 80 and 443 reachable from the
-# internet for HTTP-01).
+# TLS uses Let's Encrypt DNS-01 via Cloudflare, so mcp.dfam.one can resolve
+# to a private LAN address while clients still receive a public-trusted cert.
+# Required env var in the Caddy container:
+#   CLOUDFLARE_API_TOKEN
 #
 # Settings page must have:
 #   public_url       = https://mcp.dfam.one
 #   admin_public_url = https://mcp.dfam.one
 #   trust_proxy_headers = on
-
 {
 	# Disable Caddy's admin endpoint — not used, smaller attack surface.
 	admin off
 }
 
 mcp.dfam.one {
-	tls internal
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
 	encode gzip zstd
 
 	@gateway {
@@ -38,6 +36,7 @@ mcp.dfam.one {
 		path /token
 		path /authorize
 		path /register
+		path /workspace/*
 		path /.well-known/oauth-protected-resource
 		path /.well-known/oauth-protected-resource/*
 		path /.well-known/oauth-authorization-server

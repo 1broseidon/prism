@@ -89,6 +89,7 @@ func runServe() {
 
 	// Give the gateway access to the KV store for persisting runtime configs.
 	gw.SetStore(kvStore)
+	initWorkspaceBridge(gw, kvStore, logger)
 	localBridge, err := configureStdioSpawning(ctx, cfg, gw, logger)
 	if err != nil {
 		logger.Error("failed to configure stdio spawning", "error", err)
@@ -139,7 +140,7 @@ func runServe() {
 
 	resourceURI := mcpResourceURL(gatewayPublicURL)
 	handler := buildHandler(cfg, gw, authJWKS, authSrv, logger, resourceURI)
-	mainMux := buildMux(cfg, handler, authSrv, logger, resourceURI)
+	mainMux := buildMux(cfg, handler, authSrv, logger, resourceURI, gw.WorkspaceBridgeHandler())
 
 	mainServer := &http.Server{
 		Handler:           mainMux,
@@ -259,6 +260,12 @@ func initAdminAuth(ctx context.Context, fileCfg *config.AdminAuthConfig, kv stor
 	return holder, nil
 }
 
+func initWorkspaceBridge(gw *gateway.Gateway, kv store.Store, logger *slog.Logger) {
+	if workspaceErr := gw.InitWorkspaceBridge(kv, os.Getenv("PRISM_WORKSPACE_TOKEN")); workspaceErr != nil {
+		logger.Warn("failed to initialize workspace bridge settings", "error", workspaceErr)
+	}
+}
+
 func syncAdminAuthRedirectFromNetwork(kv store.Store, cfg *config.AdminAuthConfig) (bool, error) {
 	if cfg == nil {
 		return false, nil
@@ -286,6 +293,11 @@ func setupGateway(logger *slog.Logger) *gateway.Gateway {
 
 func connectConfigBackends(ctx context.Context, gw *gateway.Gateway, cfg *config.Loaded, logger *slog.Logger) {
 	for i := range cfg.Servers {
+		gw.ApplyPersistedBackendSettings(&cfg.Servers[i])
+		if !cfg.Servers[i].Enabled {
+			logger.Info("skipping disabled backend", "id", cfg.Servers[i].ID)
+			continue
+		}
 		if err := gw.ConnectBackendViaBridge(ctx, &cfg.Servers[i]); err != nil {
 			logger.Error("failed to connect backend", "id", cfg.Servers[i].ID, "error", err)
 		}
@@ -479,7 +491,7 @@ func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, auth
 }
 
 // buildMux creates the HTTP mux with the MCP handler and auth endpoints.
-func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Server, logger *slog.Logger, resourceURI string) *http.ServeMux {
+func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Server, logger *slog.Logger, resourceURI string, workspaceHandler http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Mount embedded auth endpoints if present.
@@ -508,6 +520,9 @@ func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Serv
 
 	mux.Handle("/mcp", handler)
 	mux.Handle("/mcp/", handler)
+	if workspaceHandler != nil {
+		mux.Handle("/workspace/", workspaceHandler)
+	}
 
 	// Catch-all: return JSON 404 for any unmatched path.
 	// MCP clients (Claude Code) expect JSON responses and fail to parse plain-text 404s.
@@ -630,7 +645,7 @@ func waitForShutdown(cfg *config.Loaded, configPath string, mainServer, adminSer
 // reloadConfig re-reads the config file, reloads policy (static clients, groups,
 // default_scopes) on the auth server, and diffs mcpServers for backend add/remove.
 // Dynamic (DCR) clients and refresh tokens are preserved across reloads.
-func reloadConfig(configPath string, gw *gateway.Gateway, authSrv *authserver.Server, logger *slog.Logger) {
+func reloadConfig(configPath string, gw *gateway.Gateway, authSrv *authserver.Server, logger *slog.Logger) { //nolint:gocyclo // reload intentionally keeps policy and backend diffing together.
 	newCfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error("reload failed — keeping current config", "error", err)
@@ -673,10 +688,13 @@ func reloadConfig(configPath string, gw *gateway.Gateway, authSrv *authserver.Se
 
 	newIDs := make(map[string]struct{}, len(newCfg.Servers))
 	for i := range newCfg.Servers {
-		newIDs[newCfg.Servers[i].ID] = struct{}{}
+		gw.ApplyPersistedBackendSettings(&newCfg.Servers[i])
+		if newCfg.Servers[i].Enabled {
+			newIDs[newCfg.Servers[i].ID] = struct{}{}
+		}
 	}
 
-	// Remove backends that no longer exist in config.
+	// Remove backends that no longer exist in config or are now disabled.
 	for id := range currentIDs {
 		if _, ok := newIDs[id]; !ok {
 			if err := gw.DisconnectBackend(id); err != nil {
@@ -691,8 +709,11 @@ func reloadConfig(configPath string, gw *gateway.Gateway, authSrv *authserver.Se
 	ctx := context.Background()
 	for i := range newCfg.Servers {
 		s := &newCfg.Servers[i]
+		if !s.Enabled {
+			continue
+		}
 		if _, ok := currentIDs[s.ID]; !ok {
-			if err := gw.ConnectBackend(ctx, s); err != nil {
+			if err := gw.ConnectBackendViaBridge(ctx, s); err != nil {
 				logger.Error("reload: failed to add backend", "id", s.ID, "error", err)
 			} else {
 				logger.Info("reload: added backend", "id", s.ID)

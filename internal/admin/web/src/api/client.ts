@@ -10,9 +10,13 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(init?.headers ?? {}),
+  };
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
+    headers,
   });
   const text = await res.text();
 
@@ -52,18 +56,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-export function getJSON<T>(path: string): Promise<T> {
-  return request<T>(path);
+export function getJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(path, init);
 }
 
-export function putJSON<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, { method: "PUT", body: JSON.stringify(body) });
+export function putJSON<T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> {
+  return request<T>(path, { ...init, method: "PUT", body: JSON.stringify(body) });
 }
 
-export function postJSON<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, { method: "POST", body: JSON.stringify(body) });
+export function postJSON<T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> {
+  return request<T>(path, { ...init, method: "POST", body: JSON.stringify(body) });
 }
 
-export function deleteJSON<T>(path: string): Promise<T> {
-  return request<T>(path, { method: "DELETE" });
+export function patchJSON<T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> {
+  return request<T>(path, { ...init, method: "PATCH", body: JSON.stringify(body) });
+}
+
+export function deleteJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(path, { ...init, method: "DELETE" });
 }

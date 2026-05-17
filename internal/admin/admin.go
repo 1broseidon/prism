@@ -118,6 +118,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /groups", a.session(http.HandlerFunc(a.handleListGroups)))
 	mux.Handle("GET /groups/", a.session(http.HandlerFunc(a.handleGetGroup)))
 	mux.Handle("GET /defaults", a.session(http.HandlerFunc(a.handleDefaults)))
+	mux.Handle("GET /workspaces", a.session(http.HandlerFunc(a.handleListWorkspaces)))
 	mux.Handle("GET /backends/", a.session(http.HandlerFunc(a.handleBackendSub)))
 
 	// Admin auth configuration — admin role required when admin auth is
@@ -132,6 +133,8 @@ func (a *API) Handler() http.Handler {
 	// Runtime network settings (admin_public_url, behind-proxy toggle, ...).
 	mux.Handle("GET /config/network", a.admin(http.HandlerFunc(a.handleGetNetwork)))
 	mux.Handle("PUT /config/network", a.admin(http.HandlerFunc(a.handlePutNetwork)))
+	mux.Handle("GET /config/workspace-bridge", a.admin(http.HandlerFunc(a.handleGetWorkspaceBridgeConfig)))
+	mux.Handle("PUT /config/workspace-bridge", a.admin(http.HandlerFunc(a.handlePutWorkspaceBridgeConfig)))
 
 	// Mutation routes — admin role required.
 	mux.Handle("PUT /agents/", a.admin(http.HandlerFunc(a.handlePutAgent)))
@@ -140,7 +143,9 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /groups/", a.admin(http.HandlerFunc(a.handleSetGroup)))
 	mux.Handle("DELETE /groups/", a.admin(http.HandlerFunc(a.handleDeleteGroup)))
 	mux.Handle("PUT /defaults", a.admin(http.HandlerFunc(a.handleSetDefaults)))
+	mux.Handle("DELETE /workspaces/", a.admin(http.HandlerFunc(a.handleDeleteWorkspace)))
 	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
+	mux.Handle("PATCH /backends/", a.admin(http.HandlerFunc(a.handlePatchBackend)))
 	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
 
 	if a.oauthCallbackHandler != nil {
@@ -162,6 +167,18 @@ func (a *API) Handler() http.Handler {
 func (a *API) handleBackendPost(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/reconnect") {
 		a.handleReconnectBackend(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/workspace-changes/refresh") {
+		a.handleBackendWorkspaceRefresh(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/workspace-changes/apply") {
+		a.handleBackendWorkspaceApply(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/workspace-changes/discard") {
+		a.handleBackendWorkspaceDiscard(w, r)
 		return
 	}
 	a.handleAddBackend(w, r)
@@ -260,6 +277,10 @@ func (a *API) handleInfo(w http.ResponseWriter, _ *http.Request) {
 func (a *API) handleBackendSub(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/auth-status") {
 		a.handleAuthStatus(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/workspace-changes") {
+		a.handleBackendWorkspaceChanges(w, r)
 		return
 	}
 	http.NotFound(w, r)

@@ -2,7 +2,11 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/1broseidon/prism/internal/config"
+	ws "github.com/1broseidon/prism/internal/workspace"
 )
 
 func TestDetectRuntimeProfile(t *testing.T) {
@@ -99,3 +103,127 @@ func TestDockerSpecBuildsIsolatedEnvAndLabels(t *testing.T) {
 		t.Fatalf("security opts = %v", spec.hostCfg.SecurityOpt)
 	}
 }
+
+func TestDockerSpecAppliesDefaultSandbox(t *testing.T) {
+	runtime := &DockerRuntime{
+		defaultImage: "prism-bridge:full",
+		images:       map[string]string{"full": "prism-bridge:full"},
+		labelPrefix:  "prism.bridge",
+		namePrefix:   "prism-managed-",
+	}
+	sandbox := config.DefaultSandboxConfig()
+	readonly := false
+	sandbox.Mounts = []config.SandboxMount{{
+		Source:   "/tmp/project",
+		Target:   "/workspace",
+		ReadOnly: &readonly,
+	}}
+
+	spec := runtime.buildSpec(&SpawnRequest{
+		ID:      "brainfile",
+		Command: "npx",
+		Args:    []string{"@brainfile/cli", "mcp"},
+		Sandbox: &sandbox,
+	})
+
+	if spec.containerCfg.User != "65532:65532" {
+		t.Fatalf("user = %q", spec.containerCfg.User)
+	}
+	if !spec.hostCfg.ReadonlyRootfs {
+		t.Fatal("rootfs should be read-only")
+	}
+	if spec.hostCfg.Tmpfs["/tmp"] != "rw,nosuid,nodev,exec,size=256m" {
+		t.Fatalf("tmpfs /tmp = %q", spec.hostCfg.Tmpfs["/tmp"])
+	}
+	if spec.hostCfg.Memory != 512*1024*1024 {
+		t.Fatalf("memory = %d", spec.hostCfg.Memory)
+	}
+	if spec.hostCfg.NanoCPUs != 1_000_000_000 {
+		t.Fatalf("nano cpus = %d", spec.hostCfg.NanoCPUs)
+	}
+	if spec.hostCfg.PidsLimit == nil || *spec.hostCfg.PidsLimit != 128 {
+		t.Fatalf("pids limit = %v", spec.hostCfg.PidsLimit)
+	}
+	if len(spec.hostCfg.Mounts) != 1 || spec.hostCfg.Mounts[0].ReadOnly {
+		t.Fatalf("mounts = %+v", spec.hostCfg.Mounts)
+	}
+	if !envContains(spec.containerCfg.Env, "HOME=/home/sandbox") ||
+		!envContains(spec.containerCfg.Env, "NPM_CONFIG_CACHE=/tmp/.npm") {
+		t.Fatalf("sandbox env = %v", spec.containerCfg.Env)
+	}
+}
+
+func TestDockerSpecMountsWorkspaceSnapshotVolume(t *testing.T) { //nolint:gocyclo // verifies a cross-cutting Docker spec
+	runtime := &DockerRuntime{
+		defaultImage: "prism-bridge:full",
+		images:       map[string]string{"full": "prism-bridge:full"},
+		labelPrefix:  "prism.bridge",
+		namePrefix:   "prism-managed-",
+	}
+	spec := runtime.buildSpec(&SpawnRequest{
+		ID:      "brainfile",
+		Command: "npx",
+		Args:    []string{"@brainfile/cli", "mcp"},
+		Sandbox: &config.SandboxConfig{
+			Profile:        config.SandboxProfileDefault,
+			NetworkProfile: config.SandboxNetworkStandard,
+			RunAsRoot:      boolPtr(false),
+			UID:            config.DefaultSandboxUID,
+			GID:            config.DefaultSandboxGID,
+			ReadOnlyRootFS: boolPtr(true),
+		},
+		Workspace: &config.WorkspaceConfig{
+			ID:        "repo",
+			Mode:      config.WorkspaceModeSnapshot,
+			WriteMode: config.WorkspaceWriteStage,
+		},
+		WorkspaceSnapshot: &ws.Snapshot{BaseID: "base", Archive: []byte("archive")},
+	})
+
+	if spec.containerCfg.WorkingDir != "/workspace" {
+		t.Fatalf("working dir = %q", spec.containerCfg.WorkingDir)
+	}
+	if spec.containerCfg.User != "" || spec.containerCfg.Entrypoint[0] != "sh" || !strings.Contains(spec.containerCfg.Cmd[0], "su-exec 65532:65532") {
+		t.Fatalf("workspace entrypoint/user = user %q entrypoint %v cmd %v", spec.containerCfg.User, spec.containerCfg.Entrypoint, spec.containerCfg.Cmd)
+	}
+	if !reflect.DeepEqual([]string(spec.hostCfg.CapAdd), []string{"CHOWN", "SETGID", "SETUID"}) {
+		t.Fatalf("cap add = %v", spec.hostCfg.CapAdd)
+	}
+	if spec.volumeName != "prism-managed-brainfile-workspace" {
+		t.Fatalf("volume = %q", spec.volumeName)
+	}
+	if spec.cacheVolume != "prism-managed-brainfile-cache" {
+		t.Fatalf("cache volume = %q", spec.cacheVolume)
+	}
+	if spec.installScript == "" || !strings.Contains(spec.installScript, "npm cache add") {
+		t.Fatalf("install script = %q", spec.installScript)
+	}
+	workspaceFound := false
+	cacheFound := false
+	for _, m := range spec.hostCfg.Mounts {
+		if m.Target == "/workspace" && string(m.Type) == "volume" && m.Source == spec.volumeName {
+			workspaceFound = true
+		}
+		if m.Target == "/cache" && string(m.Type) == "volume" && m.Source == spec.cacheVolume {
+			cacheFound = true
+		}
+	}
+	if !workspaceFound || !cacheFound {
+		t.Fatalf("workspace/cache volume mount missing: %+v", spec.hostCfg.Mounts)
+	}
+	if !envContains(spec.containerCfg.Env, "NPM_CONFIG_PREFER_OFFLINE=true") ||
+		!envContains(spec.containerCfg.Env, "NPM_CONFIG_IGNORE_SCRIPTS=true") {
+		t.Fatalf("package-manager hardening env missing: %v", spec.containerCfg.Env)
+	}
+}
+
+func envContains(env []string, want string) bool {
+	for _, item := range env {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func boolPtr(v bool) *bool { return &v }

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -14,8 +16,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1broseidon/prism/internal/config"
+	ws "github.com/1broseidon/prism/internal/workspace"
 	"github.com/docker/docker/api/types/container"
+	mounttypes "github.com/docker/docker/api/types/mount"
 	networktypes "github.com/docker/docker/api/types/network"
+	volumetypes "github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -36,19 +42,27 @@ type DockerRuntime struct {
 }
 
 type dockerBackend struct {
-	containerID string
-	endpoint    string
-	status      string
+	containerID  string
+	endpoint     string
+	status       string
+	volumeName   string
+	cacheVolume  string
+	workspace    *config.WorkspaceConfig
+	baseSnapshot *ws.Snapshot
+	changes      *ws.ChangeSet
 }
 
 type dockerSpec struct {
-	name         string
-	image        string
-	endpoint     string
-	labels       map[string]string
-	containerCfg *container.Config
-	hostCfg      *container.HostConfig
-	networking   *networktypes.NetworkingConfig
+	name          string
+	image         string
+	endpoint      string
+	labels        map[string]string
+	containerCfg  *container.Config
+	hostCfg       *container.HostConfig
+	networking    *networktypes.NetworkingConfig
+	volumeName    string
+	cacheVolume   string
+	installScript string
 }
 
 func NewDockerRuntime(logger *slog.Logger, opts *DockerRuntimeOptions) (*DockerRuntime, error) {
@@ -88,42 +102,103 @@ type DockerRuntimeOptions struct {
 	NamePrefix   string
 }
 
-func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResult, error) { //nolint:gocritic // Runtime interface fixes signature
+func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResult, error) { //nolint:gocritic,gocyclo // Runtime interface fixes signature; spawn owns cleanup branches
 	spec := d.buildSpec(&req)
+	if spec.volumeName != "" {
+		if _, err := d.client.VolumeCreate(ctx, volumetypes.CreateOptions{
+			Name:   spec.volumeName,
+			Labels: spec.labels,
+		}); err != nil {
+			return nil, fmt.Errorf("create workspace volume: %w", err)
+		}
+	}
+	if spec.cacheVolume != "" {
+		if _, err := d.client.VolumeCreate(ctx, volumetypes.CreateOptions{
+			Name:   spec.cacheVolume,
+			Labels: spec.labels,
+		}); err != nil {
+			_ = d.removeVolume(context.Background(), spec.volumeName)
+			return nil, fmt.Errorf("create package cache volume: %w", err)
+		}
+	}
+	if spec.installScript != "" {
+		if err := d.runInstallStep(ctx, spec); err != nil {
+			_ = d.removeVolume(context.Background(), spec.volumeName)
+			_ = d.removeVolume(context.Background(), spec.cacheVolume)
+			return nil, err
+		}
+	}
+	if spec.volumeName != "" {
+		if err := d.runWorkspaceVolumeInit(ctx, spec); err != nil {
+			_ = d.removeVolume(context.Background(), spec.volumeName)
+			_ = d.removeVolume(context.Background(), spec.cacheVolume)
+			return nil, err
+		}
+	}
 	resp, err := d.client.ContainerCreate(ctx, spec.containerCfg, spec.hostCfg, spec.networking, nil, spec.name)
 	if err != nil {
+		_ = d.removeVolume(context.Background(), spec.volumeName)
+		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, fmt.Errorf("create container: %w", err)
+	}
+
+	if req.WorkspaceSnapshot != nil {
+		if copyErr := d.copyWorkspaceSnapshot(ctx, resp.ID, &req); copyErr != nil {
+			_ = d.stopAndRemove(context.Background(), resp.ID)
+			_ = d.removeVolume(context.Background(), spec.volumeName)
+			_ = d.removeVolume(context.Background(), spec.cacheVolume)
+			return nil, copyErr
+		}
 	}
 
 	if startErr := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); startErr != nil {
 		_ = d.client.ContainerRemove(context.Background(), resp.ID, container.RemoveOptions{Force: true})
+		_ = d.removeVolume(context.Background(), spec.volumeName)
+		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, fmt.Errorf("start container: %w", startErr)
 	}
 
 	endpoint, err := d.resolveEndpoint(ctx, resp.ID, spec.name)
 	if err != nil {
 		_ = d.stopAndRemove(context.Background(), resp.ID)
+		_ = d.removeVolume(context.Background(), spec.volumeName)
+		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, err
 	}
 
 	if waitErr := d.waitForHealthy(ctx, endpoint); waitErr != nil {
+		logs := d.containerLogs(ctx, resp.ID)
 		_ = d.stopAndRemove(context.Background(), resp.ID)
-		return nil, waitErr
+		_ = d.removeVolume(context.Background(), spec.volumeName)
+		_ = d.removeVolume(context.Background(), spec.cacheVolume)
+		return nil, fmt.Errorf("%w: %s", waitErr, logs)
 	}
 
 	tools, err := d.discoverTools(ctx, endpoint)
 	if err != nil {
 		_ = d.stopAndRemove(context.Background(), resp.ID)
+		_ = d.removeVolume(context.Background(), spec.volumeName)
+		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, err
 	}
 
 	handler, err := d.newProxyHandler(endpoint)
 	if err != nil {
 		_ = d.stopAndRemove(context.Background(), resp.ID)
+		_ = d.removeVolume(context.Background(), spec.volumeName)
+		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, err
 	}
 
-	backend := &dockerBackend{containerID: resp.ID, endpoint: endpoint, status: "running"}
+	backend := &dockerBackend{
+		containerID:  resp.ID,
+		endpoint:     endpoint,
+		status:       "running",
+		volumeName:   spec.volumeName,
+		cacheVolume:  spec.cacheVolume,
+		workspace:    config.NormalizeWorkspaceConfig(req.Workspace),
+		baseSnapshot: req.WorkspaceSnapshot,
+	}
 	d.mu.Lock()
 	d.backends[req.ID] = backend
 	d.mu.Unlock()
@@ -146,6 +221,12 @@ func (d *DockerRuntime) Stop(ctx context.Context, id string) error {
 		return fmt.Errorf("backend %q not found", id)
 	}
 	if err := d.stopAndRemove(ctx, backend.containerID); err != nil {
+		return err
+	}
+	if err := d.removeVolume(ctx, backend.volumeName); err != nil {
+		return err
+	}
+	if err := d.removeVolume(ctx, backend.cacheVolume); err != nil {
 		return err
 	}
 	d.mu.Lock()
@@ -197,6 +278,8 @@ func (d *DockerRuntime) Cleanup(ctx context.Context) error {
 func (d *DockerRuntime) buildSpec(req *SpawnRequest) *dockerSpec {
 	name := d.containerName(req.ID)
 	image := d.imageForRequest(req)
+	sandbox := config.NormalizeSandboxConfig(req.Sandbox, config.SandboxProfileCompat)
+	workspaceCfg := config.NormalizeWorkspaceConfig(req.Workspace)
 	labels := map[string]string{
 		d.labelPrefix + ".id":      req.ID,
 		d.labelPrefix + ".managed": "true",
@@ -210,9 +293,41 @@ func (d *DockerRuntime) buildSpec(req *SpawnRequest) *dockerSpec {
 		Env:        env,
 		Labels:     labels,
 	}
+	var volumeName string
+	var cacheVolume string
+	var installScript string
+	if workspaceCfg != nil && req.WorkspaceSnapshot != nil {
+		cfg.WorkingDir = "/workspace"
+		cfg.Env = upsertEnv(cfg.Env, "PWD", "/workspace")
+		volumeName = d.containerName(req.ID) + "-workspace"
+		cacheVolume = d.containerName(req.ID) + "-cache"
+		cfg.Env = upsertEnv(cfg.Env, "NPM_CONFIG_CACHE", "/cache/npm")
+		cfg.Env = upsertEnv(cfg.Env, "NPM_CONFIG_IGNORE_SCRIPTS", "true")
+		cfg.Env = upsertEnv(cfg.Env, "NPM_CONFIG_PREFER_OFFLINE", "true")
+		cfg.Env = upsertEnv(cfg.Env, "UV_CACHE_DIR", "/cache/uv")
+		installScript = installScriptForRequest(req, &sandbox)
+	}
 	hostCfg := &container.HostConfig{
 		CapDrop:     []string{"ALL"},
 		SecurityOpt: []string{"no-new-privileges:true"},
+	}
+	applySandboxToDockerSpec(&sandbox, cfg, hostCfg)
+	if volumeName != "" {
+		hostCfg.Mounts = append(hostCfg.Mounts, mounttypes.Mount{
+			Type:   mounttypes.TypeVolume,
+			Source: volumeName,
+			Target: "/workspace",
+		})
+	}
+	if cacheVolume != "" {
+		hostCfg.Mounts = append(hostCfg.Mounts, mounttypes.Mount{
+			Type:   mounttypes.TypeVolume,
+			Source: cacheVolume,
+			Target: "/cache",
+		})
+	}
+	if volumeName != "" && !sandbox.RunsAsRoot() {
+		wrapWorkspaceEntrypoint(req, &sandbox, cfg, hostCfg)
 	}
 	var networking *networktypes.NetworkingConfig
 	if d.network != "" {
@@ -221,14 +336,380 @@ func (d *DockerRuntime) buildSpec(req *SpawnRequest) *dockerSpec {
 		}}
 	}
 	return &dockerSpec{
-		name:         name,
-		image:        image,
-		endpoint:     endpoint,
-		labels:       labels,
-		containerCfg: cfg,
-		hostCfg:      hostCfg,
-		networking:   networking,
+		name:          name,
+		image:         image,
+		endpoint:      endpoint,
+		labels:        labels,
+		containerCfg:  cfg,
+		hostCfg:       hostCfg,
+		networking:    networking,
+		volumeName:    volumeName,
+		cacheVolume:   cacheVolume,
+		installScript: installScript,
 	}
+}
+
+func wrapWorkspaceEntrypoint(req *SpawnRequest, sandbox *config.SandboxConfig, cfg *container.Config, hostCfg *container.HostConfig) {
+	uid := sandbox.UID
+	gid := sandbox.GID
+	if uid == 0 {
+		uid = config.DefaultSandboxUID
+	}
+	if gid == 0 {
+		gid = config.DefaultSandboxGID
+	}
+	serveArgs := append([]string{"prism-bridge", "serve", "--port", managedBackendPort, "--", req.Command}, req.Args...)
+	script := fmt.Sprintf("chown -R %d:%d /workspace /cache && exec su-exec %d:%d %s", uid, gid, uid, gid, shellJoin(serveArgs))
+	cfg.User = ""
+	cfg.Entrypoint = []string{"sh", "-c"}
+	cfg.Cmd = []string{script}
+	hostCfg.CapAdd = append(hostCfg.CapAdd, "CHOWN", "SETGID", "SETUID")
+}
+
+func (d *DockerRuntime) runInstallStep(ctx context.Context, spec *dockerSpec) error {
+	if spec.installScript == "" {
+		return nil
+	}
+	cfg := &container.Config{
+		Image:      spec.image,
+		Entrypoint: []string{"sh", "-c"},
+		Cmd:        []string{spec.installScript},
+		Env: []string{
+			"NPM_CONFIG_CACHE=/cache/npm",
+			"NPM_CONFIG_IGNORE_SCRIPTS=true",
+			"UV_CACHE_DIR=/cache/uv",
+		},
+		Labels: spec.labels,
+	}
+	hostCfg := &container.HostConfig{
+		SecurityOpt: []string{"no-new-privileges:true"},
+		Mounts: []mounttypes.Mount{{
+			Type:   mounttypes.TypeVolume,
+			Source: spec.cacheVolume,
+			Target: "/cache",
+		}},
+	}
+	resp, err := d.client.ContainerCreate(ctx, cfg, hostCfg, spec.networking, nil, spec.name+"-install")
+	if err != nil {
+		return fmt.Errorf("create install container: %w", err)
+	}
+	defer func() { _ = d.stopAndRemove(context.Background(), resp.ID) }()
+	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("start install container: %w", err)
+	}
+	statusCh, errCh := d.client.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("wait install container: %w", err)
+		}
+	case status := <-statusCh:
+		if status.StatusCode != 0 {
+			logs := d.containerLogs(ctx, resp.ID)
+			return fmt.Errorf("install container exited with status %d: %s", status.StatusCode, logs)
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (d *DockerRuntime) runWorkspaceVolumeInit(ctx context.Context, spec *dockerSpec) error {
+	uid, gid := sandboxUserForSpec(spec.containerCfg.User)
+	script := fmt.Sprintf("mkdir -p /workspace && chown -R %d:%d /workspace", uid, gid)
+	cfg := &container.Config{
+		Image:      spec.image,
+		Entrypoint: []string{"sh", "-c"},
+		Cmd:        []string{script},
+		Labels:     spec.labels,
+	}
+	hostCfg := &container.HostConfig{
+		SecurityOpt: []string{"no-new-privileges:true"},
+		Mounts: []mounttypes.Mount{{
+			Type:   mounttypes.TypeVolume,
+			Source: spec.volumeName,
+			Target: "/workspace",
+		}},
+	}
+	resp, err := d.client.ContainerCreate(ctx, cfg, hostCfg, spec.networking, nil, spec.name+"-workspace-init")
+	if err != nil {
+		return fmt.Errorf("create workspace init container: %w", err)
+	}
+	defer func() { _ = d.stopAndRemove(context.Background(), resp.ID) }()
+	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("start workspace init container: %w", err)
+	}
+	statusCh, errCh := d.client.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("wait workspace init container: %w", err)
+		}
+	case status := <-statusCh:
+		if status.StatusCode != 0 {
+			logs := d.containerLogs(ctx, resp.ID)
+			return fmt.Errorf("workspace init container exited with status %d: %s", status.StatusCode, logs)
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+func sandboxUserForSpec(user string) (uid, gid int) {
+	if _, err := fmt.Sscanf(user, "%d:%d", &uid, &gid); err == nil {
+		return uid, gid
+	}
+	return 0, 0
+}
+
+func (d *DockerRuntime) containerLogs(ctx context.Context, containerID string) string {
+	reader, err := d.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       "80",
+	})
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = reader.Close() }()
+	data, _ := io.ReadAll(io.LimitReader(reader, 64<<10))
+	return strings.TrimSpace(string(data))
+}
+
+func installScriptForRequest(req *SpawnRequest, sandbox *config.SandboxConfig) string {
+	uid := config.DefaultSandboxUID
+	gid := config.DefaultSandboxGID
+	if sandbox != nil {
+		if sandbox.RunsAsRoot() {
+			uid = 0
+			gid = 0
+		} else {
+			if sandbox.UID != 0 {
+				uid = sandbox.UID
+			}
+			if sandbox.GID != 0 {
+				gid = sandbox.GID
+			}
+		}
+	}
+	switch detectRuntimeProfile(req.Command) {
+	case "node":
+		if pkg := npxPackage(req.Command, req.Args); pkg != "" {
+			return fmt.Sprintf("mkdir -p /cache/npm /cache/uv && chown -R %d:%d /cache && npm cache add %s", uid, gid, shellQuote(pkg))
+		}
+	case "python":
+		if pkg := uvxPackage(req.Command, req.Args); pkg != "" {
+			return fmt.Sprintf("mkdir -p /cache/npm /cache/uv && chown -R %d:%d /cache && uvx %s --help >/dev/null", uid, gid, shellQuote(pkg))
+		}
+	}
+	return fmt.Sprintf("mkdir -p /cache/npm /cache/uv && chown -R %d:%d /cache", uid, gid)
+}
+
+func npxPackage(command string, args []string) string {
+	if filepath.Base(strings.TrimSpace(command)) != "npx" {
+		return ""
+	}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		if arg == "--package" || arg == "-p" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return ""
+}
+
+func uvxPackage(command string, args []string) string {
+	if filepath.Base(strings.TrimSpace(command)) != "uvx" {
+		return ""
+	}
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" || strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return ""
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func (d *DockerRuntime) copyWorkspaceSnapshot(ctx context.Context, containerID string, req *SpawnRequest) error {
+	if req.WorkspaceSnapshot == nil {
+		return nil
+	}
+	sandbox := config.NormalizeSandboxConfig(req.Sandbox, config.SandboxProfileCompat)
+	uid := sandbox.UID
+	gid := sandbox.GID
+	if sandbox.RunsAsRoot() {
+		uid = 0
+		gid = 0
+	}
+	if uid == 0 && !sandbox.RunsAsRoot() {
+		uid = config.DefaultSandboxUID
+	}
+	if gid == 0 && !sandbox.RunsAsRoot() {
+		gid = config.DefaultSandboxGID
+	}
+	reader, err := ws.TarForContainer(req.WorkspaceSnapshot.Archive, uid, gid)
+	if err != nil {
+		return fmt.Errorf("prepare workspace snapshot: %w", err)
+	}
+	if err := d.client.CopyToContainer(ctx, containerID, "/workspace", reader, container.CopyToContainerOptions{}); err != nil {
+		return fmt.Errorf("copy workspace snapshot into container: %w", err)
+	}
+	return nil
+}
+
+func (d *DockerRuntime) WorkspaceChanges(ctx context.Context, id string, refresh bool) (*ws.ChangeSet, error) {
+	d.mu.RLock()
+	backend, ok := d.backends[id]
+	d.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("backend %q not found", id)
+	}
+	if backend.baseSnapshot == nil {
+		return &ws.ChangeSet{}, nil
+	}
+	if !refresh && backend.changes != nil {
+		return backend.changes, nil
+	}
+	current, err := d.snapshotContainerWorkspace(ctx, backend.containerID)
+	if err != nil {
+		return nil, err
+	}
+	changes, err := ws.ChangeSetFromArchives(backend.baseSnapshot.BaseID, backend.baseSnapshot.Archive, current)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	if currentBackend := d.backends[id]; currentBackend != nil {
+		currentBackend.changes = changes
+	}
+	d.mu.Unlock()
+	return changes, nil
+}
+
+func (d *DockerRuntime) DiscardWorkspaceChanges(ctx context.Context, id string) error {
+	d.mu.RLock()
+	backend, ok := d.backends[id]
+	d.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("backend %q not found", id)
+	}
+	if backend.baseSnapshot == nil {
+		return nil
+	}
+	current, err := d.snapshotContainerWorkspace(ctx, backend.containerID)
+	if err != nil {
+		return err
+	}
+	next, err := ws.SnapshotFromArchive(current)
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	if currentBackend := d.backends[id]; currentBackend != nil {
+		currentBackend.baseSnapshot = next
+		currentBackend.changes = &ws.ChangeSet{BaseID: next.BaseID}
+	}
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *DockerRuntime) snapshotContainerWorkspace(ctx context.Context, containerID string) ([]byte, error) {
+	reader, _, err := d.client.CopyFromContainer(ctx, containerID, "/workspace/.")
+	if err != nil {
+		return nil, fmt.Errorf("copy workspace from container: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	return ws.ArchiveFromReader(bytes.NewReader(data))
+}
+
+func applySandboxToDockerSpec(sandbox *config.SandboxConfig, cfg *container.Config, hostCfg *container.HostConfig) {
+	if sandbox == nil {
+		return
+	}
+	if !sandbox.RunsAsRoot() {
+		uid := sandbox.UID
+		gid := sandbox.GID
+		if uid == 0 {
+			uid = config.DefaultSandboxUID
+		}
+		if gid == 0 {
+			gid = config.DefaultSandboxGID
+		}
+		cfg.User = fmt.Sprintf("%d:%d", uid, gid)
+		cfg.Env = upsertEnv(cfg.Env, "HOME", "/home/sandbox")
+	}
+	if sandbox.ReadOnlyRoot() {
+		hostCfg.ReadonlyRootfs = true
+		hostCfg.Tmpfs = map[string]string{
+			"/tmp":          "rw,nosuid,nodev,exec,size=256m",
+			"/home/sandbox": "rw,nosuid,nodev,exec,size=256m",
+		}
+		cfg.Env = upsertEnv(cfg.Env, "HOME", "/home/sandbox")
+		cfg.Env = upsertEnv(cfg.Env, "XDG_CACHE_HOME", "/tmp/.cache")
+		cfg.Env = upsertEnv(cfg.Env, "NPM_CONFIG_CACHE", "/tmp/.npm")
+		cfg.Env = upsertEnv(cfg.Env, "UV_CACHE_DIR", "/tmp/uv")
+	}
+	if memory, err := config.ParseMemoryBytes(sandbox.Memory); err == nil && memory > 0 {
+		hostCfg.Memory = memory
+	}
+	if sandbox.CPUs > 0 {
+		hostCfg.NanoCPUs = int64(sandbox.CPUs * 1_000_000_000)
+	}
+	if sandbox.PidsLimit > 0 {
+		limit := sandbox.PidsLimit
+		hostCfg.PidsLimit = &limit
+	}
+	if len(sandbox.Mounts) > 0 {
+		hostCfg.Mounts = make([]mounttypes.Mount, 0, len(sandbox.Mounts))
+		for _, m := range sandbox.Mounts {
+			hostCfg.Mounts = append(hostCfg.Mounts, mounttypes.Mount{
+				Type:     mounttypes.TypeBind,
+				Source:   m.Source,
+				Target:   m.Target,
+				ReadOnly: m.IsReadOnly(),
+			})
+		}
+	}
+}
+
+func upsertEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 func (d *DockerRuntime) imageForRequest(req *SpawnRequest) string {
@@ -423,14 +904,29 @@ func joinURLPath(basePath, reqPath string) string {
 }
 
 func (d *DockerRuntime) stopAndRemove(ctx context.Context, containerID string) error {
-	timeoutSeconds := 10
+	timeoutSeconds := 2
 	stopErr := d.client.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeoutSeconds})
-	removeErr := d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+	removeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	removeErr := d.client.ContainerRemove(removeCtx, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true})
 	if stopErr != nil && !client.IsErrNotFound(stopErr) {
-		return stopErr
+		if removeErr == nil || client.IsErrNotFound(removeErr) {
+			return nil
+		}
+		return fmt.Errorf("stop container: %w; force remove: %w", stopErr, removeErr)
 	}
 	if removeErr != nil && !client.IsErrNotFound(removeErr) {
 		return removeErr
+	}
+	return nil
+}
+
+func (d *DockerRuntime) removeVolume(ctx context.Context, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if err := d.client.VolumeRemove(ctx, name, true); err != nil && !client.IsErrNotFound(err) {
+		return fmt.Errorf("remove workspace volume: %w", err)
 	}
 	return nil
 }

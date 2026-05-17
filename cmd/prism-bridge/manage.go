@@ -14,6 +14,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/1broseidon/prism/internal/config"
+	ws "github.com/1broseidon/prism/internal/workspace"
 )
 
 type ManagedBackend struct {
@@ -37,6 +40,11 @@ type Manager struct {
 	runtime     Runtime
 	maxBackends int
 	logger      *slog.Logger
+}
+
+type WorkspaceRuntime interface {
+	WorkspaceChanges(ctx context.Context, id string, refresh bool) (*ws.ChangeSet, error)
+	DiscardWorkspaceChanges(ctx context.Context, id string) error
 }
 
 func NewManager(runtime Runtime, maxBackends int, logger *slog.Logger) *Manager {
@@ -151,6 +159,9 @@ func runManage(logger *slog.Logger, args []string) error {
 func (m *Manager) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /manage/spawn", m.handleSpawn)
 	mux.HandleFunc("GET /manage", m.handleList)
+	mux.HandleFunc("GET /manage/{id}/changes", m.handleChanges)
+	mux.HandleFunc("POST /manage/{id}/changes/refresh", m.handleRefreshChanges)
+	mux.HandleFunc("POST /manage/{id}/changes/discard", m.handleDiscardChanges)
 	mux.HandleFunc("GET /manage/", m.handleGet)
 	mux.HandleFunc("DELETE /manage/", m.handleDelete)
 	mux.HandleFunc("GET /health", m.handleHealth)
@@ -159,7 +170,7 @@ func (m *Manager) RegisterRoutes(mux *http.ServeMux) {
 
 func (m *Manager) handleSpawn(w http.ResponseWriter, r *http.Request) {
 	var req SpawnRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 96<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 		return
 	}
@@ -169,6 +180,18 @@ func (m *Manager) handleSpawn(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.Command) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
+		return
+	}
+	if err := config.ValidateSandboxConfig(req.Sandbox); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := config.ValidateWorkspaceConfig(req.Workspace); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.Workspace != nil && req.WorkspaceSnapshot == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "workspace_snapshot is required when workspace is set"})
 		return
 	}
 
@@ -236,7 +259,7 @@ func (m *Manager) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("backend %q not found", id)})
 		return
 	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := m.runtime.Stop(stopCtx, id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -278,6 +301,44 @@ func (m *Manager) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (m *Manager) handleChanges(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	m.writeWorkspaceChanges(w, r, id, false)
+}
+
+func (m *Manager) handleRefreshChanges(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	m.writeWorkspaceChanges(w, r, id, true)
+}
+
+func (m *Manager) handleDiscardChanges(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	runtime, ok := m.runtime.(WorkspaceRuntime)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "workspace changes are not supported by this runtime"})
+		return
+	}
+	if err := runtime.DiscardWorkspaceChanges(r.Context(), id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (m *Manager) writeWorkspaceChanges(w http.ResponseWriter, r *http.Request, id string, refresh bool) {
+	runtime, ok := m.runtime.(WorkspaceRuntime)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "workspace changes are not supported by this runtime"})
+		return
+	}
+	changes, err := runtime.WorkspaceChanges(r.Context(), id, refresh)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, changes)
+}
+
 func (m *Manager) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	id := extractBackendID(r.URL.Path)
 	if id == "" {
@@ -293,6 +354,17 @@ func (m *Manager) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.StripPrefix("/mcp/"+id, backend.Handler).ServeHTTP(w, r)
+	if r.Method == http.MethodPost {
+		if runtime, ok := m.runtime.(WorkspaceRuntime); ok {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				if _, err := runtime.WorkspaceChanges(ctx, id, true); err != nil {
+					m.logger.Warn("failed to refresh workspace changes", "id", id, "error", err)
+				}
+			}()
+		}
+	}
 }
 
 func (m *Manager) getBackend(id string) *ManagedBackend {

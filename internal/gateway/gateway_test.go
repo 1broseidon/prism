@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/1broseidon/prism/internal/admin"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -277,5 +278,127 @@ func TestReconnectBackendUsesPersistedConfig(t *testing.T) {
 	}
 	if len(status[0].Tools) != 1 || status[0].Tools[0].Name != "Linear__ping" {
 		t.Fatalf("tools = %+v", status[0].Tools)
+	}
+}
+
+func TestUpdateBackendDisableAndEnablePreservesPersistedConfig(t *testing.T) {
+	backendServer := mcp.NewServer(&mcp.Implementation{Name: "backend", Version: "0.1.0"}, nil)
+	backendServer.AddTool(&mcp.Tool{
+		Name:        "ping",
+		Description: "test tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "pong"}}}, nil
+	})
+	upstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return backendServer },
+		nil,
+	))
+	defer upstream.Close()
+
+	kv := store.NewMemoryStore()
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(kv)
+
+	if err := gw.AddBackend(context.Background(), "Brainfile", admin.BackendConfig{URL: upstream.URL}); err != nil {
+		t.Fatalf("add backend: %v", err)
+	}
+	disabled := false
+	if err := gw.UpdateBackend(context.Background(), "Brainfile", admin.BackendUpdate{Enabled: &disabled}); err != nil {
+		t.Fatalf("disable backend: %v", err)
+	}
+	status := gw.Status()
+	if len(status) != 1 {
+		t.Fatalf("status count after disable = %d", len(status))
+	}
+	if status[0].Enabled || status[0].Disconnected || len(status[0].Tools) != 0 {
+		t.Fatalf("disabled status = %+v", status[0])
+	}
+	if _, err := kv.Get(backendKVPrefix + "Brainfile"); err != nil {
+		t.Fatalf("persisted backend was deleted: %v", err)
+	}
+
+	enabled := true
+	if err := gw.UpdateBackend(context.Background(), "Brainfile", admin.BackendUpdate{Enabled: &enabled}); err != nil {
+		t.Fatalf("enable backend: %v", err)
+	}
+	status = gw.Status()
+	if len(status) != 1 || !status[0].Enabled || status[0].Disconnected {
+		t.Fatalf("enabled status = %+v", status)
+	}
+	if len(status[0].Tools) != 1 || status[0].Tools[0].Name != "Brainfile__ping" {
+		t.Fatalf("tools after enable = %+v", status[0].Tools)
+	}
+}
+
+func TestUpdateBackendDoesNotPersistFailedReconnectSettings(t *testing.T) {
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/manage/spawn" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "spawn failed"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer bridge.Close()
+
+	kv := store.NewMemoryStore()
+	root := true
+	readonly := false
+	previous := &persistedBackend{
+		Command: "npx",
+		Args:    []string{"@brainfile/cli", "mcp"},
+		Enabled: boolPtr(true),
+		Sandbox: &config.SandboxConfig{
+			Profile:        config.SandboxProfileCompat,
+			NetworkProfile: config.SandboxNetworkStandard,
+			RunAsRoot:      &root,
+			ReadOnlyRootFS: &readonly,
+		},
+	}
+	data, err := json.Marshal(previous)
+	if err != nil {
+		t.Fatalf("marshal previous backend: %v", err)
+	}
+	if setErr := kv.Set(backendKVPrefix+"Brainfile", data); setErr != nil {
+		t.Fatalf("persist previous backend: %v", setErr)
+	}
+
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(kv)
+	gw.SetBridgeURL(bridge.URL)
+
+	nonRoot := false
+	readonlyRoot := true
+	err = gw.UpdateBackend(context.Background(), "Brainfile", admin.BackendUpdate{
+		Sandbox: &config.SandboxConfig{
+			Profile:        config.SandboxProfileDefault,
+			NetworkProfile: config.SandboxNetworkStandard,
+			RunAsRoot:      &nonRoot,
+			UID:            config.DefaultSandboxUID,
+			GID:            config.DefaultSandboxGID,
+			ReadOnlyRootFS: &readonlyRoot,
+			Memory:         config.DefaultSandboxMemory,
+			CPUs:           config.DefaultSandboxCPUs,
+			PidsLimit:      config.DefaultSandboxPidsLimit,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "spawn failed") {
+		t.Fatalf("UpdateBackend error = %v", err)
+	}
+
+	gotData, err := kv.Get(backendKVPrefix + "Brainfile")
+	if err != nil {
+		t.Fatalf("read persisted backend: %v", err)
+	}
+	var got persistedBackend
+	if err := json.Unmarshal(gotData, &got); err != nil {
+		t.Fatalf("decode persisted backend: %v", err)
+	}
+	if got.Sandbox == nil || got.Sandbox.Profile != config.SandboxProfileCompat || !got.Sandbox.RunsAsRoot() || got.Sandbox.ReadOnlyRoot() {
+		t.Fatalf("persisted backend was overwritten: %+v", got.Sandbox)
 	}
 }

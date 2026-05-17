@@ -9,10 +9,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/1broseidon/prism/internal/config"
 )
 
 type reconnectTestBackendManager struct {
 	reconnectedID string
+	updatedID     string
+	update        BackendUpdate
 	err           error
 }
 
@@ -26,6 +30,12 @@ func (m *reconnectTestBackendManager) NotifyToolsChanged() {}
 
 func (m *reconnectTestBackendManager) ReconnectBackend(_ context.Context, id string) error {
 	m.reconnectedID = id
+	return m.err
+}
+
+func (m *reconnectTestBackendManager) UpdateBackend(_ context.Context, id string, update BackendUpdate) error {
+	m.updatedID = id
+	m.update = update
 	return m.err
 }
 
@@ -111,6 +121,52 @@ func TestHandleReconnectBackendSurfacesErrors(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandlePatchBackendUpdatesSettings(t *testing.T) {
+	mgr := &reconnectTestBackendManager{}
+	api := &API{backendMgr: mgr}
+	body := strings.NewReader(`{"enabled":false,"sandbox":{"profile":"default","memory":"256m"}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/backends/Brainfile", body)
+	rec := httptest.NewRecorder()
+
+	api.handlePatchBackend(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if mgr.updatedID != "Brainfile" {
+		t.Fatalf("updated id = %q", mgr.updatedID)
+	}
+	if mgr.update.Enabled == nil || *mgr.update.Enabled {
+		t.Fatalf("enabled update = %#v", mgr.update.Enabled)
+	}
+	if mgr.update.Sandbox == nil || mgr.update.Sandbox.Memory != "256m" {
+		t.Fatalf("sandbox update = %+v", mgr.update.Sandbox)
+	}
+}
+
+func TestHandlePatchBackendRejectsDangerousSandbox(t *testing.T) {
+	mgr := &reconnectTestBackendManager{}
+	api := &API{backendMgr: mgr}
+	sandbox := config.SandboxConfig{
+		Mounts: []config.SandboxMount{{Source: "/var/run/docker.sock", Target: "/workspace/docker.sock"}},
+	}
+	payload, err := json.Marshal(BackendUpdate{Sandbox: &sandbox})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPatch, "/backends/Brainfile", strings.NewReader(string(payload)))
+	rec := httptest.NewRecorder()
+
+	api.handlePatchBackend(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if mgr.updatedID != "" {
+		t.Fatalf("unexpected update id = %q", mgr.updatedID)
 	}
 }
 

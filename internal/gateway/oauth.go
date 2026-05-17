@@ -392,7 +392,9 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 	sc := &config.ServerConfig{
 		ID:        flow.BackendID,
 		Namespace: flow.BackendID,
+		Enabled:   true,
 		URL:       flow.BackendURL,
+		Sandbox:   config.CompatSandboxConfig(),
 		Timeout:   config.Duration(30 * time.Second),
 	}
 	if err := g.ConnectBackend(ctx, sc); err != nil {
@@ -402,7 +404,9 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 
 	// Persist backend config.
 	g.persistBackend(flow.BackendID, &persistedBackend{
-		URL: flow.BackendURL,
+		URL:     flow.BackendURL,
+		Enabled: boolPtr(true),
+		Sandbox: &sc.Sandbox,
 	})
 
 	g.setAuthStatus(flow.BackendID, "connected")

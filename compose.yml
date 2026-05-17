@@ -35,6 +35,7 @@ services:
     environment:
       PRISM_KV_KEY_FILE: /data/.prism/kv-encryption.key
       PRISM_SIGNING_KEY_FILE: /data/.prism/signing-key.pem
+      PRISM_WORKSPACE_TOKEN: ${PRISM_WORKSPACE_TOKEN:-}
     expose:
       - "8080"   # MCP gateway (Caddy path-routes /mcp, /token, /authorize, /register, /.well-known/*)
       - "9086"   # admin console (Caddy catch-all)
@@ -53,13 +54,17 @@ services:
   # in the admin Settings page so OAuth callbacks use the public hostname
   # instead of the in-container Host.
   caddy:
-    image: caddy:2-alpine
+    build:
+      context: .
+      dockerfile: deploy/Caddy.Dockerfile
+    image: prism-caddy:cloudflare
     container_name: prism-caddy
     restart: unless-stopped
+    env_file:
+      - .env
     ports:
       - "443:443"     # single HTTPS vhost — gateway + admin both live here
-      # Add "- 80:80" if you switch the Caddyfile to a public domain for
-      # Let's Encrypt — the HTTP-01 challenge needs it.
+      # DNS-01 via Cloudflare does not require port 80.
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

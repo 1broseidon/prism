@@ -10,6 +10,8 @@ import type {
   AuthStatus,
   Backend,
   CredentialInput,
+  Workspace,
+  WorkspaceConfig,
 } from "../api/types";
 import { fmtAge } from "../util/time";
 
@@ -262,6 +264,7 @@ function ServerRow({
   const toolCount = backend.tools?.length ?? 0;
   const statusKind: "ok" | "warn" | "error" | "neutral" = (() => {
     const cb = backend.circuit_breaker;
+    if (backend.enabled === false) return "neutral";
     if (backend.disconnected) return "error";
     if (cb === "open") return "error";
     if (cb === "half_open" || cb === "half-open") return "warn";
@@ -282,7 +285,11 @@ function ServerRow({
         </div>
         <div class="server-row-meta">
           <span class="server-row-url">
-            {backend.disconnected ? "disconnected · " : ""}
+            {backend.enabled === false
+              ? "disabled · "
+              : backend.disconnected
+                ? "disconnected · "
+                : ""}
             {backend.url || "stdio process"}
           </span>
         </div>
@@ -316,6 +323,8 @@ function AddBackend({
   const [name, setName] = useState("");
   const [cmd, setCmd] = useState("");
   const [cred, setCred] = useState<CredFormState>(emptyCred());
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspace, setWorkspace] = useState<WorkspaceConfig>({ write_mode: "stage" });
   const [error, setError] = useState<string | null>(null);
   const [oauth, setOauth] = useState<{
     backendId: string;
@@ -332,6 +341,12 @@ function AddBackend({
       window.setTimeout(() => backends.refresh(), delay);
     });
   };
+
+  useEffect(() => {
+    getJSON<Workspace[]>("/workspaces")
+      .then(setWorkspaces)
+      .catch(() => setWorkspaces([]));
+  }, []);
 
   const waitForBackend = async (id: string): Promise<boolean> => {
     for (const delay of [800, 1600, 3000, 5000, 8000]) {
@@ -360,6 +375,13 @@ function AddBackend({
     const body: AddBackendBody = target.startsWith("http")
       ? { url: target }
       : { command: target };
+    if (!target.startsWith("http") && workspace.id) {
+      body.workspace = {
+        ...workspace,
+        mode: "snapshot",
+        max_bytes: workspace.max_bytes || 33554432,
+      };
+    }
     const credInput = buildCredInput(cred);
     if (credInput) body.credential = credInput;
     Object.assign(body, extra || {});
@@ -475,6 +497,44 @@ function AddBackend({
         </select>
         <CredFields state={cred} onChange={setCred} />
       </div>
+      {!cmd.trim().startsWith("http") && workspaces.length > 0 && (
+        <div class="inline-form server-workspace-form">
+          <select
+            value={workspace.id || ""}
+            onChange={(e) =>
+              setWorkspace({
+                ...workspace,
+                id: (e.target as HTMLSelectElement).value || undefined,
+              })
+            }
+          >
+            <option value="">no workspace snapshot</option>
+            {workspaces.map((ws) => (
+              <option value={ws.id} key={ws.id}>
+                workspace: {ws.id}
+              </option>
+            ))}
+          </select>
+          <select
+            value={workspace.write_mode || "stage"}
+            disabled={!workspace.id}
+            onChange={(e) =>
+              setWorkspace({
+                ...workspace,
+                write_mode: (e.target as HTMLSelectElement)
+                  .value as WorkspaceConfig["write_mode"],
+              })
+            }
+          >
+            <option value="sandbox_only">sandbox only</option>
+            <option value="stage">stage changes</option>
+            <option value="auto_apply">auto-apply allowed paths</option>
+          </select>
+          <span class="hint-text">
+            sandbox gets a copy at /workspace; local writes go through policy
+          </span>
+        </div>
+      )}
       <div class="form-actions">
         <button class="save-btn" onClick={submit}>
           connect

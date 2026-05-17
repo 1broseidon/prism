@@ -46,6 +46,11 @@ func main() {
 			logger.Error("manage failed", "error", err)
 			os.Exit(1)
 		}
+	case "workspace":
+		if err := runWorkspace(logger, args); err != nil {
+			logger.Error("workspace failed", "error", err)
+			os.Exit(1)
+		}
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -62,11 +67,13 @@ Usage:
   prism-bridge serve  [flags] -- <command> [args...]
   prism-bridge tool   [flags] -- <command> [args...]
   prism-bridge manage [flags]
+  prism-bridge workspace [run|install|uninstall] [flags] -- <command> [args...]
 
 Subcommands:
   serve    Wrap a stdio MCP server as a Streamable HTTP endpoint.
   tool     Wrap a single function (any script/binary) as an MCP tool.
   manage   Start an empty bridge and spawn/remove MCP backends dynamically.
+  workspace Expose a local stdio MCP server to a remote Prism over outbound HTTP.
 
 Serve flags:
   --port <port>       Port to listen on (default: 3001)
@@ -92,6 +99,15 @@ Manage flags:
   --image-python <img>  Docker image for python-based backends
   --image-full <image>  Docker image fallback for managed backends
 
+Workspace flags:
+  --gateway <url>      Prism gateway base URL, e.g. https://mcp.example.com
+  --token <token>      Workspace bridge token configured in Prism
+  --id <id>            Stable workspace id (default: hostname)
+  --backend <id>       Local backend id (default: Brainfile)
+  --namespace <name>   Tool namespace in Prism (default: <backend>-<id>)
+  --root <path>        Working directory for the stdio server (default: cwd)
+  --files-only         Expose snapshot/apply operations without local MCP tools
+
 The command after -- is the stdio MCP server (serve mode) or the function
 to execute per tool call (tool mode).
 
@@ -111,6 +127,10 @@ Examples:
 
   # Wrap with a full manifest
   prism-bridge tool --manifest tools/dns.json --port 3002 -- python3 check_dns.py
+
+  # Expose repo-local Brainfile tools to a remote Prism
+  prism-bridge workspace install --gateway https://mcp.example.com \
+    --token "$PRISM_WORKSPACE_TOKEN" --root "$PWD" -- npx @brainfile/cli mcp
 `)
 }
 

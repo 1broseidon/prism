@@ -8,12 +8,15 @@ import {
 import { showError, withToast } from "../state/toasts";
 import { canMutate, refreshMe } from "../state/me";
 import { mcpURLFromBase } from "../util/mcp";
+import { fmtAge } from "../util/time";
 import type {
   AdminAuthPutPayload,
   AdminAuthRule,
   AdminAuthTestResponse,
   AdminAuthView,
   NetworkSettings,
+  Workspace,
+  WorkspaceBridgeConfig,
 } from "../api/types";
 
 const SECRET_PLACEHOLDER = "•••••••• (kept)";
@@ -195,6 +198,7 @@ export function Config() {
       </div>
 
       <NetworkSection mutate={mutate} onSaved={load} />
+      <WorkspaceBridgeSection mutate={mutate} />
 
       <div class="section">
         <div class="section-header">
@@ -565,6 +569,185 @@ function RuleMatchers({
         value={rule.groups}
         onUpdate={(groups) => onChange({ groups })}
       />
+    </div>
+  );
+}
+
+function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
+  const [config, setConfig] = useState<WorkspaceBridgeConfig | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [enabled, setEnabled] = useState(false);
+  const [token, setToken] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  const load = async () => {
+    try {
+      const [cfg, ws] = await Promise.all([
+        getJSON<WorkspaceBridgeConfig>("/config/workspace-bridge"),
+        getJSON<Workspace[]>("/workspaces"),
+      ]);
+      setConfig(cfg);
+      setEnabled(cfg.enabled);
+      setWorkspaces(ws);
+      setDirty(false);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const timer = window.setInterval(load, 10000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    await withToast(async () => {
+      const next = await putJSON<WorkspaceBridgeConfig>(
+        "/config/workspace-bridge",
+        { enabled, token: token.trim() || undefined },
+      );
+      setConfig(next);
+      setToken("");
+      setDirty(false);
+      await load();
+    });
+    setSaving(false);
+  };
+
+  const disconnect = async (id: string) => {
+    await withToast(async () => {
+      await deleteJSON(`/workspaces/${encodeURIComponent(id)}`);
+      await load();
+    });
+  };
+
+  if (config === null) return null;
+
+  const gatewayURL = window.location.origin;
+  const installCommand =
+    `prism-bridge workspace install --gateway ${gatewayURL} ` +
+    `--token <workspace-token> --root "$PWD" --files-only`;
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">workspace bridge</span>
+        <span class="section-sub">
+          outbound local stdio tools for repo-bound servers
+        </span>
+      </div>
+      <div class="card workspace-bridge-card">
+        <div class="config-status-row">
+          <span class={enabled ? "pill pill-ok" : "pill pill-neutral"}>
+            {enabled ? "enabled" : "disabled"}
+          </span>
+          <div class="config-status-text">
+            <span>
+              {config.token_set
+                ? "token configured. rotate it below when needed."
+                : "set a token before enabling workspace bridges."}
+            </span>
+          </div>
+        </div>
+
+        <label class="config-toggle workspace-toggle">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={!mutate}
+            onChange={(e) => {
+              setEnabled((e.target as HTMLInputElement).checked);
+              setDirty(true);
+            }}
+          />
+          <span class="config-toggle-label">allow workspace bridge connections</span>
+        </label>
+
+        <Field label="workspace token">
+          <input
+            type="password"
+            class="config-input"
+            value={token}
+            placeholder={config.token_set ? SECRET_PLACEHOLDER : "minimum 24 characters"}
+            disabled={!mutate}
+            autoComplete="new-password"
+            onInput={(e) => {
+              setToken((e.target as HTMLInputElement).value);
+              setDirty(true);
+            }}
+          />
+          <div class="hint-text" style="margin-top:4px">
+            write-only shared secret used by local prism-bridge services.
+          </div>
+        </Field>
+
+        <div class="workspace-install">
+          <div class="workspace-install-label">install command</div>
+          <code>{installCommand}</code>
+        </div>
+
+        {mutate && (
+          <div class="config-actions">
+            <button
+              class="save-btn"
+              onClick={save}
+              disabled={saving || !dirty || (enabled && !config.token_set && !token.trim())}
+            >
+              {saving ? "saving…" : "save"}
+            </button>
+            {saving && (
+              <span class="runtime-progress">
+                <span class="inline-spinner" />
+                applying
+              </span>
+            )}
+            {dirty && !saving && (
+              <span class="config-dirty-marker">unsaved changes</span>
+            )}
+          </div>
+        )}
+
+        <div class="workspace-list">
+          {workspaces.length === 0 ? (
+            <div class="empty-state">no workspace bridges connected.</div>
+          ) : (
+            workspaces.map((ws) => (
+              <div class="workspace-row" key={ws.id}>
+                <div class="workspace-row-main">
+                  <div class="workspace-title">
+                    <span>{ws.id}</span>
+                    <span class={ws.connected ? "pill pill-ok" : "pill pill-warn"}>
+                      {ws.connected ? "connected" : "stale"}
+                    </span>
+                  </div>
+                  <div class="workspace-meta">
+                    {[ws.hostname, ws.root, fmtAge(ws.last_seen)]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </div>
+                  {(ws.backends || []).map((backend) => (
+                    <div class="workspace-backend" key={backend.id}>
+                      <span>{backend.namespace}</span>
+                      <span>{backend.tools?.length || 0} tools</span>
+                    </div>
+                  ))}
+                </div>
+                {mutate && (
+                  <button
+                    class="danger-btn"
+                    onClick={() => disconnect(ws.id)}
+                  >
+                    disconnect
+                  </button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { ScopeEditor } from "../components/ScopeEditor";
 import { StatusCell } from "../components/StatusCell";
 import { CopyId } from "../components/CopyId";
 import { splitLabel } from "../util/time";
+import { agentDetailHref } from "../util/agentRoute";
 import type { Agent, Group } from "../api/types";
 
 const SYSTEM_SCOPE = "mcp:connect";
@@ -24,6 +25,7 @@ function visibleScopes(scopes: string[] | undefined): string[] {
 }
 
 function policyLabel(a: Agent): string {
+  if (a.dynamic && !a.prism_id) return "pending consent";
   if (!a.policy) return "defaults";
   const parts: string[] = [];
   const g = a.policy.groups || [];
@@ -358,13 +360,14 @@ function AgentRow({ agent: a }: { agent: Agent }) {
   const loc = useLocation();
   const display = a.label || a.description || a.client_id;
   const [name, ctx] = splitLabel(display);
-  const canOpen = a.dynamic && !!a.prism_id;
+  const detailHref = agentDetailHref(a);
+  const canOpen = !!detailHref;
   const copyVal = a.prism_id || a.client_id;
   const copyLabel = a.prism_id ? "id" : "cid";
 
   const onClick = () => {
-    if (canOpen) {
-      loc.route(`/identity/agents/${encodeURIComponent(a.prism_id!)}`);
+    if (detailHref) {
+      loc.route(detailHref);
     }
   };
 

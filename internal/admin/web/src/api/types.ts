@@ -46,15 +46,46 @@ export interface BackendTool {
   description?: string;
 }
 
+export interface SandboxMount {
+  source: string;
+  target: string;
+  readonly?: boolean;
+}
+
+export interface SandboxConfig {
+  profile?: "default" | "compat";
+  network_profile?: "standard";
+  run_as_root?: boolean;
+  uid?: number;
+  gid?: number;
+  readonly_rootfs?: boolean;
+  memory?: string;
+  cpus?: number;
+  pids_limit?: number;
+  mounts?: SandboxMount[];
+}
+
+export interface WorkspaceConfig {
+  id?: string;
+  mode?: "snapshot";
+  write_mode?: "sandbox_only" | "stage" | "auto_apply";
+  include?: string[];
+  exclude?: string[];
+  max_bytes?: number;
+}
+
 export interface Backend {
   id: string;
   namespace?: string;
   url?: string;
+  enabled: boolean;
   credential?: BackendCredentialInfo;
   tools?: BackendTool[];
   circuit_breaker?: string;
   bridge_managed?: boolean;
   runtime?: string;
+  sandbox?: SandboxConfig;
+  workspace?: WorkspaceConfig;
   disconnected?: boolean;
 }
 
@@ -90,11 +121,40 @@ export interface AddBackendBody {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  enabled?: boolean;
+  sandbox?: SandboxConfig;
+  workspace?: WorkspaceConfig;
   credential?: CredentialInput | null;
   // Optional manual OAuth client credentials. Skips DCR when supplied —
   // required for providers without DCR (GitHub, most IdPs).
   oauth_client_id?: string;
   oauth_client_secret?: string;
+}
+
+export interface BackendUpdateBody {
+  enabled?: boolean;
+  sandbox?: SandboxConfig;
+  workspace?: WorkspaceConfig;
+}
+
+export interface WorkspaceChange {
+  path: string;
+  type: "add" | "modify" | "delete";
+  old_sha256?: string;
+  new_sha256?: string;
+  binary?: boolean;
+  preview?: string;
+}
+
+export interface WorkspaceChangeSet {
+  base_id?: string;
+  generated_at?: string;
+  files?: WorkspaceChange[];
+}
+
+export interface WorkspaceApplyResult {
+  applied: number;
+  conflicts?: string[];
 }
 
 export type AddBackendResponse =
@@ -160,4 +220,35 @@ export interface NetworkSettings {
   public_url?: string;
   admin_public_url?: string;
   trust_proxy_headers?: boolean;
+}
+
+export interface WorkspaceBridgeConfig {
+  enabled: boolean;
+  token_set: boolean;
+}
+
+export interface WorkspaceBridgeUpdate {
+  enabled: boolean;
+  token?: string;
+}
+
+export interface WorkspaceTool {
+  name: string;
+  description?: string;
+}
+
+export interface WorkspaceBackend {
+  id: string;
+  namespace: string;
+  tools?: WorkspaceTool[];
+}
+
+export interface Workspace {
+  id: string;
+  hostname?: string;
+  root?: string;
+  version?: string;
+  last_seen?: string;
+  connected: boolean;
+  backends?: WorkspaceBackend[];
 }

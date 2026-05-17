@@ -78,6 +78,7 @@ type Gateway struct {
 	bridgeURLs     []string
 	stdioDisabled  string
 	network        *networkRuntime
+	workspace      *workspaceBridgeManager
 }
 
 // New creates a new Gateway.
@@ -92,6 +93,7 @@ func New(logger *slog.Logger) *Gateway {
 		credStore: credentials.NewStore(),
 		network:   newNetworkRuntime(nil),
 	}
+	g.workspace = newWorkspaceBridgeManager(g)
 
 	g.server = mcp.NewServer(
 		&mcp.Implementation{
@@ -248,12 +250,35 @@ const backendKVPrefix = "backend/config/"
 
 // persistedBackend is the JSON representation of a runtime-added backend stored in KV.
 type persistedBackend struct {
-	Command       string            `json:"command,omitempty"`
-	Args          []string          `json:"args,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	URL           string            `json:"url,omitempty"`
-	BridgeManaged bool              `json:"bridge_managed,omitempty"`
-	Runtime       string            `json:"runtime,omitempty"`
+	Command       string                  `json:"command,omitempty"`
+	Args          []string                `json:"args,omitempty"`
+	Env           map[string]string       `json:"env,omitempty"`
+	URL           string                  `json:"url,omitempty"`
+	BridgeManaged bool                    `json:"bridge_managed,omitempty"`
+	Runtime       string                  `json:"runtime,omitempty"`
+	Enabled       *bool                   `json:"enabled,omitempty"`
+	Sandbox       *config.SandboxConfig   `json:"sandbox,omitempty"`
+	Workspace     *config.WorkspaceConfig `json:"workspace,omitempty"`
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func (pb *persistedBackend) isEnabled() bool {
+	return pb == nil || pb.Enabled == nil || *pb.Enabled
+}
+
+func (pb *persistedBackend) sandboxConfig() config.SandboxConfig {
+	if pb == nil {
+		return config.CompatSandboxConfig()
+	}
+	return config.NormalizeSandboxConfig(pb.Sandbox, config.SandboxProfileCompat)
+}
+
+func (pb *persistedBackend) workspaceConfig() *config.WorkspaceConfig {
+	if pb == nil {
+		return nil
+	}
+	return config.NormalizeWorkspaceConfig(pb.Workspace)
 }
 
 // persistBackend saves a backend config to KV for restart persistence.
@@ -383,6 +408,10 @@ func (g *Gateway) LoadPersistedBackends(ctx context.Context) {
 			g.logger.Warn("failed to unmarshal persisted backend", "key", key, "error", err)
 			continue
 		}
+		if !pb.isEnabled() {
+			g.logger.Info("skipping disabled persisted backend", "id", backendID)
+			continue
+		}
 
 		if err := g.connectPersistedBackend(ctx, backendID, &pb); err != nil {
 			g.logger.Warn("failed to reconnect persisted backend", "id", backendID, "error", err)
@@ -417,6 +446,9 @@ func (g *Gateway) ReconnectBackend(ctx context.Context, backendID string) error 
 	if err := json.Unmarshal(data, &pb); err != nil {
 		return fmt.Errorf("decode persisted backend %q: %w", backendID, err)
 	}
+	if !pb.isEnabled() {
+		return fmt.Errorf("backend %q is disabled", backendID)
+	}
 	return g.connectPersistedBackend(ctx, backendID, &pb)
 }
 
@@ -428,25 +460,38 @@ func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string,
 		Env:           pb.Env,
 		BridgeManaged: pb.BridgeManaged,
 		BridgeRuntime: pb.Runtime,
+		Enabled:       pb.isEnabled(),
+		Sandbox:       pb.sandboxConfig(),
+		Workspace:     pb.workspaceConfig(),
 		Timeout:       config.Duration(30 * time.Second),
 	}
 	if pb.Command != "" {
 		sc.OriginalCommand = append([]string{pb.Command}, pb.Args...)
 		if g.bridgeURL != "" {
-			spawned, err := g.spawnBridgeBackend(ctx, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime)
+			spawned, err := g.spawnBridgeBackend(ctx, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime, &sc.Sandbox, sc.Workspace)
 			if err != nil {
 				return fmt.Errorf("delegate persisted backend to bridge: %w", err)
 			}
 			sc.URL = spawned.Endpoint
 			sc.BridgeManaged = true
-			return g.connectBackendWithBridgeRetry(ctx, sc, &spawned, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime)
+			pb.URL = sc.URL
+			pb.BridgeManaged = true
+			if err := g.connectBackendWithBridgeRetry(ctx, sc, &spawned, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime, &sc.Sandbox, sc.Workspace); err != nil {
+				return err
+			}
+			g.persistBackend(backendID, pb)
+			return nil
 		}
 		if err := g.stdioUnavailableError(); err != nil {
 			return err
 		}
 		sc.Command = append([]string{pb.Command}, pb.Args...)
 	}
-	return g.ConnectBackend(ctx, sc)
+	if err := g.ConnectBackend(ctx, sc); err != nil {
+		return err
+	}
+	g.persistBackend(backendID, pb)
+	return nil
 }
 
 // HasPersistedBackends returns true if the KV store has any persisted backend configs.
@@ -461,14 +506,41 @@ func (g *Gateway) HasPersistedBackends() bool {
 	return len(keys) > 0
 }
 
+// ApplyPersistedBackendSettings overlays runtime settings that are safe to
+// carry for config-defined backends, such as enabled and sandbox controls.
+func (g *Gateway) ApplyPersistedBackendSettings(sc *config.ServerConfig) {
+	if g.kvStore == nil || sc == nil {
+		return
+	}
+	data, err := g.kvStore.Get(backendKVPrefix + sc.ID)
+	if err != nil {
+		return
+	}
+	var pb persistedBackend
+	if json.Unmarshal(data, &pb) != nil {
+		return
+	}
+	sc.Enabled = pb.isEnabled()
+	if pb.Sandbox != nil {
+		sc.Sandbox = pb.sandboxConfig()
+	}
+	if pb.Workspace != nil {
+		sc.Workspace = pb.workspaceConfig()
+	}
+}
+
 // SeedBackends persists config-defined backends to KV (one-time seed on first boot).
 // Does NOT connect them -- LoadPersistedBackends handles that.
 func (g *Gateway) SeedBackends(_ context.Context, servers []config.ServerConfig) {
 	for i := range servers {
 		s := &servers[i]
 		pb := &persistedBackend{
-			URL: s.URL,
+			URL:     s.URL,
+			Enabled: boolPtr(s.Enabled),
 		}
+		sandbox := s.Sandbox
+		pb.Sandbox = &sandbox
+		pb.Workspace = config.NormalizeWorkspaceConfig(s.Workspace)
 		if s.IsStdio() {
 			pb.Command = s.Command[0]
 			if len(s.Command) > 1 {
@@ -828,11 +900,17 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}
 	}
 
+	g.syncWorkspaceAfterToolCall(ctx, backendID, b.Config)
+
 	return result, nil
 }
 
 // DisconnectBackend closes the connection to a backend and removes its tools.
 func (g *Gateway) DisconnectBackend(id string) error {
+	return g.disconnectBackend(id, false)
+}
+
+func (g *Gateway) disconnectBackend(id string, preserveState bool) error {
 	g.mu.Lock()
 	b, ok := g.backends[id]
 	if ok {
@@ -847,11 +925,13 @@ func (g *Gateway) DisconnectBackend(id string) error {
 	// Remove tools registered under this backend's namespace
 	g.removeBackendTools(b)
 
-	// Remove credential registration and persisted configs
-	g.credStore.Unregister(id)
-	g.deletePersistedCredential(id)
-	g.deletePersistedBackend(id)
-	g.cleanupOAuthForBackend(id)
+	if !preserveState {
+		// Remove credential registration and persisted configs
+		g.credStore.Unregister(id)
+		g.deletePersistedCredential(id)
+		g.deletePersistedBackend(id)
+		g.cleanupOAuthForBackend(id)
+	}
 
 	// Drain in-flight tool calls before closing the session so the SDK
 	// doesn't get use-after-close. Since we already removed from the map
@@ -914,14 +994,17 @@ type BackendCredentialInfo struct {
 
 // BackendStatus returns connection info for a backend.
 type BackendStatus struct {
-	ID             string                 `json:"id"`
-	Namespace      string                 `json:"namespace"`
-	URL            string                 `json:"url"`
-	CircuitBreaker string                 `json:"circuit_breaker,omitempty"`
-	Credential     *BackendCredentialInfo `json:"credential,omitempty"`
-	Tools          []BackendToolInfo      `json:"tools,omitempty"`
-	BridgeManaged  bool                   `json:"bridge_managed,omitempty"`
-	Runtime        string                 `json:"runtime,omitempty"`
+	ID             string                  `json:"id"`
+	Namespace      string                  `json:"namespace"`
+	URL            string                  `json:"url"`
+	Enabled        bool                    `json:"enabled"`
+	CircuitBreaker string                  `json:"circuit_breaker,omitempty"`
+	Credential     *BackendCredentialInfo  `json:"credential,omitempty"`
+	Tools          []BackendToolInfo       `json:"tools,omitempty"`
+	BridgeManaged  bool                    `json:"bridge_managed,omitempty"`
+	Runtime        string                  `json:"runtime,omitempty"`
+	Sandbox        config.SandboxConfig    `json:"sandbox,omitempty"`
+	Workspace      *config.WorkspaceConfig `json:"workspace,omitempty"`
 	// Disconnected is true for backends that exist in KV but failed to
 	// reconnect on the current run. Lets the UI flag them as broken/
 	// deletable without confusing them with healthy backends.
@@ -966,9 +1049,12 @@ func (g *Gateway) Status() []BackendStatus {
 			ID:            b.Config.ID,
 			Namespace:     b.Config.Namespace,
 			URL:           b.Config.URL,
+			Enabled:       true,
 			Tools:         b.Tools,
 			BridgeManaged: b.Config.BridgeManaged,
 			Runtime:       b.Config.BridgeRuntime,
+			Sandbox:       config.NormalizeSandboxConfig(&b.Config.Sandbox, config.SandboxProfileDefault),
+			Workspace:     config.NormalizeWorkspaceConfig(b.Config.Workspace),
 		}
 		if b.CB != nil {
 			s.CircuitBreaker = b.CB.State().String()
@@ -988,18 +1074,24 @@ func (g *Gateway) Status() []BackendStatus {
 					continue
 				}
 				orphan := BackendStatus{
-					ID:             id,
-					Namespace:      id,
-					Disconnected:   true,
-					CircuitBreaker: "open",
+					ID:        id,
+					Namespace: id,
+					Enabled:   true,
 				}
 				if data, getErr := g.kvStore.Get(key); getErr == nil {
 					var pb persistedBackend
 					if json.Unmarshal(data, &pb) == nil {
 						orphan.URL = pb.URL
+						orphan.Enabled = pb.isEnabled()
 						orphan.BridgeManaged = pb.BridgeManaged
 						orphan.Runtime = pb.Runtime
+						orphan.Sandbox = pb.sandboxConfig()
+						orphan.Workspace = pb.workspaceConfig()
 					}
+				}
+				if orphan.Enabled {
+					orphan.Disconnected = true
+					orphan.CircuitBreaker = "open"
 				}
 				orphan.Credential = g.CredentialInfo(id)
 				statuses = append(statuses, orphan)

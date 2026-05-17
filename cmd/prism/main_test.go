@@ -37,6 +37,7 @@ func TestBuildMuxProtectedResourceMetadataIncludesMCPResource(t *testing.T) {
 		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		"https://mcp.dfam.one/mcp",
+		nil,
 	)
 
 	rec := httptest.NewRecorder()

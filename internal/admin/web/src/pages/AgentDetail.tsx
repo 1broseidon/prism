@@ -8,6 +8,7 @@ import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
 import { ScopeList } from "../components/ScopeList";
 import { StatusCell } from "../components/StatusCell";
 import { CopyId } from "../components/CopyId";
+import { decodeAgentRouteID, findAgentForRoute } from "../util/agentRoute";
 import type { Agent, AgentPolicy } from "../api/types";
 
 const SYSTEM_SCOPE = "mcp:connect";
@@ -33,16 +34,16 @@ async function setPolicy(prismID: string, p: AgentPolicy) {
 export function AgentDetail() {
   const { params } = useRoute();
   const loc = useLocation();
-  const prismId = params.prismId;
+  const routeID = decodeAgentRouteID(params.prismId);
   const list = agents.data.value || [];
-  const agent = list.find((a) => a.prism_id === prismId);
+  const agent = findAgentForRoute(list, routeID);
 
   if (agents.data.value === null) {
-    return <Shell title={prismId}>loading…</Shell>;
+    return <Shell title={routeID}>loading…</Shell>;
   }
   if (!agent) {
     return (
-      <Shell title={prismId}>
+      <Shell title={routeID}>
         <div class="empty-state">
           agent not found.{" "}
           <a href="/identity" class="link-accent">
@@ -190,6 +191,22 @@ function PolicySection({ agent }: { agent: Agent }) {
       </div>
     );
   }
+  if (!agent.prism_id) {
+    return (
+      <div class="section">
+        <div class="section-header">
+          <span class="section-title">policy</span>
+        </div>
+        <div class="card">
+          <div style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">
+            this dynamic client has not completed oauth consent, so prism has
+            not assigned a prism_id yet. policy can be managed after consent;
+            the client can still be removed below.
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (!bd) {
     return (
       <div class="section">
@@ -211,7 +228,7 @@ function PolicySection({ agent }: { agent: Agent }) {
     grant: [],
     deny: [],
   };
-  const prismID = agent.prism_id!;
+  const prismID = agent.prism_id;
   const allGroups = (groups.data.value || []).map((g) => g.name);
 
   const updatePolicy = (next: AgentPolicy) => setPolicy(prismID, next);

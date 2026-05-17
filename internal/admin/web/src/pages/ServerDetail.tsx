@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useLocation, useRoute } from "preact-iso";
 import { backends, events } from "../state";
-import { deleteJSON, getJSON, postJSON } from "../api/client";
+import { deleteJSON, getJSON, patchJSON, postJSON } from "../api/client";
 import { showError, withToast } from "../state/toasts";
 import { canMutate } from "../state/me";
 import type {
@@ -9,12 +9,18 @@ import type {
   AddBackendResponse,
   AuthStatus,
   Backend,
+  BackendUpdateBody,
   BackendTool,
   CredentialInput,
+  SandboxConfig,
+  SandboxMount,
+  WorkspaceApplyResult,
+  WorkspaceChangeSet,
 } from "../api/types";
 import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
 
 type CredType = "none" | "static" | "env" | "command";
+const BACKEND_REBUILD_TIMEOUT_MS = 60_000;
 
 interface CredFormState {
   type: CredType;
@@ -101,6 +107,8 @@ export function ServerDetail() {
       </div>
 
       <MetaRow backend={backend} />
+      {canMutate() && <BackendSettingsSection backend={backend} />}
+      {backend.workspace && <WorkspaceChangesSection backend={backend} />}
       {backend.disconnected && canMutate() && (
         <ReconnectSection backend={backend} />
       )}
@@ -146,6 +154,9 @@ function PageShell({
 
 function StatusPill({ backend }: { backend: Backend }) {
   const cb = backend.circuit_breaker;
+  if (backend.enabled === false) {
+    return <span class="pill pill-neutral">disabled</span>;
+  }
   if (backend.disconnected) {
     return <span class="pill pill-error">disconnected</span>;
   }
@@ -382,6 +393,455 @@ function MetaItem({
       <div class="meta-label">{label}</div>
       <div class={mono ? "meta-value meta-value-mono" : "meta-value"}>
         {value}
+      </div>
+    </div>
+  );
+}
+
+function BackendSettingsSection({ backend }: { backend: Backend }) {
+  const [enabled, setEnabled] = useState(backend.enabled !== false);
+  const [sandbox, setSandbox] = useState<SandboxConfig>(
+    normalizeSandbox(backend.sandbox),
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const sandboxApplies = backend.bridge_managed || !backend.url;
+
+  useEffect(() => {
+    setEnabled(backend.enabled !== false);
+    setSandbox(normalizeSandbox(backend.sandbox));
+  }, [backend.id, backend.enabled, JSON.stringify(backend.sandbox || {})]);
+
+  const save = async (nextEnabled = enabled, nextSandbox = sandbox) => {
+    setBusy(true);
+    setError(null);
+    const body: BackendUpdateBody = { enabled: nextEnabled };
+    if (sandboxApplies) body.sandbox = nextSandbox;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      BACKEND_REBUILD_TIMEOUT_MS,
+    );
+    try {
+      await patchJSON(`/backends/${encodeURIComponent(backend.id)}`, body, {
+        signal: controller.signal,
+      });
+      await backends.refresh();
+    } catch (e) {
+      const message =
+        e instanceof DOMException && e.name === "AbortError"
+          ? "backend rebuild timed out after 60 seconds"
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      showError(message);
+      setError(message);
+    } finally {
+      window.clearTimeout(timeout);
+      setBusy(false);
+    }
+  };
+
+  const toggleEnabled = async () => {
+    const next = !enabled;
+    setEnabled(next);
+    await save(next, sandbox);
+  };
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">runtime</span>
+        <div class="runtime-actions">
+          {busy && sandboxApplies && (
+            <span class="runtime-progress">
+              <span class="inline-spinner" aria-hidden="true" />
+              rebuilding container
+            </span>
+          )}
+          <button class="save-btn" onClick={() => save()} disabled={busy}>
+            {busy ? "saving…" : "save"}
+          </button>
+        </div>
+      </div>
+      <div class="card runtime-card">
+        <label class="config-toggle runtime-toggle">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={busy}
+            onChange={toggleEnabled}
+          />
+          <span class="config-toggle-label">enabled</span>
+          <span class="hint-text">
+            disabling stops the backend and removes its tools without deleting
+            config or tokens
+          </span>
+        </label>
+
+        {sandboxApplies ? (
+          <SandboxControls sandbox={sandbox} onChange={setSandbox} />
+        ) : (
+          <div class="empty-state runtime-empty">
+            sandbox settings apply to stdio Docker backends.
+          </div>
+        )}
+        {error && <div class="error-text">{error}</div>}
+      </div>
+    </div>
+  );
+}
+
+function normalizeSandbox(input?: SandboxConfig): SandboxConfig {
+  const profile = input?.profile || "default";
+  if (profile === "compat") {
+    return {
+      profile,
+      network_profile: input?.network_profile || "standard",
+      run_as_root: input?.run_as_root ?? true,
+      uid: input?.uid ?? 0,
+      gid: input?.gid ?? 0,
+      readonly_rootfs: input?.readonly_rootfs ?? false,
+      memory: input?.memory || "",
+      cpus: input?.cpus ?? 0,
+      pids_limit: input?.pids_limit ?? 0,
+      mounts: input?.mounts || [],
+    };
+  }
+  return {
+    profile,
+    network_profile: input?.network_profile || "standard",
+    run_as_root: input?.run_as_root ?? false,
+    uid: input?.uid ?? 65532,
+    gid: input?.gid ?? 65532,
+    readonly_rootfs: input?.readonly_rootfs ?? true,
+    memory: input?.memory || "512m",
+    cpus: input?.cpus ?? 1,
+    pids_limit: input?.pids_limit ?? 128,
+    mounts: input?.mounts || [],
+  };
+}
+
+function SandboxControls({
+  sandbox,
+  onChange,
+}: {
+  sandbox: SandboxConfig;
+  onChange: (next: SandboxConfig) => void;
+}) {
+  const set = (patch: Partial<SandboxConfig>) =>
+    onChange({ ...sandbox, ...patch });
+
+  const setProfile = (profile: "default" | "compat") => {
+    if (profile === "compat") {
+      onChange({
+        ...sandbox,
+        profile,
+        run_as_root: true,
+        readonly_rootfs: false,
+        memory: "",
+        cpus: 0,
+        pids_limit: 0,
+      });
+      return;
+    }
+    onChange(normalizeSandbox({ ...sandbox, profile }));
+  };
+
+  const mounts = sandbox.mounts || [];
+  const updateMount = (index: number, patch: Partial<SandboxMount>) => {
+    const next = mounts.map((m, i) => (i === index ? { ...m, ...patch } : m));
+    set({ mounts: next });
+  };
+  const removeMount = (index: number) => {
+    set({ mounts: mounts.filter((_, i) => i !== index) });
+  };
+
+  return (
+    <div class="sandbox-controls">
+      <div class="sandbox-grid">
+        <label>
+          <span>profile</span>
+          <select
+            value={sandbox.profile || "default"}
+            onChange={(e) =>
+              setProfile((e.target as HTMLSelectElement).value as "default" | "compat")
+            }
+          >
+            <option value="default">recommended</option>
+            <option value="compat">compatibility</option>
+          </select>
+        </label>
+        <label>
+          <span>network</span>
+          <select value={sandbox.network_profile || "standard"} disabled>
+            <option value="standard">standard</option>
+          </select>
+        </label>
+        <label>
+          <span>memory</span>
+          <input
+            type="text"
+            value={sandbox.memory || ""}
+            placeholder="512m"
+            onInput={(e) => set({ memory: (e.target as HTMLInputElement).value })}
+          />
+        </label>
+        <label>
+          <span>cpus</span>
+          <input
+            type="number"
+            min="0"
+            step="0.25"
+            value={String(sandbox.cpus || 0)}
+            onInput={(e) =>
+              set({ cpus: Number((e.target as HTMLInputElement).value) })
+            }
+          />
+        </label>
+        <label>
+          <span>pids</span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            value={String(sandbox.pids_limit || 0)}
+            onInput={(e) =>
+              set({ pids_limit: Number((e.target as HTMLInputElement).value) })
+            }
+          />
+        </label>
+        <label>
+          <span>uid</span>
+          <input
+            type="number"
+            min="0"
+            value={String(sandbox.uid || 0)}
+            disabled={sandbox.run_as_root}
+            onInput={(e) => set({ uid: Number((e.target as HTMLInputElement).value) })}
+          />
+        </label>
+        <label>
+          <span>gid</span>
+          <input
+            type="number"
+            min="0"
+            value={String(sandbox.gid || 0)}
+            disabled={sandbox.run_as_root}
+            onInput={(e) => set({ gid: Number((e.target as HTMLInputElement).value) })}
+          />
+        </label>
+      </div>
+
+      <div class="sandbox-toggles">
+        <label class="config-toggle">
+          <input
+            type="checkbox"
+            checked={!sandbox.run_as_root}
+            onChange={(e) => {
+              const checked = (e.target as HTMLInputElement).checked;
+              set({
+                run_as_root: !checked,
+                uid: checked && !sandbox.uid ? 65532 : sandbox.uid,
+                gid: checked && !sandbox.gid ? 65532 : sandbox.gid,
+              });
+            }}
+          />
+          <span class="config-toggle-label">run as non-root</span>
+        </label>
+        <label class="config-toggle">
+          <input
+            type="checkbox"
+            checked={sandbox.readonly_rootfs !== false}
+            onChange={(e) =>
+              set({ readonly_rootfs: (e.target as HTMLInputElement).checked })
+            }
+          />
+          <span class="config-toggle-label">read-only root filesystem</span>
+        </label>
+      </div>
+
+      <div class="mounts-block">
+        <div class="mounts-header">
+          <span>mounts</span>
+          <button
+            type="button"
+            class="section-btn"
+            onClick={() =>
+              set({
+                mounts: [
+                  ...mounts,
+                  { source: "", target: "/workspace", readonly: true },
+                ],
+              })
+            }
+          >
+            add mount
+          </button>
+        </div>
+        {mounts.length === 0 ? (
+          <div class="empty-state runtime-empty">no host paths mounted.</div>
+        ) : (
+          <div class="mount-list">
+            {mounts.map((m, index) => (
+              <div class="mount-row" key={index}>
+                <input
+                  type="text"
+                  placeholder="/host/path"
+                  value={m.source}
+                  onInput={(e) =>
+                    updateMount(index, {
+                      source: (e.target as HTMLInputElement).value,
+                    })
+                  }
+                />
+                <input
+                  type="text"
+                  placeholder="/container/path"
+                  value={m.target}
+                  onInput={(e) =>
+                    updateMount(index, {
+                      target: (e.target as HTMLInputElement).value,
+                    })
+                  }
+                />
+                <label class="mount-readonly">
+                  <input
+                    type="checkbox"
+                    checked={m.readonly !== false}
+                    onChange={(e) =>
+                      updateMount(index, {
+                        readonly: (e.target as HTMLInputElement).checked,
+                      })
+                    }
+                  />
+                  ro
+                </label>
+                <button
+                  type="button"
+                  class="cancel-btn"
+                  onClick={() => removeMount(index)}
+                >
+                  remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceChangesSection({ backend }: { backend: Backend }) {
+  const [changes, setChanges] = useState<WorkspaceChangeSet | null>(null);
+  const [busy, setBusy] = useState(false);
+  const files = changes?.files || [];
+
+  const load = async (refresh = false) => {
+    setBusy(true);
+    try {
+      const path = `/backends/${encodeURIComponent(backend.id)}/workspace-changes`;
+      const next = refresh
+        ? await postJSON<WorkspaceChangeSet>(`${path}/refresh`, {})
+        : await getJSON<WorkspaceChangeSet>(path);
+      setChanges(next);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    load(false);
+  }, [backend.id]);
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      const result = await postJSON<WorkspaceApplyResult>(
+        `/backends/${encodeURIComponent(backend.id)}/workspace-changes/apply`,
+        {},
+      );
+      if (result.conflicts?.length) {
+        showError(`workspace apply had conflicts: ${result.conflicts.join(", ")}`);
+      }
+      await load(true);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const discard = async () => {
+    setBusy(true);
+    try {
+      await postJSON(
+        `/backends/${encodeURIComponent(backend.id)}/workspace-changes/discard`,
+        {},
+      );
+      await load(false);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">workspace changes</span>
+        <div class="section-actions">
+          {busy && (
+            <span class="runtime-progress">
+              <span class="inline-spinner" aria-hidden="true" />
+              syncing
+            </span>
+          )}
+          <button class="section-btn" disabled={busy} onClick={() => load(true)}>
+            refresh
+          </button>
+          {canMutate() && files.length > 0 && (
+            <>
+              <button class="save-btn" disabled={busy} onClick={apply}>
+                apply
+              </button>
+              <button class="cancel-btn" disabled={busy} onClick={discard}>
+                discard
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      <div class="card runtime-card">
+        <div class="hint-text">
+          {backend.workspace?.id
+            ? `workspace ${backend.workspace.id} · ${backend.workspace.write_mode || "stage"}`
+            : "no workspace attached"}
+        </div>
+        {files.length === 0 ? (
+          <div class="empty-state runtime-empty">no staged workspace changes.</div>
+        ) : (
+          <div class="workspace-change-list">
+            {files.map((file) => (
+              <div class="workspace-change-row" key={file.path}>
+                <div class="workspace-change-head">
+                  <span class={`workspace-change-kind workspace-change-${file.type}`}>
+                    {file.type}
+                  </span>
+                  <span class="meta-value-mono">{file.path}</span>
+                  {file.binary && <span class="hint-text">binary</span>}
+                </div>
+                {file.preview && (
+                  <pre class="workspace-change-preview">{file.preview}</pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

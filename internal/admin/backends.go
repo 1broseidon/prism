@@ -8,16 +8,21 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/1broseidon/prism/internal/config"
 )
 
 // BackendConfig is the JSON body for adding a backend at runtime.
 type BackendConfig struct {
 	// Standard MCP fields
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Runtime string            `json:"runtime,omitempty"`
+	Command   string                  `json:"command,omitempty"`
+	Args      []string                `json:"args,omitempty"`
+	Env       map[string]string       `json:"env,omitempty"`
+	URL       string                  `json:"url,omitempty"`
+	Runtime   string                  `json:"runtime,omitempty"`
+	Enabled   *bool                   `json:"enabled,omitempty"`
+	Sandbox   *config.SandboxConfig   `json:"sandbox,omitempty"`
+	Workspace *config.WorkspaceConfig `json:"workspace,omitempty"`
 	// Credential config for backend authentication
 	Credential *CredentialConfig `json:"credential,omitempty"`
 	// OAuthClientID, when set, skips DCR and uses these credentials directly.
@@ -26,6 +31,13 @@ type BackendConfig struct {
 	// pre-registers prism with the provider and pastes the values here.
 	OAuthClientID     string `json:"oauth_client_id,omitempty"`
 	OAuthClientSecret string `json:"oauth_client_secret,omitempty"`
+}
+
+// BackendUpdate is the PATCH /backends/{id} body for operational settings.
+type BackendUpdate struct {
+	Enabled   *bool                   `json:"enabled,omitempty"`
+	Sandbox   *config.SandboxConfig   `json:"sandbox,omitempty"`
+	Workspace *config.WorkspaceConfig `json:"workspace,omitempty"`
 }
 
 // CredentialConfig specifies how to authenticate with a backend.
@@ -66,6 +78,12 @@ type BackendManager interface {
 // KV-persisted backend without deleting its stored config or OAuth tokens.
 type BackendReconnector interface {
 	ReconnectBackend(ctx context.Context, id string) error
+}
+
+// BackendSettingsUpdater is implemented by managers that can update persisted
+// backend settings without deleting credentials or OAuth state.
+type BackendSettingsUpdater interface {
+	UpdateBackend(ctx context.Context, id string, update BackendUpdate) error
 }
 
 // callbackBaseFromRequest derives the externally-reachable base URL the OAuth
@@ -163,7 +181,7 @@ func (e *DCRUnsupportedError) Error() string {
 	return "provider at " + e.AuthServer + " does not support dynamic client registration; register prism manually (callback: " + e.CallbackURL + ") and supply oauth_client_id"
 }
 
-func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) { //nolint:gocyclo // add flow branches on transport and OAuth state
 	if a.backendMgr == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "backend management not available"})
 		return
@@ -188,6 +206,14 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 	var cfg BackendConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if err := config.ValidateSandboxConfig(cfg.Sandbox); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := config.ValidateWorkspaceConfig(cfg.Workspace); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -293,6 +319,49 @@ func (a *API) handleReconnectBackend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := reconnector.ReconnectBackend(r.Context(), id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+func (a *API) handlePatchBackend(w http.ResponseWriter, r *http.Request) {
+	if a.backendMgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "backend management not available"})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	id := strings.TrimPrefix(r.URL.Path, "/backends/")
+	if !isValidID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid backend id"})
+		return
+	}
+
+	var update BackendUpdate
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if update.Enabled == nil && update.Sandbox == nil && update.Workspace == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled, sandbox, or workspace is required"})
+		return
+	}
+	if err := config.ValidateSandboxConfig(update.Sandbox); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := config.ValidateWorkspaceConfig(update.Workspace); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	updater, ok := a.backendMgr.(BackendSettingsUpdater)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "backend settings update not available"})
+		return
+	}
+	if err := updater.UpdateBackend(r.Context(), id, update); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
