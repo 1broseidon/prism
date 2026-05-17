@@ -67,6 +67,7 @@ export interface SandboxConfig {
 
 export interface WorkspaceConfig {
   id?: string;
+  type?: "proxied" | "virtual" | "ephemeral";
   mode?: "snapshot";
   write_mode?: "sandbox_only" | "stage" | "auto_apply";
   include?: string[];

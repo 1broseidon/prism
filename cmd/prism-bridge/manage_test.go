@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/1broseidon/prism/internal/config"
 )
 
 type fakeRuntime struct {
@@ -102,6 +104,41 @@ func TestManagerMaxBackendsLimit(t *testing.T) {
 		if rec.Code != want {
 			t.Fatalf("request %d got %d want %d body=%s", i, rec.Code, want, rec.Body.String())
 		}
+	}
+}
+
+func TestManagerWorkspaceSnapshotRequirementByType(t *testing.T) {
+	manager := NewManager(&fakeRuntime{spawnFn: func(_ context.Context, req SpawnRequest) (*SpawnResult, error) {
+		return &SpawnResult{
+			Endpoint: "/mcp/" + req.ID,
+			Handler:  http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+			Status:   "running",
+		}, nil
+	}}, 2, testLogger(t))
+	mux := http.NewServeMux()
+	manager.RegisterRoutes(mux)
+
+	proxied := httptest.NewRecorder()
+	mux.ServeHTTP(proxied, httptest.NewRequest(http.MethodPost, "/manage/spawn", mustJSON(t, SpawnRequest{
+		ID:        "proxied",
+		Command:   "echo",
+		Workspace: &config.WorkspaceConfig{ID: "repo"},
+	})))
+	if proxied.Code != http.StatusBadRequest {
+		t.Fatalf("proxied status = %d body=%s", proxied.Code, proxied.Body.String())
+	}
+
+	virtual := httptest.NewRecorder()
+	mux.ServeHTTP(virtual, httptest.NewRequest(http.MethodPost, "/manage/spawn", mustJSON(t, SpawnRequest{
+		ID:      "virtual",
+		Command: "echo",
+		Workspace: &config.WorkspaceConfig{
+			ID:   "shared",
+			Type: config.WorkspaceTypeVirtual,
+		},
+	})))
+	if virtual.Code != http.StatusCreated {
+		t.Fatalf("virtual status = %d body=%s", virtual.Code, virtual.Body.String())
 	}
 }
 

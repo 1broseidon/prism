@@ -37,19 +37,29 @@ type DockerRuntime struct {
 	namePrefix   string
 	logger       *slog.Logger
 
-	mu       sync.RWMutex
-	backends map[string]*dockerBackend
+	mu         sync.RWMutex
+	backends   map[string]*dockerBackend
+	workspaces map[string]*dockerWorkspace
 }
 
 type dockerBackend struct {
-	containerID  string
-	endpoint     string
-	status       string
+	containerID string
+	endpoint    string
+	status      string
+	volumeName  string
+	cacheVolume string
+	workspace   *config.WorkspaceConfig
+}
+
+type dockerWorkspace struct {
+	id           string
+	typ          string
 	volumeName   string
-	cacheVolume  string
-	workspace    *config.WorkspaceConfig
 	baseSnapshot *ws.Snapshot
 	changes      *ws.ChangeSet
+	refs         map[string]struct{}
+	ready        chan struct{}
+	initErr      error
 }
 
 type dockerSpec struct {
@@ -88,6 +98,7 @@ func NewDockerRuntime(logger *slog.Logger, opts *DockerRuntimeOptions) (*DockerR
 		namePrefix:   nonEmpty(opts.NamePrefix, "prism-managed-"),
 		logger:       logger,
 		backends:     make(map[string]*dockerBackend),
+		workspaces:   make(map[string]*dockerWorkspace),
 	}, nil
 }
 
@@ -104,12 +115,17 @@ type DockerRuntimeOptions struct {
 
 func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResult, error) { //nolint:gocritic,gocyclo // Runtime interface fixes signature; spawn owns cleanup branches
 	spec := d.buildSpec(&req)
-	if spec.volumeName != "" {
-		if _, err := d.client.VolumeCreate(ctx, volumetypes.CreateOptions{
-			Name:   spec.volumeName,
-			Labels: spec.labels,
-		}); err != nil {
-			return nil, fmt.Errorf("create workspace volume: %w", err)
+	workspaceCfg := config.NormalizeWorkspaceConfig(req.Workspace)
+	workspaceAcquired := false
+	if workspaceCfg != nil {
+		if err := d.ensureWorkspace(ctx, spec, &req, workspaceCfg); err != nil {
+			return nil, err
+		}
+		workspaceAcquired = true
+	}
+	releaseWorkspace := func() {
+		if workspaceAcquired {
+			_ = d.releaseWorkspaceRef(context.Background(), workspaceCfg.ID, req.ID)
 		}
 	}
 	if spec.cacheVolume != "" {
@@ -117,43 +133,27 @@ func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResu
 			Name:   spec.cacheVolume,
 			Labels: spec.labels,
 		}); err != nil {
-			_ = d.removeVolume(context.Background(), spec.volumeName)
+			releaseWorkspace()
 			return nil, fmt.Errorf("create package cache volume: %w", err)
 		}
 	}
 	if spec.installScript != "" {
 		if err := d.runInstallStep(ctx, spec); err != nil {
-			_ = d.removeVolume(context.Background(), spec.volumeName)
-			_ = d.removeVolume(context.Background(), spec.cacheVolume)
-			return nil, err
-		}
-	}
-	if spec.volumeName != "" {
-		if err := d.runWorkspaceVolumeInit(ctx, spec); err != nil {
-			_ = d.removeVolume(context.Background(), spec.volumeName)
+			releaseWorkspace()
 			_ = d.removeVolume(context.Background(), spec.cacheVolume)
 			return nil, err
 		}
 	}
 	resp, err := d.client.ContainerCreate(ctx, spec.containerCfg, spec.hostCfg, spec.networking, nil, spec.name)
 	if err != nil {
-		_ = d.removeVolume(context.Background(), spec.volumeName)
+		releaseWorkspace()
 		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, fmt.Errorf("create container: %w", err)
 	}
 
-	if req.WorkspaceSnapshot != nil {
-		if copyErr := d.copyWorkspaceSnapshot(ctx, resp.ID, &req); copyErr != nil {
-			_ = d.stopAndRemove(context.Background(), resp.ID)
-			_ = d.removeVolume(context.Background(), spec.volumeName)
-			_ = d.removeVolume(context.Background(), spec.cacheVolume)
-			return nil, copyErr
-		}
-	}
-
 	if startErr := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); startErr != nil {
 		_ = d.client.ContainerRemove(context.Background(), resp.ID, container.RemoveOptions{Force: true})
-		_ = d.removeVolume(context.Background(), spec.volumeName)
+		releaseWorkspace()
 		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, fmt.Errorf("start container: %w", startErr)
 	}
@@ -161,7 +161,7 @@ func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResu
 	endpoint, err := d.resolveEndpoint(ctx, resp.ID, spec.name)
 	if err != nil {
 		_ = d.stopAndRemove(context.Background(), resp.ID)
-		_ = d.removeVolume(context.Background(), spec.volumeName)
+		releaseWorkspace()
 		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, err
 	}
@@ -169,7 +169,7 @@ func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResu
 	if waitErr := d.waitForHealthy(ctx, endpoint); waitErr != nil {
 		logs := d.containerLogs(ctx, resp.ID)
 		_ = d.stopAndRemove(context.Background(), resp.ID)
-		_ = d.removeVolume(context.Background(), spec.volumeName)
+		releaseWorkspace()
 		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, fmt.Errorf("%w: %s", waitErr, logs)
 	}
@@ -177,7 +177,7 @@ func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResu
 	tools, err := d.discoverTools(ctx, endpoint)
 	if err != nil {
 		_ = d.stopAndRemove(context.Background(), resp.ID)
-		_ = d.removeVolume(context.Background(), spec.volumeName)
+		releaseWorkspace()
 		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, err
 	}
@@ -185,19 +185,18 @@ func (d *DockerRuntime) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResu
 	handler, err := d.newProxyHandler(endpoint)
 	if err != nil {
 		_ = d.stopAndRemove(context.Background(), resp.ID)
-		_ = d.removeVolume(context.Background(), spec.volumeName)
+		releaseWorkspace()
 		_ = d.removeVolume(context.Background(), spec.cacheVolume)
 		return nil, err
 	}
 
 	backend := &dockerBackend{
-		containerID:  resp.ID,
-		endpoint:     endpoint,
-		status:       "running",
-		volumeName:   spec.volumeName,
-		cacheVolume:  spec.cacheVolume,
-		workspace:    config.NormalizeWorkspaceConfig(req.Workspace),
-		baseSnapshot: req.WorkspaceSnapshot,
+		containerID: resp.ID,
+		endpoint:    endpoint,
+		status:      "running",
+		volumeName:  spec.volumeName,
+		cacheVolume: spec.cacheVolume,
+		workspace:   workspaceCfg,
 	}
 	d.mu.Lock()
 	d.backends[req.ID] = backend
@@ -223,11 +222,13 @@ func (d *DockerRuntime) Stop(ctx context.Context, id string) error {
 	if err := d.stopAndRemove(ctx, backend.containerID); err != nil {
 		return err
 	}
-	if err := d.removeVolume(ctx, backend.volumeName); err != nil {
-		return err
-	}
 	if err := d.removeVolume(ctx, backend.cacheVolume); err != nil {
 		return err
+	}
+	if backend.workspace != nil {
+		if err := d.releaseWorkspaceRef(ctx, backend.workspace.ID, id); err != nil {
+			return err
+		}
 	}
 	d.mu.Lock()
 	delete(d.backends, id)
@@ -284,6 +285,10 @@ func (d *DockerRuntime) buildSpec(req *SpawnRequest) *dockerSpec {
 		d.labelPrefix + ".id":      req.ID,
 		d.labelPrefix + ".managed": "true",
 	}
+	if workspaceCfg != nil {
+		labels[d.labelPrefix+".workspace_id"] = workspaceCfg.ID
+		labels[d.labelPrefix+".workspace_type"] = workspaceCfg.Type
+	}
 	env := envFromMap(req.Env)
 	endpoint := fmt.Sprintf("http://%s:%s/mcp", name, managedBackendPort)
 	cfg := &container.Config{
@@ -296,10 +301,10 @@ func (d *DockerRuntime) buildSpec(req *SpawnRequest) *dockerSpec {
 	var volumeName string
 	var cacheVolume string
 	var installScript string
-	if workspaceCfg != nil && req.WorkspaceSnapshot != nil {
+	if workspaceCfg != nil {
 		cfg.WorkingDir = "/workspace"
 		cfg.Env = upsertEnv(cfg.Env, "PWD", "/workspace")
-		volumeName = d.containerName(req.ID) + "-workspace"
+		volumeName = d.workspaceVolumeName(workspaceCfg.ID)
 		cacheVolume = d.containerName(req.ID) + "-cache"
 		cfg.Env = upsertEnv(cfg.Env, "NPM_CONFIG_CACHE", "/cache/npm")
 		cfg.Env = upsertEnv(cfg.Env, "NPM_CONFIG_IGNORE_SCRIPTS", "true")
@@ -347,6 +352,121 @@ func (d *DockerRuntime) buildSpec(req *SpawnRequest) *dockerSpec {
 		cacheVolume:   cacheVolume,
 		installScript: installScript,
 	}
+}
+
+func (d *DockerRuntime) ensureWorkspace(ctx context.Context, spec *dockerSpec, req *SpawnRequest, cfg *config.WorkspaceConfig) error {
+	d.mu.Lock()
+	if d.workspaces == nil {
+		d.workspaces = make(map[string]*dockerWorkspace)
+	}
+	if existing := d.workspaces[cfg.ID]; existing != nil {
+		existing.refs[req.ID] = struct{}{}
+		ready := existing.ready
+		d.mu.Unlock()
+		<-ready
+		if existing.initErr != nil {
+			_ = d.releaseWorkspaceRef(context.Background(), cfg.ID, req.ID)
+			return existing.initErr
+		}
+		return nil
+	}
+	state := &dockerWorkspace{
+		id:         cfg.ID,
+		typ:        cfg.Type,
+		volumeName: spec.volumeName,
+		refs:       map[string]struct{}{req.ID: {}},
+		ready:      make(chan struct{}),
+	}
+	d.workspaces[cfg.ID] = state
+	d.mu.Unlock()
+
+	initErr := d.initializeWorkspace(ctx, spec, req, cfg)
+	d.mu.Lock()
+	state.initErr = initErr
+	if initErr == nil && cfg.Type == config.WorkspaceTypeProxied {
+		state.baseSnapshot = req.WorkspaceSnapshot
+		state.changes = &ws.ChangeSet{BaseID: req.WorkspaceSnapshot.BaseID}
+	}
+	if initErr != nil {
+		delete(d.workspaces, cfg.ID)
+	}
+	close(state.ready)
+	d.mu.Unlock()
+	return initErr
+}
+
+func (d *DockerRuntime) initializeWorkspace(ctx context.Context, spec *dockerSpec, req *SpawnRequest, cfg *config.WorkspaceConfig) (err error) {
+	if spec.volumeName == "" {
+		return nil
+	}
+	if cfg.Type == config.WorkspaceTypeProxied && req.WorkspaceSnapshot == nil {
+		return fmt.Errorf("workspace snapshot is required for proxied workspace %q", cfg.ID)
+	}
+	if _, createErr := d.client.VolumeCreate(ctx, volumetypes.CreateOptions{
+		Name:   spec.volumeName,
+		Labels: spec.labels,
+	}); createErr != nil {
+		return fmt.Errorf("create workspace volume: %w", createErr)
+	}
+	defer func() {
+		if err != nil {
+			_ = d.removeVolume(context.Background(), spec.volumeName)
+		}
+	}()
+	if err := d.runWorkspaceVolumeInit(ctx, spec); err != nil {
+		return err
+	}
+	if cfg.Type == config.WorkspaceTypeProxied {
+		if err := d.copyWorkspaceSnapshotToVolume(ctx, spec, req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DockerRuntime) copyWorkspaceSnapshotToVolume(ctx context.Context, spec *dockerSpec, req *SpawnRequest) error {
+	cfg := &container.Config{
+		Image:      spec.image,
+		Entrypoint: []string{"sh", "-c"},
+		Cmd:        []string{"true"},
+		Labels:     spec.labels,
+	}
+	hostCfg := &container.HostConfig{
+		SecurityOpt: []string{"no-new-privileges:true"},
+		Mounts: []mounttypes.Mount{{
+			Type:   mounttypes.TypeVolume,
+			Source: spec.volumeName,
+			Target: "/workspace",
+		}},
+	}
+	resp, err := d.client.ContainerCreate(ctx, cfg, hostCfg, spec.networking, nil, spec.name+"-workspace-copy")
+	if err != nil {
+		return fmt.Errorf("create workspace copy container: %w", err)
+	}
+	defer func() {
+		_ = d.client.ContainerRemove(context.Background(), resp.ID, container.RemoveOptions{Force: true})
+	}()
+	return d.copyWorkspaceSnapshot(ctx, resp.ID, req)
+}
+
+func (d *DockerRuntime) releaseWorkspaceRef(ctx context.Context, workspaceID, backendID string) error {
+	d.mu.Lock()
+	state := d.workspaces[workspaceID]
+	if state == nil {
+		d.mu.Unlock()
+		return nil
+	}
+	delete(state.refs, backendID)
+	remove := len(state.refs) == 0 && state.typ != config.WorkspaceTypeVirtual
+	volumeName := state.volumeName
+	if remove {
+		delete(d.workspaces, workspaceID)
+	}
+	d.mu.Unlock()
+	if remove {
+		return d.removeVolume(ctx, volumeName)
+	}
+	return nil
 }
 
 func wrapWorkspaceEntrypoint(req *SpawnRequest, sandbox *config.SandboxConfig, cfg *container.Config, hostCfg *container.HostConfig) {
@@ -585,27 +705,37 @@ func (d *DockerRuntime) copyWorkspaceSnapshot(ctx context.Context, containerID s
 func (d *DockerRuntime) WorkspaceChanges(ctx context.Context, id string, refresh bool) (*ws.ChangeSet, error) {
 	d.mu.RLock()
 	backend, ok := d.backends[id]
+	var workspaceID string
+	var base *ws.Snapshot
+	var cached *ws.ChangeSet
+	if ok && backend.workspace != nil && backend.workspace.Type == config.WorkspaceTypeProxied {
+		workspaceID = backend.workspace.ID
+		if state := d.workspaces[workspaceID]; state != nil {
+			base = state.baseSnapshot
+			cached = state.changes
+		}
+	}
 	d.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("backend %q not found", id)
 	}
-	if backend.baseSnapshot == nil {
+	if workspaceID == "" || base == nil {
 		return &ws.ChangeSet{}, nil
 	}
-	if !refresh && backend.changes != nil {
-		return backend.changes, nil
+	if !refresh && cached != nil {
+		return cached, nil
 	}
 	current, err := d.snapshotContainerWorkspace(ctx, backend.containerID)
 	if err != nil {
 		return nil, err
 	}
-	changes, err := ws.ChangeSetFromArchives(backend.baseSnapshot.BaseID, backend.baseSnapshot.Archive, current)
+	changes, err := ws.ChangeSetFromArchives(base.BaseID, base.Archive, current)
 	if err != nil {
 		return nil, err
 	}
 	d.mu.Lock()
-	if currentBackend := d.backends[id]; currentBackend != nil {
-		currentBackend.changes = changes
+	if currentState := d.workspaces[workspaceID]; currentState != nil {
+		currentState.changes = changes
 	}
 	d.mu.Unlock()
 	return changes, nil
@@ -614,11 +744,19 @@ func (d *DockerRuntime) WorkspaceChanges(ctx context.Context, id string, refresh
 func (d *DockerRuntime) DiscardWorkspaceChanges(ctx context.Context, id string) error {
 	d.mu.RLock()
 	backend, ok := d.backends[id]
+	var workspaceID string
+	var base *ws.Snapshot
+	if ok && backend.workspace != nil && backend.workspace.Type == config.WorkspaceTypeProxied {
+		workspaceID = backend.workspace.ID
+		if state := d.workspaces[workspaceID]; state != nil {
+			base = state.baseSnapshot
+		}
+	}
 	d.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("backend %q not found", id)
 	}
-	if backend.baseSnapshot == nil {
+	if workspaceID == "" || base == nil {
 		return nil
 	}
 	current, err := d.snapshotContainerWorkspace(ctx, backend.containerID)
@@ -630,9 +768,9 @@ func (d *DockerRuntime) DiscardWorkspaceChanges(ctx context.Context, id string) 
 		return err
 	}
 	d.mu.Lock()
-	if currentBackend := d.backends[id]; currentBackend != nil {
-		currentBackend.baseSnapshot = next
-		currentBackend.changes = &ws.ChangeSet{BaseID: next.BaseID}
+	if currentState := d.workspaces[workspaceID]; currentState != nil {
+		currentState.baseSnapshot = next
+		currentState.changes = &ws.ChangeSet{BaseID: next.BaseID}
 	}
 	d.mu.Unlock()
 	return nil
@@ -766,6 +904,10 @@ func detectRuntimeProfile(command string) string {
 
 func (d *DockerRuntime) containerName(id string) string {
 	return d.namePrefix + sanitizeContainerName(id)
+}
+
+func (d *DockerRuntime) workspaceVolumeName(id string) string {
+	return d.namePrefix + "workspace-" + sanitizeContainerName(id)
 }
 
 func sanitizeContainerName(id string) string {

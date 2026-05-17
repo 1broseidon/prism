@@ -819,7 +819,7 @@ function WorkspaceChangesSection({ backend }: { backend: Backend }) {
       <div class="card runtime-card">
         <div class="hint-text">
           {backend.workspace?.id
-            ? `workspace ${backend.workspace.id} · ${backend.workspace.write_mode || "stage"}`
+            ? `workspace ${backend.workspace.id} · ${backend.workspace.type || "proxied"} · ${backend.workspace.write_mode || "stage"}`
             : "no workspace attached"}
         </div>
         {files.length === 0 ? (

@@ -53,12 +53,13 @@ func TestParseMemoryBytes(t *testing.T) {
 
 func TestWorkspaceConfigDefaultsAndValidation(t *testing.T) {
 	cfg := NormalizeWorkspaceConfig(&WorkspaceConfig{ID: "repo"})
-	if cfg == nil || cfg.Mode != WorkspaceModeSnapshot || cfg.WriteMode != WorkspaceWriteStage || cfg.MaxBytes != DefaultWorkspaceMaxBytes {
+	if cfg == nil || cfg.Type != WorkspaceTypeProxied || cfg.Mode != WorkspaceModeSnapshot || cfg.WriteMode != WorkspaceWriteStage || cfg.MaxBytes != DefaultWorkspaceMaxBytes {
 		t.Fatalf("workspace defaults = %+v", cfg)
 	}
 
 	invalid := []WorkspaceConfig{
 		{ID: "../repo"},
+		{ID: "repo", Type: "remote-ish"},
 		{ID: "repo", Mode: "live"},
 		{ID: "repo", WriteMode: "unsafe"},
 		{ID: "repo", MaxBytes: 513 << 20},

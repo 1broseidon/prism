@@ -190,8 +190,9 @@ func (m *Manager) handleSpawn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.Workspace != nil && req.WorkspaceSnapshot == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "workspace_snapshot is required when workspace is set"})
+	workspaceCfg := config.NormalizeWorkspaceConfig(req.Workspace)
+	if workspaceCfg != nil && workspaceCfg.Type == config.WorkspaceTypeProxied && req.WorkspaceSnapshot == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "workspace_snapshot is required for proxied workspaces"})
 		return
 	}
 

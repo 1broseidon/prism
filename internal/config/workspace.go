@@ -8,6 +8,13 @@ import (
 )
 
 const (
+	// WorkspaceTypeProxied syncs through a local workspace bridge.
+	WorkspaceTypeProxied = "proxied"
+	// WorkspaceTypeVirtual stores durable workspace state on the Prism server.
+	WorkspaceTypeVirtual = "virtual"
+	// WorkspaceTypeEphemeral stores temporary workspace state on the Prism server.
+	WorkspaceTypeEphemeral = "ephemeral"
+
 	// WorkspaceModeSnapshot copies a local workspace into the sandbox.
 	WorkspaceModeSnapshot = "snapshot"
 
@@ -29,6 +36,7 @@ var workspaceConfigIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // through staged or auto-applied changes.
 type WorkspaceConfig struct {
 	ID        string   `json:"id,omitempty"`
+	Type      string   `json:"type,omitempty"`
 	Mode      string   `json:"mode,omitempty"`
 	WriteMode string   `json:"write_mode,omitempty"`
 	Include   []string `json:"include,omitempty"`
@@ -43,11 +51,15 @@ func NormalizeWorkspaceConfig(input *WorkspaceConfig) *WorkspaceConfig {
 	}
 	out := &WorkspaceConfig{
 		ID:        strings.TrimSpace(input.ID),
+		Type:      strings.TrimSpace(input.Type),
 		Mode:      strings.TrimSpace(input.Mode),
 		WriteMode: strings.TrimSpace(input.WriteMode),
 		Include:   cleanStringSlice(input.Include),
 		Exclude:   cleanStringSlice(input.Exclude),
 		MaxBytes:  input.MaxBytes,
+	}
+	if out.Type == "" {
+		out.Type = WorkspaceTypeProxied
 	}
 	if out.Mode == "" {
 		out.Mode = WorkspaceModeSnapshot
@@ -69,6 +81,11 @@ func ValidateWorkspaceConfig(input *WorkspaceConfig) error {
 	cfg := NormalizeWorkspaceConfig(input)
 	if !workspaceConfigIDRE.MatchString(cfg.ID) {
 		return errors.New("workspace.id must be 1-64 chars of [A-Za-z0-9_.-]")
+	}
+	switch cfg.Type {
+	case WorkspaceTypeProxied, WorkspaceTypeVirtual, WorkspaceTypeEphemeral:
+	default:
+		return fmt.Errorf("workspace.type must be %q, %q, or %q", WorkspaceTypeProxied, WorkspaceTypeVirtual, WorkspaceTypeEphemeral)
 	}
 	if cfg.Mode != WorkspaceModeSnapshot {
 		return fmt.Errorf("workspace.mode must be %q", WorkspaceModeSnapshot)

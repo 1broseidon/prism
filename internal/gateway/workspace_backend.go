@@ -27,6 +27,9 @@ func (g *Gateway) snapshotWorkspaceForBackend(ctx context.Context, cfg *config.W
 	if cfg == nil {
 		return nil, nil
 	}
+	if cfg.Type != config.WorkspaceTypeProxied {
+		return nil, nil
+	}
 	snap, err := g.SnapshotWorkspace(ctx, cfg.ID, workspaceSnapshotPolicy(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("snapshot workspace %q: %w", cfg.ID, err)
@@ -76,6 +79,9 @@ func (g *Gateway) ApplyBackendWorkspaceChanges(ctx context.Context, id string) (
 	cfg := pb.workspaceConfig()
 	if cfg == nil {
 		return nil, fmt.Errorf("backend %q has no workspace configured", id)
+	}
+	if cfg.Type != config.WorkspaceTypeProxied {
+		return nil, fmt.Errorf("backend %q workspace %q is %s and does not apply changes to a local bridge", id, cfg.ID, cfg.Type)
 	}
 	changes, err := g.BackendWorkspaceChanges(ctx, id, true)
 	if err != nil {
@@ -144,6 +150,9 @@ func (g *Gateway) syncWorkspaceAfterToolCall(ctx context.Context, backendID stri
 	}
 	workspaceCfg := config.NormalizeWorkspaceConfig(cfg.Workspace)
 	if workspaceCfg == nil || workspaceCfg.WriteMode == config.WorkspaceWriteSandboxOnly {
+		return
+	}
+	if workspaceCfg.Type != config.WorkspaceTypeProxied {
 		return
 	}
 	changes, err := g.BackendWorkspaceChanges(ctx, backendID, true)

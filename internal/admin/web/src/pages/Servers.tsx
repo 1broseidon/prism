@@ -324,7 +324,9 @@ function AddBackend({
   const [cmd, setCmd] = useState("");
   const [cred, setCred] = useState<CredFormState>(emptyCred());
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [workspace, setWorkspace] = useState<WorkspaceConfig>({ write_mode: "stage" });
+  const [workspace, setWorkspace] = useState<WorkspaceConfig>({
+    write_mode: "stage",
+  });
   const [error, setError] = useState<string | null>(null);
   const [oauth, setOauth] = useState<{
     backendId: string;
@@ -375,12 +377,17 @@ function AddBackend({
     const body: AddBackendBody = target.startsWith("http")
       ? { url: target }
       : { command: target };
-    if (!target.startsWith("http") && workspace.id) {
+    if (!target.startsWith("http") && workspace.id && workspace.type) {
+      const workspaceType = workspace.type;
       body.workspace = {
         ...workspace,
+        type: workspaceType,
         mode: "snapshot",
         max_bytes: workspace.max_bytes || 33554432,
       };
+      if (workspaceType !== "proxied") {
+        body.workspace.write_mode = "sandbox_only";
+      }
     }
     const credInput = buildCredInput(cred);
     if (credInput) body.credential = credInput;
@@ -497,27 +504,70 @@ function AddBackend({
         </select>
         <CredFields state={cred} onChange={setCred} />
       </div>
-      {!cmd.trim().startsWith("http") && workspaces.length > 0 && (
+      {!cmd.trim().startsWith("http") && (
         <div class="inline-form server-workspace-form">
           <select
-            value={workspace.id || ""}
-            onChange={(e) =>
-              setWorkspace({
-                ...workspace,
-                id: (e.target as HTMLSelectElement).value || undefined,
-              })
-            }
+            value={workspace.type || ""}
+            onChange={(e) => {
+              const nextType = (e.target as HTMLSelectElement)
+                .value as WorkspaceConfig["type"] | "";
+              setWorkspace(
+                nextType
+                  ? {
+                      type: nextType,
+                      write_mode: workspace.write_mode || "stage",
+                      id: undefined,
+                    }
+                  : { write_mode: workspace.write_mode || "stage" },
+              );
+            }}
           >
-            <option value="">no workspace snapshot</option>
-            {workspaces.map((ws) => (
-              <option value={ws.id} key={ws.id}>
-                workspace: {ws.id}
-              </option>
-            ))}
+            <option value="">no workspace</option>
+            <option value="proxied">local synced workspace</option>
+            <option value="virtual">remote persistent workspace</option>
+            <option value="ephemeral">temporary scratch workspace</option>
           </select>
+          {workspace.type === "proxied" ? (
+            <select
+              value={workspace.id || ""}
+              disabled={workspaces.length === 0}
+              onChange={(e) =>
+                setWorkspace({
+                  ...workspace,
+                  type: "proxied",
+                  id: (e.target as HTMLSelectElement).value || undefined,
+                })
+              }
+            >
+              <option value="">
+                {workspaces.length === 0
+                  ? "no local bridges connected"
+                  : "select workspace"}
+              </option>
+              {workspaces.map((ws) => (
+                <option value={ws.id} key={ws.id}>
+                  {ws.id}
+                </option>
+              ))}
+            </select>
+          ) : workspace.type ? (
+            <input
+              type="text"
+              class="config-input"
+              value={workspace.id || ""}
+              placeholder="workspace id"
+              spellcheck={false}
+              onInput={(e) =>
+                setWorkspace({
+                  ...workspace,
+                  id: (e.target as HTMLInputElement).value || undefined,
+                })
+              }
+            />
+          ) : null}
           <select
             value={workspace.write_mode || "stage"}
-            disabled={!workspace.id}
+            disabled={!workspace.id || workspace.type !== "proxied"}
             onChange={(e) =>
               setWorkspace({
                 ...workspace,
@@ -531,7 +581,11 @@ function AddBackend({
             <option value="auto_apply">auto-apply allowed paths</option>
           </select>
           <span class="hint-text">
-            sandbox gets a copy at /workspace; local writes go through policy
+            {workspace.type === "proxied"
+              ? "sandbox gets a copy at /workspace; local writes go through policy"
+              : workspace.type
+                ? "workspace lives on Prism server storage and does not sync locally"
+                : "run without an attached workspace"}
           </span>
         </div>
       )}

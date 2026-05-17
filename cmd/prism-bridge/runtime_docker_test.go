@@ -189,7 +189,7 @@ func TestDockerSpecMountsWorkspaceSnapshotVolume(t *testing.T) { //nolint:gocycl
 	if !reflect.DeepEqual([]string(spec.hostCfg.CapAdd), []string{"CHOWN", "SETGID", "SETUID"}) {
 		t.Fatalf("cap add = %v", spec.hostCfg.CapAdd)
 	}
-	if spec.volumeName != "prism-managed-brainfile-workspace" {
+	if spec.volumeName != "prism-managed-workspace-repo" {
 		t.Fatalf("volume = %q", spec.volumeName)
 	}
 	if spec.cacheVolume != "prism-managed-brainfile-cache" {
@@ -214,6 +214,71 @@ func TestDockerSpecMountsWorkspaceSnapshotVolume(t *testing.T) { //nolint:gocycl
 	if !envContains(spec.containerCfg.Env, "NPM_CONFIG_PREFER_OFFLINE=true") ||
 		!envContains(spec.containerCfg.Env, "NPM_CONFIG_IGNORE_SCRIPTS=true") {
 		t.Fatalf("package-manager hardening env missing: %v", spec.containerCfg.Env)
+	}
+}
+
+func TestDockerSpecSharesWorkspaceVolumeByWorkspaceID(t *testing.T) {
+	runtime := &DockerRuntime{
+		defaultImage: "prism-bridge:full",
+		images:       map[string]string{"full": "prism-bridge:full"},
+		labelPrefix:  "prism.bridge",
+		namePrefix:   "prism-managed-",
+	}
+	workspace := &config.WorkspaceConfig{
+		ID:        "repo",
+		Mode:      config.WorkspaceModeSnapshot,
+		WriteMode: config.WorkspaceWriteStage,
+	}
+
+	brainfile := runtime.buildSpec(&SpawnRequest{
+		ID:                "brainfile",
+		Command:           "npx",
+		Args:              []string{"@brainfile/cli", "mcp"},
+		Workspace:         workspace,
+		WorkspaceSnapshot: &ws.Snapshot{BaseID: "base", Archive: []byte("archive")},
+	})
+	recoil := runtime.buildSpec(&SpawnRequest{
+		ID:                "recoil",
+		Command:           "npx",
+		Args:              []string{"recoil", "mcp"},
+		Workspace:         workspace,
+		WorkspaceSnapshot: &ws.Snapshot{BaseID: "base", Archive: []byte("archive")},
+	})
+
+	if brainfile.volumeName != recoil.volumeName {
+		t.Fatalf("workspace volume should be shared, got %q and %q", brainfile.volumeName, recoil.volumeName)
+	}
+	if brainfile.cacheVolume == recoil.cacheVolume {
+		t.Fatalf("package cache volumes should remain per backend, got %q", brainfile.cacheVolume)
+	}
+}
+
+func TestDockerSpecMountsVirtualWorkspaceWithoutSnapshot(t *testing.T) {
+	runtime := &DockerRuntime{
+		defaultImage: "prism-bridge:full",
+		images:       map[string]string{"full": "prism-bridge:full"},
+		labelPrefix:  "prism.bridge",
+		namePrefix:   "prism-managed-",
+	}
+
+	spec := runtime.buildSpec(&SpawnRequest{
+		ID:      "notes",
+		Command: "npx",
+		Args:    []string{"team-notes", "mcp"},
+		Workspace: &config.WorkspaceConfig{
+			ID:   "team-a",
+			Type: config.WorkspaceTypeVirtual,
+		},
+	})
+
+	if spec.volumeName != "prism-managed-workspace-team-a" {
+		t.Fatalf("volume = %q", spec.volumeName)
+	}
+	if spec.containerCfg.WorkingDir != "/workspace" {
+		t.Fatalf("working dir = %q", spec.containerCfg.WorkingDir)
+	}
+	if spec.containerCfg.Labels["prism.bridge.workspace_type"] != config.WorkspaceTypeVirtual {
+		t.Fatalf("workspace type label = %q", spec.containerCfg.Labels["prism.bridge.workspace_type"])
 	}
 }
 
