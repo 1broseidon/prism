@@ -30,6 +30,41 @@ type kvStore interface {
 	List(prefix string) ([]string, error)
 }
 
+// PolicyTrace captures the workspace-resolution decision attached to a tool
+// call. Emitted in audit entries so operators can answer "why did this call
+// land on workspace X?" without diffing state.
+type PolicyTrace struct {
+	WorkspaceID string             `json:"workspace_id,omitempty"`
+	Selector    string             `json:"selector,omitempty"`
+	Source      string             `json:"source,omitempty"`
+	Layers      []PolicyTraceLayer `json:"layers,omitempty"`
+}
+
+// PolicyTraceLayer is one tier of the resolution chain — same shape as the
+// gateway's ResolutionLayerTrace but kept in audit so neither side depends
+// on the other's types.
+type PolicyTraceLayer struct {
+	Source   string `json:"source"`
+	Selector string `json:"selector,omitempty"`
+}
+
+type policyTraceCtxKey struct{}
+
+// ContextWithPolicyTrace attaches a resolution trace to the context. The
+// gateway calls this before LogCall so the trace lands in the audit entry.
+func ContextWithPolicyTrace(ctx context.Context, t *PolicyTrace) context.Context {
+	if t == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, policyTraceCtxKey{}, t)
+}
+
+// PolicyTraceFromContext returns the trace previously attached, or nil.
+func PolicyTraceFromContext(ctx context.Context) *PolicyTrace {
+	t, _ := ctx.Value(policyTraceCtxKey{}).(*PolicyTrace)
+	return t
+}
+
 // Entry is a single structured audit log record.
 type Entry struct {
 	// Timestamp is the UTC time the entry was recorded (RFC 3339).
@@ -57,6 +92,11 @@ type Entry struct {
 	// CredInjected is true if Prism injected a backend credential for this call.
 	// The credential value itself is never logged.
 	CredInjected bool `json:"cred_injected"`
+	// PolicyTrace captures the workspace policy resolution for this call —
+	// which workspace was chosen, by which layer, and the full layer chain.
+	// Populated from context (audit.ContextWithPolicyTrace). Nil when the
+	// call wasn't workspace-routed.
+	PolicyTrace *PolicyTrace `json:"policy_trace,omitempty"`
 }
 
 const (
@@ -224,6 +264,9 @@ func (l *Logger) LogCall(ctx context.Context, namespace, tool, backend string, a
 		entry.Subject = claims.Subject
 		entry.ClientID = claims.ClientID
 		entry.PrismID = claims.PrismID
+	}
+	if trace := PolicyTraceFromContext(ctx); trace != nil {
+		entry.PolicyTrace = trace
 	}
 
 	if callErr != nil {

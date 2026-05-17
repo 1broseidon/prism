@@ -123,6 +123,18 @@ export interface AgentStorageResolution {
   deny_reason?: string;
 }
 
+export interface PolicyTraceLayer {
+  source: string;
+  selector?: string;
+}
+
+export interface PolicyTrace {
+  workspace_id?: string;
+  selector?: string;
+  source?: string;
+  layers?: PolicyTraceLayer[];
+}
+
 export interface AuditEvent {
   ts: string;
   client_id: string;
@@ -130,6 +142,7 @@ export interface AuditEvent {
   tool: string;
   allowed: boolean;
   latency_ms: number;
+  policy_trace?: PolicyTrace;
 }
 
 export interface CredentialInput {

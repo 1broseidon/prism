@@ -141,3 +141,53 @@ func TestLogCall_NilLogger_DoesNotPanic(t *testing.T) {
 type testErr struct{ msg string }
 
 func (e *testErr) Error() string { return e.msg }
+
+func TestLogCall_PolicyTraceFromContext(t *testing.T) {
+	var buf bytes.Buffer
+	l := audit.New(&buf)
+
+	trace := &audit.PolicyTrace{
+		WorkspaceID: "repo-a",
+		Selector:    "agent",
+		Source:      "defaults",
+		Layers: []audit.PolicyTraceLayer{
+			{Source: "agent:prism-x"},
+			{Source: "defaults", Selector: "agent"},
+		},
+	}
+	ctx := audit.ContextWithPolicyTrace(context.Background(), trace)
+
+	l.LogCall(ctx, "Brainfile", "list_tasks", "brainfile", true, false, 42, nil)
+
+	var entry audit.Entry
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, buf.String())
+	}
+	if entry.PolicyTrace == nil {
+		t.Fatalf("expected policy_trace in entry, got nil; raw=%s", buf.String())
+	}
+	if entry.PolicyTrace.WorkspaceID != "repo-a" {
+		t.Errorf("WorkspaceID = %q, want repo-a", entry.PolicyTrace.WorkspaceID)
+	}
+	if entry.PolicyTrace.Selector != "agent" || entry.PolicyTrace.Source != "defaults" {
+		t.Errorf("selector/source = %q/%q, want agent/defaults",
+			entry.PolicyTrace.Selector, entry.PolicyTrace.Source)
+	}
+	if len(entry.PolicyTrace.Layers) != 2 {
+		t.Errorf("layers = %d, want 2", len(entry.PolicyTrace.Layers))
+	}
+}
+
+func TestLogCall_NoPolicyTraceWhenAbsent(t *testing.T) {
+	var buf bytes.Buffer
+	l := audit.New(&buf)
+	l.LogCall(context.Background(), "ns", "tool", "be", true, false, 0, nil)
+
+	var entry audit.Entry
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if entry.PolicyTrace != nil {
+		t.Errorf("expected no policy_trace when context lacks one, got %+v", entry.PolicyTrace)
+	}
+}

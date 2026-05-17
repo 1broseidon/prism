@@ -1003,6 +1003,9 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 	if requestedWorkspaceID == "" {
 		callerClaims := auth.ClaimsFromContext(ctx)
 		resolvedCfg, res, denyReason := g.ResolveBackendWorkspace(callerClaims, b)
+		// Attach the trace early so any subsequent LogCall (including the
+		// denial below) carries the policy decision in the audit event.
+		ctx = audit.ContextWithPolicyTrace(ctx, auditTraceFromResolution(res))
 		if denyReason != "" {
 			span.SetAttributes(attribute.Bool("tool.allowed", false))
 			span.SetStatus(codes.Error, "workspace policy denied")
@@ -1048,6 +1051,7 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 			Source:      "_prism_workspace",
 			WorkspaceID: requestedWorkspaceID,
 		}
+		ctx = audit.ContextWithPolicyTrace(ctx, auditTraceFromResolution(resolution))
 	}
 	if effectiveWorkspaceID != "" {
 		span.SetAttributes(
@@ -1426,6 +1430,30 @@ func (g *Gateway) applyWorkspaceSelector(
 	default:
 		return nil, res, fmt.Sprintf("unknown workspace selector %q", res.Selector)
 	}
+}
+
+// auditTraceFromResolution converts the gateway's internal trace structure
+// into the audit package's shape so the audit log carries the same chain
+// the policy UI does.
+func auditTraceFromResolution(res BackendWorkspaceResolution) *audit.PolicyTrace {
+	if res.Selector == "" && res.Source == "" && len(res.Layers) == 0 && res.WorkspaceID == "" {
+		return nil
+	}
+	out := &audit.PolicyTrace{
+		WorkspaceID: res.WorkspaceID,
+		Selector:    res.Selector,
+		Source:      res.Source,
+	}
+	if len(res.Layers) > 0 {
+		out.Layers = make([]audit.PolicyTraceLayer, 0, len(res.Layers))
+		for _, l := range res.Layers {
+			out.Layers = append(out.Layers, audit.PolicyTraceLayer{
+				Source:   l.Source,
+				Selector: l.Selector,
+			})
+		}
+	}
+	return out
 }
 
 func (g *Gateway) resolveIDSelector(
