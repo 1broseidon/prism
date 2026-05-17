@@ -482,9 +482,9 @@ function ActivitySection({ agent }: { agent: Agent }) {
         </span>
         <a
           class="section-btn"
-          href={`/audit?agent=${encodeURIComponent(agent.client_id)}`}
+          href={`/activity?agent=${encodeURIComponent(agent.client_id)}`}
         >
-          view in audit
+          view in activity
         </a>
       </div>
       {scoped.length === 0 ? (

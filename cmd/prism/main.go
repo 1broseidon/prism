@@ -205,6 +205,7 @@ func runServe() {
 
 	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback, adminAuthHolder)
 	adminAPI.SetBackendPolicyTraceProvider(&backendPolicyTraceProvider{gw: gw, srv: authSrv})
+	adminAPI.SetWorkspaceReversePolicyLookup(&workspaceReverseLookup{srv: authSrv})
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -425,6 +426,27 @@ func (m *authServerAgentManager) RemoveAgent(clientID string) bool {
 
 func (m *authServerAgentManager) RemoveStaleAgents() int {
 	return m.srv.RemoveStaleAgents(7 * 24 * time.Hour)
+}
+
+// workspaceReverseLookup implements admin.WorkspaceReversePolicyLookup by
+// scanning every persisted policy layer in the authserver for entries that
+// pin the given workspace id.
+type workspaceReverseLookup struct {
+	srv *authserver.Server
+}
+
+func (w *workspaceReverseLookup) WorkspacePolicyReferences(workspaceID string) []admin.WorkspacePolicyReference {
+	if w.srv == nil {
+		return nil
+	}
+	refs := w.srv.WorkspacePolicyReferences(workspaceID)
+	out := make([]admin.WorkspacePolicyReference, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, admin.WorkspacePolicyReference{
+			Source: r.Source, BackendID: r.BackendID, Selector: r.Selector,
+		})
+	}
+	return out
 }
 
 // backendPolicyTraceProvider implements admin.BackendPolicyTraceProvider by

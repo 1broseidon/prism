@@ -86,7 +86,7 @@ export function Overview() {
         <Tile
           label="last hour"
           value={recentCalls.length}
-          href="/audit"
+          href="/activity"
           sub={
             recentCalls.length === 0
               ? "no calls"
@@ -141,7 +141,7 @@ function McpConnectBanner() {
             <button
               type="button"
               class="section-btn"
-              onClick={() => loc.route("/settings/general")}
+              onClick={() => loc.route("/settings/network")}
             >
               settings
             </button>
@@ -220,7 +220,7 @@ function RecentActivity({
       <div class="section-header">
         <span class="section-title">activity</span>
         {ev.length > 0 && (
-          <a class="section-btn" href="/audit">
+          <a class="section-btn" href="/activity">
             view all
           </a>
         )}

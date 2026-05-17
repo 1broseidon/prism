@@ -72,7 +72,7 @@ function toPayload(f: FormState, secretIsSet: boolean): AdminAuthPutPayload {
   };
 }
 
-export function SettingsAuthentication() {
+export function SettingsSignIn() {
   const [view, setView] = useState<AdminAuthView | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm());
   const [dirty, setDirty] = useState(false);
@@ -179,7 +179,7 @@ export function SettingsAuthentication() {
       <div>
         <div class="page-header">
           <div>
-            <div class="page-title">authentication</div>
+            <div class="page-title">sign-in</div>
           </div>
         </div>
         <div class="empty-state">loading…</div>
@@ -195,7 +195,7 @@ export function SettingsAuthentication() {
     <div>
       <div class="page-header">
         <div>
-          <div class="page-title">authentication</div>
+          <div class="page-title">sign-in</div>
           <div class="page-subtitle">
             console sign-in. when disabled, the console runs open.
           </div>

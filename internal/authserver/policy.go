@@ -211,6 +211,71 @@ func (s *Server) resolvePolicy(p *AgentPolicy) []string {
 	return scopes
 }
 
+// WorkspacePolicyReference describes one policy entry that targets a
+// specific workspace via an "id:<workspace-id>" selector. Sources are
+// labeled like resolution trace sources: "defaults", "group:<name>",
+// "agent:<prism_id>".
+type WorkspacePolicyReference struct {
+	Source    string `json:"source"`
+	BackendID string `json:"backend_id"`
+	Selector  string `json:"selector"`
+}
+
+// WorkspacePolicyReferences scans every layer of stored backend policies
+// and returns the ones that pin to the given workspace id via
+// "id:<workspace-id>". The "agent" selector (which resolves by ownership at
+// call time) is not included — that lookup is dynamic and lives in the
+// gateway's resolution path.
+func (s *Server) WorkspacePolicyReferences(workspaceID string) []WorkspacePolicyReference {
+	target := "id:" + workspaceID
+	out := make([]WorkspacePolicyReference, 0)
+
+	// Defaults
+	for backendID, rule := range s.DefaultBackendPolicies() {
+		if rule.WorkspaceSelector == target {
+			out = append(out, WorkspacePolicyReference{
+				Source: "defaults", BackendID: backendID, Selector: rule.WorkspaceSelector,
+			})
+		}
+	}
+
+	// Groups
+	for _, g := range s.ListGroups() {
+		for backendID, rule := range g.BackendPolicies {
+			if rule.WorkspaceSelector == target {
+				out = append(out, WorkspacePolicyReference{
+					Source: "group:" + g.Name, BackendID: backendID, Selector: rule.WorkspaceSelector,
+				})
+			}
+		}
+	}
+
+	// Agents
+	if s.store != nil {
+		keys, err := s.store.List(policyKeyPrefix)
+		if err == nil {
+			for _, key := range keys {
+				prismID := strings.TrimPrefix(key, policyKeyPrefix)
+				if prismID == "" {
+					continue
+				}
+				policy, perr := s.GetAgentPolicy(prismID)
+				if perr != nil || policy == nil {
+					continue
+				}
+				for backendID, rule := range policy.BackendPolicies {
+					if rule.WorkspaceSelector == target {
+						out = append(out, WorkspacePolicyReference{
+							Source: "agent:" + prismID, BackendID: backendID, Selector: rule.WorkspaceSelector,
+						})
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
 // ResolveBackendPolicy returns the stacked per-backend rules for a caller,
 // ordered from highest priority (agent) to lowest (defaults). Satisfies
 // auth.BackendPolicyResolver.
@@ -503,9 +568,10 @@ func (s *Server) ListGroups() []GroupInfo {
 	merged := make(map[string]GroupInfo)
 	for name, g := range configGroups {
 		merged[name] = GroupInfo{
-			Name:   name,
-			Scopes: g.Scopes,
-			Source: "config",
+			Name:            name,
+			Scopes:          g.Scopes,
+			Source:          "config",
+			BackendPolicies: g.BackendPolicies,
 		}
 	}
 
@@ -524,9 +590,10 @@ func (s *Server) ListGroups() []GroupInfo {
 					continue
 				}
 				merged[name] = GroupInfo{
-					Name:   name,
-					Scopes: g.Scopes,
-					Source: "dynamic",
+					Name:            name,
+					Scopes:          g.Scopes,
+					Source:          "dynamic",
+					BackendPolicies: g.BackendPolicies,
 				}
 			}
 		}

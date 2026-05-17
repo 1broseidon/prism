@@ -28,7 +28,7 @@ export function Audit() {
   const ag = agents.data.value || [];
   const loc = useLocation();
 
-  // Initial filter state from URL params (e.g. /audit?namespace=exa)
+  // Initial filter state from URL params (e.g. /activity?namespace=exa)
   const initialAgent = loc.query?.agent || "";
   const initialNamespace = loc.query?.namespace || "";
 
@@ -45,8 +45,8 @@ export function Audit() {
     if (filterAgent) params.set("agent", filterAgent);
     if (filterNamespace) params.set("namespace", filterNamespace);
     const next = params.toString();
-    const url = next ? `/audit?${next}` : "/audit";
-    if (loc.path === "/audit" && loc.url !== url) {
+    const url = next ? `/activity?${next}` : "/activity";
+    if (loc.path === "/activity" && loc.url !== url) {
       window.history.replaceState(null, "", url);
     }
   }, [filterAgent, filterNamespace]);
@@ -129,7 +129,7 @@ export function Audit() {
     <div>
       <div class="page-header">
         <div>
-          <div class="page-title">audit</div>
+          <div class="page-title">activity</div>
           <div class="page-subtitle">
             {filtered.length} of {ev.length} events ·{" "}
             {RANGE_LABELS[range]} window

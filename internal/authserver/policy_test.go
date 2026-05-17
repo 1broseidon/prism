@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/1broseidon/prism/internal/auth"
 	"github.com/1broseidon/prism/internal/store"
 )
 
@@ -407,4 +408,56 @@ func parseJWTClaims(t *testing.T, token string) map[string]any {
 		t.Fatalf("unmarshal claims: %v", err)
 	}
 	return claims
+}
+
+func TestWorkspacePolicyReferencesFindsAllLayers(t *testing.T) {
+	srv, _ := newTestServerWithStore(t, map[string]GroupConfig{
+		"engineering": {
+			Scopes: []string{"brainfile:*"},
+			BackendPolicies: map[string]auth.BackendPolicy{
+				"brainfile": {WorkspaceSelector: "id:shared-team"},
+			},
+		},
+		"other": {
+			Scopes: []string{"linear:*"},
+			BackendPolicies: map[string]auth.BackendPolicy{
+				"linear": {WorkspaceSelector: "id:not-this-one"},
+			},
+		},
+	}, nil)
+
+	// Defaults layer — a pin.
+	if err := srv.SetDefaultBackendPolicies(map[string]auth.BackendPolicy{
+		"brainfile": {WorkspaceSelector: "id:shared-team"},
+	}); err != nil {
+		t.Fatalf("set defaults: %v", err)
+	}
+
+	// Agent layer — pin + non-pin (agent selector) which must NOT show up.
+	if err := srv.SetAgentPolicy("prism-zzz", &AgentPolicy{
+		Groups: []string{"engineering"},
+		BackendPolicies: map[string]auth.BackendPolicy{
+			"brainfile": {WorkspaceSelector: "id:shared-team"},
+			"linear":    {WorkspaceSelector: "agent"},
+		},
+	}); err != nil {
+		t.Fatalf("set agent policy: %v", err)
+	}
+
+	refs := srv.WorkspacePolicyReferences("shared-team")
+	bySource := map[string]bool{}
+	for _, r := range refs {
+		bySource[r.Source+"|"+r.BackendID] = true
+	}
+	for _, key := range []string{"defaults|brainfile", "group:engineering|brainfile", "agent:prism-zzz|brainfile"} {
+		if !bySource[key] {
+			t.Errorf("missing reference %q in %+v", key, refs)
+		}
+	}
+	if bySource["group:other|linear"] {
+		t.Errorf("should not include unrelated group/backend: %+v", refs)
+	}
+	if bySource["agent:prism-zzz|linear"] {
+		t.Errorf("agent-selector entries should be excluded: %+v", refs)
+	}
 }

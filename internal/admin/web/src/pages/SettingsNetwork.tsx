@@ -6,7 +6,7 @@ import { mcpURLFromBase } from "../util/mcp";
 import { Field } from "../components/Field";
 import type { NetworkSettings } from "../api/types";
 
-export function SettingsGeneral() {
+export function SettingsNetwork() {
   const mutate = canMutate();
   const [loaded, setLoaded] = useState<NetworkSettings | null>(null);
   const [adminURL, setAdminURL] = useState("");
@@ -47,7 +47,7 @@ export function SettingsGeneral() {
     <div>
       <div class="page-header">
         <div>
-          <div class="page-title">general</div>
+          <div class="page-title">network</div>
           <div class="page-subtitle">
             how prism advertises itself to oauth providers and clients
           </div>

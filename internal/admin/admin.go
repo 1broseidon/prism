@@ -72,6 +72,7 @@ type API struct {
 	oauthCallbackHandler http.Handler      // optional: gateway's OAuth callback handler
 	auth                 *adminauth.Holder // holder for live admin auth service; zero-value = open
 	traceProvider        BackendPolicyTraceProvider
+	workspaceLookup      WorkspaceReversePolicyLookup
 	adminProbeLimiter    *adminProbeRateLimiter
 	startedAt            time.Time
 }
@@ -81,6 +82,13 @@ type API struct {
 // endpoint returns 503.
 func (a *API) SetBackendPolicyTraceProvider(p BackendPolicyTraceProvider) {
 	a.traceProvider = p
+}
+
+// SetWorkspaceReversePolicyLookup wires the lookup that powers
+// GET /workspaces/{id}. Optional; without it the endpoint omits the
+// references list.
+func (a *API) SetWorkspaceReversePolicyLookup(l WorkspaceReversePolicyLookup) {
+	a.workspaceLookup = l
 }
 
 // NewAPI creates an admin API.
@@ -137,6 +145,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /groups/", a.session(http.HandlerFunc(a.handleGetGroup)))
 	mux.Handle("GET /defaults", a.session(http.HandlerFunc(a.handleDefaults)))
 	mux.Handle("GET /workspaces", a.session(http.HandlerFunc(a.handleListWorkspaces)))
+	mux.Handle("GET /workspaces/{id}", a.session(http.HandlerFunc(a.handleGetWorkspace)))
 	mux.Handle("GET /backends/", a.session(http.HandlerFunc(a.handleBackendSub)))
 
 	// Admin auth configuration — admin role required when admin auth is

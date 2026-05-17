@@ -286,6 +286,17 @@ export interface WorkspaceBackend {
   tools?: WorkspaceTool[];
 }
 
+export interface WorkspacePolicyReference {
+  source: string;
+  backend_id: string;
+  selector: string;
+}
+
+export interface WorkspaceDetail {
+  workspace: Workspace;
+  references: WorkspacePolicyReference[];
+}
+
 export type WorkspaceHealth =
   | "ok"
   | "quota_warn"

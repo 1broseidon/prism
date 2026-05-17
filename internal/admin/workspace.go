@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -87,6 +88,28 @@ type WorkspaceBridgeManager interface {
 	DisconnectWorkspace(id string) bool
 }
 
+// WorkspaceReversePolicyLookup returns policy entries that pin to a
+// workspace id via "id:<workspace-id>" selectors. Powers the admin
+// workspace detail page's "selected by" section.
+type WorkspaceReversePolicyLookup interface {
+	WorkspacePolicyReferences(workspaceID string) []WorkspacePolicyReference
+}
+
+// WorkspacePolicyReference mirrors authserver.WorkspacePolicyReference so
+// admin/web doesn't import authserver.
+type WorkspacePolicyReference struct {
+	Source    string `json:"source"`
+	BackendID string `json:"backend_id"`
+	Selector  string `json:"selector"`
+}
+
+// WorkspaceDetail bundles a single workspace's status with the policy
+// entries that explicitly target it.
+type WorkspaceDetail struct {
+	Workspace  WorkspaceStatus            `json:"workspace"`
+	References []WorkspacePolicyReference `json:"references"`
+}
+
 func (a *API) handleGetWorkspaceBridgeConfig(w http.ResponseWriter, _ *http.Request) {
 	mgr, ok := a.backendMgr.(WorkspaceBridgeManager)
 	if !ok {
@@ -115,6 +138,42 @@ func (a *API) handlePutWorkspaceBridgeConfig(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, http.StatusOK, view)
 }
+
+// handleGetWorkspace returns a single workspace's status plus the policy
+// entries that explicitly pin to it via id:<workspace-id>.
+func (a *API) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !workspaceDetailIDRE.MatchString(id) {
+		http.Error(w, "invalid workspace id", http.StatusBadRequest)
+		return
+	}
+	mgr, ok := a.backendMgr.(WorkspaceBridgeManager)
+	if !ok {
+		http.Error(w, "workspace bridge settings not available", http.StatusServiceUnavailable)
+		return
+	}
+	var found *WorkspaceStatus
+	list := mgr.ListWorkspaces()
+	for i := range list {
+		if list[i].ID == id {
+			found = &list[i]
+			break
+		}
+	}
+	if found == nil {
+		http.Error(w, "workspace not found", http.StatusNotFound)
+		return
+	}
+	detail := WorkspaceDetail{Workspace: *found}
+	if a.workspaceLookup != nil {
+		detail.References = a.workspaceLookup.WorkspacePolicyReferences(id)
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// workspaceDetailIDRE matches the same shape the gateway uses for ids;
+// kept private here to avoid an import cycle.
+var workspaceDetailIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
 func (a *API) handleListWorkspaces(w http.ResponseWriter, _ *http.Request) {
 	mgr, ok := a.backendMgr.(WorkspaceBridgeManager)

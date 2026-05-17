@@ -1397,8 +1397,8 @@ function ActivitySection({
             <span class="section-sub">· last call {fmtAge(lastCall.ts)}</span>
           )}
         </span>
-        <a class="section-btn" href={`/audit?namespace=${encodeURIComponent(ns)}`}>
-          view in audit
+        <a class="section-btn" href={`/activity?namespace=${encodeURIComponent(ns)}`}>
+          view in activity
         </a>
       </div>
       {scoped.length === 0 ? (

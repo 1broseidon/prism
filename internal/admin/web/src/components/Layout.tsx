@@ -16,18 +16,18 @@ interface NavItem {
 
 const CONSOLE_NAV: NavItem[] = [
   { href: "/", label: "Overview" },
-  { href: "/servers", label: "MCP Servers" },
+  { href: "/servers", label: "Servers" },
   { href: "/agents", label: "Agents" },
   { href: "/policy", label: "Policy" },
-  { href: "/audit", label: "Audit" },
+  { href: "/activity", label: "Activity" },
 ];
 
-const CONSOLE_FOOTER: NavItem[] = [{ href: "/settings/general", label: "Settings" }];
+const CONSOLE_FOOTER: NavItem[] = [{ href: "/settings/network", label: "Settings" }];
 
 const SETTINGS_NAV: NavItem[] = [
-  { href: "/settings/general", label: "General" },
+  { href: "/settings/network", label: "Network" },
   { href: "/settings/workspaces", label: "Workspaces" },
-  { href: "/settings/authentication", label: "Authentication" },
+  { href: "/settings/sign-in", label: "Sign-in" },
 ];
 
 const SETTINGS_FOOTER: NavItem[] = [{ href: "/", label: "← Back to Console" }];

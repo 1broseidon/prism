@@ -556,7 +556,12 @@ function WorkspaceRow({
     <div class="workspace-row">
       <div class="workspace-row-main">
         <div class="workspace-title">
-          <span>{ws.id}</span>
+          <a
+            href={`/settings/workspaces/${encodeURIComponent(ws.id)}`}
+            class="workspace-title-link"
+          >
+            {ws.id}
+          </a>
           <span class="pill pill-neutral">{ws.type || "proxied"}</span>
           <HealthPill health={ws.health_status} />
         </div>
