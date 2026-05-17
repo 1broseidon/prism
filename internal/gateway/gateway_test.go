@@ -281,6 +281,68 @@ func TestReconnectBackendUsesPersistedConfig(t *testing.T) {
 	}
 }
 
+func TestReconnectPersistedBackendsForWorkspace(t *testing.T) {
+	backendServer := mcp.NewServer(&mcp.Implementation{Name: "backend", Version: "0.1.0"}, nil)
+	backendServer.AddTool(&mcp.Tool{
+		Name:        "ping",
+		Description: "test tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "pong"}}}, nil
+	})
+	upstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return backendServer },
+		nil,
+	))
+	defer upstream.Close()
+
+	kv := store.NewMemoryStore()
+	brainfile, err := json.Marshal(&persistedBackend{
+		URL: upstream.URL,
+		Workspace: &config.WorkspaceConfig{
+			ID: "prism-repo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal brainfile backend: %v", err)
+	}
+	if setErr := kv.Set(backendKVPrefix+"Brainfile", brainfile); setErr != nil {
+		t.Fatalf("persist brainfile backend: %v", setErr)
+	}
+	other, err := json.Marshal(&persistedBackend{
+		URL: upstream.URL,
+		Workspace: &config.WorkspaceConfig{
+			ID: "other-repo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal other backend: %v", err)
+	}
+	if err := kv.Set(backendKVPrefix+"Other", other); err != nil {
+		t.Fatalf("persist other backend: %v", err)
+	}
+
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(kv)
+	gw.reconnectPersistedBackendsForWorkspace(context.Background(), "prism-repo")
+
+	status := gw.Status()
+	if len(status) != 2 {
+		t.Fatalf("status count = %d, want connected Brainfile plus disconnected Other: %+v", len(status), status)
+	}
+	byID := map[string]BackendStatus{}
+	for _, s := range status {
+		byID[s.ID] = s
+	}
+	if byID["Brainfile"].Disconnected || len(byID["Brainfile"].Tools) != 1 {
+		t.Fatalf("Brainfile was not restored: %+v", byID["Brainfile"])
+	}
+	if !byID["Other"].Disconnected {
+		t.Fatalf("Other workspace should stay disconnected: %+v", byID["Other"])
+	}
+}
+
 func TestUpdateBackendDisableAndEnablePreservesPersistedConfig(t *testing.T) {
 	backendServer := mcp.NewServer(&mcp.Implementation{Name: "backend", Version: "0.1.0"}, nil)
 	backendServer.AddTool(&mcp.Tool{

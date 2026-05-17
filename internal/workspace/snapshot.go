@@ -62,11 +62,12 @@ type SnapshotPolicy struct {
 
 // Snapshot is a compressed archive plus manifest for a workspace revision.
 type Snapshot struct {
-	BaseID     string     `json:"base_id"`
-	CreatedAt  time.Time  `json:"created_at"`
-	Archive    []byte     `json:"archive"`
-	Files      []FileInfo `json:"files"`
-	TotalBytes int64      `json:"total_bytes"`
+	BaseID      string     `json:"base_id"`
+	CreatedAt   time.Time  `json:"created_at"`
+	Archive     []byte     `json:"archive"`
+	Files       []FileInfo `json:"files"`
+	Directories []string   `json:"directories,omitempty"`
+	TotalBytes  int64      `json:"total_bytes"`
 }
 
 // FileInfo describes one file inside a workspace snapshot.
@@ -105,6 +106,11 @@ type archiveFile struct {
 	content []byte
 }
 
+type archiveEntries struct {
+	files       map[string]archiveFile
+	directories []string
+}
+
 // NormalizePolicy fills snapshot policy defaults.
 func NormalizePolicy(policy SnapshotPolicy) SnapshotPolicy {
 	out := policy
@@ -131,6 +137,7 @@ func CreateSnapshot(root string, policy SnapshotPolicy) (*Snapshot, error) { //n
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	files := make([]FileInfo, 0)
+	directories := make([]string, 0)
 	var total int64
 
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
@@ -155,7 +162,17 @@ func CreateSnapshot(root string, policy SnapshotPolicy) (*Snapshot, error) { //n
 			if !allowedByPolicy(rel, true, policy) {
 				return filepath.SkipDir
 			}
-			return nil
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			directories = append(directories, rel)
+			return tw.WriteHeader(&tar.Header{
+				Name:     rel,
+				Typeflag: tar.TypeDir,
+				Mode:     0o755,
+				ModTime:  info.ModTime(),
+			})
 		}
 		if !allowedByPolicy(rel, false, policy) {
 			return nil
@@ -205,12 +222,14 @@ func CreateSnapshot(root string, policy SnapshotPolicy) (*Snapshot, error) { //n
 		return nil, err
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	sort.Strings(directories)
 	return &Snapshot{
-		BaseID:     snapshotID(files),
-		CreatedAt:  time.Now().UTC(),
-		Archive:    buf.Bytes(),
-		Files:      files,
-		TotalBytes: total,
+		BaseID:      snapshotID(files, directories),
+		CreatedAt:   time.Now().UTC(),
+		Archive:     buf.Bytes(),
+		Files:       files,
+		Directories: directories,
+		TotalBytes:  total,
 	}, nil
 }
 
@@ -257,23 +276,26 @@ func ChangeSetFromArchives(baseID string, baseArchive, currentArchive []byte) (*
 
 // SnapshotFromArchive reconstructs snapshot metadata from an archive.
 func SnapshotFromArchive(archive []byte) (*Snapshot, error) {
-	filesMap, err := readArchive(archive)
+	entries, err := readArchiveEntries(archive)
 	if err != nil {
 		return nil, err
 	}
-	files := make([]FileInfo, 0, len(filesMap))
+	files := make([]FileInfo, 0, len(entries.files))
 	var total int64
-	for _, f := range filesMap {
+	for _, f := range entries.files {
 		files = append(files, f.info)
 		total += f.info.Size
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	directories := append([]string(nil), entries.directories...)
+	sort.Strings(directories)
 	return &Snapshot{
-		BaseID:     snapshotID(files),
-		CreatedAt:  time.Now().UTC(),
-		Archive:    archive,
-		Files:      files,
-		TotalBytes: total,
+		BaseID:      snapshotID(files, directories),
+		CreatedAt:   time.Now().UTC(),
+		Archive:     archive,
+		Files:       files,
+		Directories: directories,
+		TotalBytes:  total,
 	}, nil
 }
 
@@ -358,7 +380,7 @@ func gzipArchive(tarData []byte) ([]byte, error) {
 
 // TarForContainer rewrites a snapshot archive as an uncompressed Docker copy tar.
 func TarForContainer(snapshotArchive []byte, uid, gid int) (io.Reader, error) {
-	files, err := readArchive(snapshotArchive)
+	entries, err := readArchiveEntries(snapshotArchive)
 	if err != nil {
 		return nil, err
 	}
@@ -373,13 +395,25 @@ func TarForContainer(snapshotArchive []byte, uid, gid int) (io.Reader, error) {
 	}); err != nil {
 		return nil, err
 	}
-	paths := make([]string, 0, len(files))
-	for p := range files {
+	directories := directoriesForTar(entries)
+	for _, dir := range directories {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     dir,
+			Typeflag: tar.TypeDir,
+			Mode:     0o755,
+			Uid:      uid,
+			Gid:      gid,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	paths := make([]string, 0, len(entries.files))
+	for p := range entries.files {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
-		f := files[p]
+		f := entries.files[p]
 		hdr := &tar.Header{
 			Name: p,
 			Mode: 0o644,
@@ -401,31 +435,53 @@ func TarForContainer(snapshotArchive []byte, uid, gid int) (io.Reader, error) {
 }
 
 func readArchive(data []byte) (map[string]archiveFile, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(data))
+	entries, err := readArchiveEntries(data)
 	if err != nil {
 		return nil, err
+	}
+	return entries.files, nil
+}
+
+func readArchiveEntries(data []byte) (archiveEntries, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return archiveEntries{}, err
 	}
 	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
 	files := make(map[string]archiveFile)
+	directories := make(map[string]struct{})
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return archiveEntries{}, err
 		}
-		if hdr == nil || hdr.FileInfo().IsDir() || hdr.Typeflag != tar.TypeReg {
+		if hdr == nil {
 			continue
 		}
 		name := path.Clean(filepath.ToSlash(hdr.Name))
+		if hdr.FileInfo().IsDir() || hdr.Typeflag == tar.TypeDir {
+			if name == "." {
+				continue
+			}
+			if !safeRelPath(name) {
+				return archiveEntries{}, fmt.Errorf("unsafe archive path %q", hdr.Name)
+			}
+			directories[name] = struct{}{}
+			continue
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
 		if !safeRelPath(name) {
-			return nil, fmt.Errorf("unsafe archive path %q", hdr.Name)
+			return archiveEntries{}, fmt.Errorf("unsafe archive path %q", hdr.Name)
 		}
 		content, err := io.ReadAll(tr)
 		if err != nil {
-			return nil, err
+			return archiveEntries{}, err
 		}
 		sum := sha256.Sum256(content)
 		files[name] = archiveFile{
@@ -437,7 +493,12 @@ func readArchive(data []byte) (map[string]archiveFile, error) {
 			content: content,
 		}
 	}
-	return files, nil
+	dirs := make([]string, 0, len(directories))
+	for dir := range directories {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return archiveEntries{files: files, directories: dirs}, nil
 }
 
 func buildChange(p, typ, oldHash, newHash string, content []byte) Change {
@@ -482,15 +543,45 @@ func fileHash(target string) (hash string, exists bool, err error) {
 	return hex.EncodeToString(sum[:]), true, nil
 }
 
-func snapshotID(files []FileInfo) string {
+func snapshotID(files []FileInfo, directories []string) string {
 	h := sha256.New()
+	for _, dir := range directories {
+		_, _ = h.Write([]byte("dir"))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(dir))
+		_, _ = h.Write([]byte{0})
+	}
 	for _, f := range files {
+		_, _ = h.Write([]byte("file"))
+		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(f.Path))
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(f.SHA256))
 		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func directoriesForTar(entries archiveEntries) []string {
+	seen := make(map[string]struct{}, len(entries.directories)+len(entries.files))
+	for _, dir := range entries.directories {
+		if safeRelPath(dir) {
+			seen[dir] = struct{}{}
+		}
+	}
+	for filePath := range entries.files {
+		dir := path.Dir(filePath)
+		for dir != "." && safeRelPath(dir) {
+			seen[dir] = struct{}{}
+			dir = path.Dir(dir)
+		}
+	}
+	dirs := make([]string, 0, len(seen))
+	for dir := range seen {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return dirs
 }
 
 func cleanPatterns(patterns []string) []string {

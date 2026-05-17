@@ -1,6 +1,8 @@
 package workspace
 
 import (
+	"archive/tar"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,6 +97,41 @@ func TestApplyChangeSetDetectsConflict(t *testing.T) {
 	}
 }
 
+func TestCreateSnapshotPreservesEmptyDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".brainfile", "board"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".brainfile", "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, ".brainfile/brainfile.md", "---\nschema: https://brainfile.md/v2/board.json\n---\n")
+
+	snap, err := CreateSnapshot(root, SnapshotPolicy{Include: []string{".brainfile/**"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(snap.Directories, ".brainfile/board") {
+		t.Fatalf("snapshot directories = %+v, want .brainfile/board", snap.Directories)
+	}
+
+	tarReader, err := TarForContainer(snap.Archive, 123, 456)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := readContainerTar(t, tarReader)
+	boardEntry := entries[".brainfile/board"]
+	if boardEntry == nil {
+		t.Fatalf("container tar missing .brainfile/board: %+v", entries)
+	}
+	if boardEntry.Typeflag != tar.TypeDir {
+		t.Fatalf(".brainfile/board type = %d, want TypeDir", boardEntry.Typeflag)
+	}
+	if boardEntry.Uid != 123 || boardEntry.Gid != 456 {
+		t.Fatalf(".brainfile/board owner = %d:%d, want 123:456", boardEntry.Uid, boardEntry.Gid)
+	}
+}
+
 func writeFile(t *testing.T, root, rel, content string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))
@@ -104,4 +141,31 @@ func writeFile(t *testing.T, root, rel, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func readContainerTar(t *testing.T, r io.Reader) map[string]*tar.Header {
+	t.Helper()
+	tr := tar.NewReader(r)
+	entries := make(map[string]*tar.Header)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		copied := *hdr
+		entries[hdr.Name] = &copied
+	}
+	return entries
 }

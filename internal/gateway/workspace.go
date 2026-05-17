@@ -293,7 +293,7 @@ func (m *workspaceBridgeManager) handleRegister(w http.ResponseWriter, r *http.R
 	writeWorkspaceJSON(w, http.StatusOK, workspaceRegisterResponse{Status: "ok", Tools: registered})
 }
 
-func (m *workspaceBridgeManager) register(_ context.Context, req *workspaceRegisterRequest) ([]string, error) {
+func (m *workspaceBridgeManager) register(ctx context.Context, req *workspaceRegisterRequest) ([]string, error) {
 	if !workspaceIDRE.MatchString(req.WorkspaceID) {
 		return nil, errors.New("workspace_id must match ^[A-Za-z0-9_.-]{1,64}$")
 	}
@@ -388,6 +388,12 @@ func (m *workspaceBridgeManager) register(_ context.Context, req *workspaceRegis
 
 	sort.Strings(registered)
 	m.gateway.logger.Info("workspace bridge registered", "id", req.WorkspaceID, "tools", len(registered), "root", req.Root)
+	reconnectBase := context.WithoutCancel(ctx)
+	go func(workspaceID string) {
+		ctx, cancel := context.WithTimeout(reconnectBase, 2*time.Minute)
+		defer cancel()
+		m.gateway.reconnectPersistedBackendsForWorkspace(ctx, workspaceID)
+	}(req.WorkspaceID)
 	return registered, nil
 }
 

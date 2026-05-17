@@ -421,6 +421,49 @@ func (g *Gateway) LoadPersistedBackends(ctx context.Context) {
 	}
 }
 
+func (g *Gateway) reconnectPersistedBackendsForWorkspace(ctx context.Context, workspaceID string) {
+	if g.kvStore == nil || !workspaceIDRE.MatchString(workspaceID) {
+		return
+	}
+	keys, err := g.kvStore.List(backendKVPrefix)
+	if err != nil {
+		g.logger.Warn("failed to list persisted backends for workspace reconnect", "workspace", workspaceID, "error", err)
+		return
+	}
+	for _, key := range keys {
+		if ctx.Err() != nil {
+			return
+		}
+		backendID := strings.TrimPrefix(key, backendKVPrefix)
+		g.mu.RLock()
+		_, exists := g.backends[backendID]
+		g.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		data, err := g.kvStore.Get(key)
+		if err != nil {
+			g.logger.Warn("failed to read persisted workspace backend", "key", key, "workspace", workspaceID, "error", err)
+			continue
+		}
+		var pb persistedBackend
+		if err := json.Unmarshal(data, &pb); err != nil {
+			g.logger.Warn("failed to unmarshal persisted workspace backend", "key", key, "workspace", workspaceID, "error", err)
+			continue
+		}
+		workspaceCfg := pb.workspaceConfig()
+		if !pb.isEnabled() || workspaceCfg == nil || workspaceCfg.ID != workspaceID {
+			continue
+		}
+		if err := g.connectPersistedBackend(ctx, backendID, &pb); err != nil {
+			g.logger.Warn("failed to reconnect persisted workspace backend", "id", backendID, "workspace", workspaceID, "error", err)
+			continue
+		}
+		g.logger.Info("restored persisted workspace backend", "id", backendID, "workspace", workspaceID)
+	}
+}
+
 // ReconnectBackend reconnects a backend from persisted KV state without
 // deleting its stored config or OAuth tokens. It is used by the admin UI for
 // backends that failed startup restore or were temporarily unreachable.
