@@ -204,6 +204,7 @@ func runServe() {
 	}
 
 	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback, adminAuthHolder)
+	adminAPI.SetBackendPolicyTraceProvider(&backendPolicyTraceProvider{gw: gw, srv: authSrv})
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -386,11 +387,32 @@ func (m *authServerAgentManager) GetAgentByPrismID(prismID string) any {
 }
 
 func (m *authServerAgentManager) SetAgentPolicy(prismID string, groups, grant, deny []string) error {
-	return m.srv.SetAgentPolicy(prismID, &authserver.AgentPolicy{
+	// Preserve any existing BackendPolicies — the scope-policy endpoint
+	// shouldn't reset per-backend rules that were set independently.
+	existing, _ := m.srv.GetAgentPolicy(prismID)
+	policy := &authserver.AgentPolicy{
 		Groups: groups,
 		Grant:  grant,
 		Deny:   deny,
-	})
+	}
+	if existing != nil {
+		policy.BackendPolicies = existing.BackendPolicies
+	}
+	return m.srv.SetAgentPolicy(prismID, policy)
+}
+
+func (m *authServerAgentManager) SetAgentBackendPolicies(prismID string, policies map[string]auth.BackendPolicy) error {
+	existing, _ := m.srv.GetAgentPolicy(prismID)
+	policy := &authserver.AgentPolicy{}
+	if existing != nil {
+		policy = existing
+	}
+	if len(policies) == 0 {
+		policy.BackendPolicies = nil
+	} else {
+		policy.BackendPolicies = policies
+	}
+	return m.srv.SetAgentPolicy(prismID, policy)
 }
 
 func (m *authServerAgentManager) DeleteAgentPolicy(prismID string) error {
@@ -405,6 +427,48 @@ func (m *authServerAgentManager) RemoveStaleAgents() int {
 	return m.srv.RemoveStaleAgents(7 * 24 * time.Hour)
 }
 
+// backendPolicyTraceProvider implements admin.BackendPolicyTraceProvider by
+// synthesizing a Claims for the agent (PrismID + ClientID, plus persisted
+// policy.Groups so the group tier participates) and asking the gateway to
+// preview resolution across all known backends.
+type backendPolicyTraceProvider struct {
+	gw  *gateway.Gateway
+	srv *authserver.Server
+}
+
+func (p *backendPolicyTraceProvider) AgentStorageResolutions(prismID string) []admin.AgentStorageResolution {
+	if p.gw == nil || p.srv == nil {
+		return nil
+	}
+	claims := &auth.Claims{PrismID: prismID}
+	if a := p.srv.GetAgentByPrismID(prismID); a != nil {
+		claims.ClientID = a.ClientID
+	}
+	if pol, err := p.srv.GetAgentPolicy(prismID); err == nil && pol != nil {
+		claims.Groups = append(claims.Groups, pol.Groups...)
+	}
+	gateways := p.gw.PreviewAgentBackendResolutions(claims)
+	out := make([]admin.AgentStorageResolution, 0, len(gateways))
+	for _, g := range gateways {
+		layers := make([]admin.AgentStorageResolutionLayer, 0, len(g.Layers))
+		for _, l := range g.Layers {
+			layers = append(layers, admin.AgentStorageResolutionLayer{
+				Source:   l.Source,
+				Selector: l.Selector,
+			})
+		}
+		out = append(out, admin.AgentStorageResolution{
+			BackendID:   g.BackendID,
+			WorkspaceID: g.WorkspaceID,
+			Selector:    g.Selector,
+			Source:      g.Source,
+			Layers:      layers,
+			DenyReason:  g.DenyReason,
+		})
+	}
+	return out
+}
+
 // authServerGroupManager adapts authserver.Server to the admin.GroupManager interface.
 type authServerGroupManager struct {
 	srv *authserver.Server
@@ -415,9 +479,10 @@ func (m *authServerGroupManager) ListGroups() []admin.GroupInfo {
 	result := make([]admin.GroupInfo, len(serverGroups))
 	for i, g := range serverGroups {
 		result[i] = admin.GroupInfo{
-			Name:   g.Name,
-			Scopes: g.Scopes,
-			Source: g.Source,
+			Name:            g.Name,
+			Scopes:          g.Scopes,
+			Source:          g.Source,
+			BackendPolicies: g.BackendPolicies,
 		}
 	}
 	return result
@@ -428,9 +493,10 @@ func (m *authServerGroupManager) GetGroup(name string) *admin.GroupInfo {
 	for _, g := range groups {
 		if g.Name == name {
 			return &admin.GroupInfo{
-				Name:   g.Name,
-				Scopes: g.Scopes,
-				Source: g.Source,
+				Name:            g.Name,
+				Scopes:          g.Scopes,
+				Source:          g.Source,
+				BackendPolicies: g.BackendPolicies,
 			}
 		}
 	}
@@ -442,7 +508,30 @@ func (m *authServerGroupManager) SetGroup(name string, scopes []string) error {
 	if m.srv.IsConfigGroup(name) {
 		return fmt.Errorf("cannot modify config-defined group %q", name)
 	}
-	return m.srv.SetGroup(name, &authserver.GroupConfig{Scopes: scopes})
+	// Preserve existing BackendPolicies so the scope endpoint doesn't reset them.
+	existing, _ := m.srv.GetGroup(name)
+	cfg := &authserver.GroupConfig{Scopes: scopes}
+	if existing != nil {
+		cfg.BackendPolicies = existing.BackendPolicies
+	}
+	return m.srv.SetGroup(name, cfg)
+}
+
+func (m *authServerGroupManager) SetGroupBackendPolicies(name string, policies map[string]auth.BackendPolicy) error {
+	if m.srv.IsConfigGroup(name) {
+		return fmt.Errorf("cannot modify config-defined group %q", name)
+	}
+	existing, _ := m.srv.GetGroup(name)
+	if existing == nil {
+		// Creating a group via backend-policies-only is fine; start with empty scopes.
+		existing = &authserver.GroupConfig{}
+	}
+	if len(policies) == 0 {
+		existing.BackendPolicies = nil
+	} else {
+		existing.BackendPolicies = policies
+	}
+	return m.srv.SetGroup(name, existing)
 }
 
 func (m *authServerGroupManager) DeleteGroup(name string) error {
@@ -459,6 +548,14 @@ func (m *authServerGroupManager) DefaultScopes() []string {
 
 func (m *authServerGroupManager) SetDefaultScopes(scopes []string) error {
 	return m.srv.SetDefaultScopes(scopes)
+}
+
+func (m *authServerGroupManager) DefaultBackendPolicies() map[string]auth.BackendPolicy {
+	return m.srv.DefaultBackendPolicies()
+}
+
+func (m *authServerGroupManager) SetDefaultBackendPolicies(policies map[string]auth.BackendPolicy) error {
+	return m.srv.SetDefaultBackendPolicies(policies)
 }
 
 // buildHandler wraps the gateway handler with auth and rate-limit middleware.

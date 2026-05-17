@@ -9,14 +9,16 @@ import (
 	"time"
 
 	"github.com/1broseidon/prism/internal/adminauth"
+	"github.com/1broseidon/prism/internal/auth"
 	"github.com/1broseidon/prism/internal/metrics"
 )
 
 // GroupInfo mirrors authserver.GroupInfo for the admin API boundary.
 type GroupInfo struct {
-	Name   string   `json:"name"`
-	Scopes []string `json:"scopes"`
-	Source string   `json:"source"` // "config" or "dynamic"
+	Name            string                        `json:"name"`
+	Scopes          []string                      `json:"scopes"`
+	Source          string                        `json:"source"` // "config" or "dynamic"
+	BackendPolicies map[string]auth.BackendPolicy `json:"backend_policies,omitempty"`
 }
 
 // GroupManager is the interface the admin API uses to manage scope groups.
@@ -27,12 +29,19 @@ type GroupManager interface {
 	GetGroup(name string) *GroupInfo
 	// SetGroup creates or updates a dynamic group. Returns error for config groups.
 	SetGroup(name string, scopes []string) error
+	// SetGroupBackendPolicies replaces the per-backend policies for a group.
+	// Empty map clears the entry. Errors for config-defined groups.
+	SetGroupBackendPolicies(name string, policies map[string]auth.BackendPolicy) error
 	// DeleteGroup removes a dynamic group. Returns error for config groups.
 	DeleteGroup(name string) error
 	// DefaultScopes returns the configured default scopes.
 	DefaultScopes() []string
 	// SetDefaultScopes updates the runtime default scopes.
 	SetDefaultScopes(scopes []string) error
+	// DefaultBackendPolicies returns the persisted default backend policies.
+	DefaultBackendPolicies() map[string]auth.BackendPolicy
+	// SetDefaultBackendPolicies replaces the default backend policies map.
+	SetDefaultBackendPolicies(policies map[string]auth.BackendPolicy) error
 }
 
 // BridgeInfoProvider is implemented by backend managers that can report
@@ -62,8 +71,16 @@ type API struct {
 	groupMgr             GroupManager
 	oauthCallbackHandler http.Handler      // optional: gateway's OAuth callback handler
 	auth                 *adminauth.Holder // holder for live admin auth service; zero-value = open
+	traceProvider        BackendPolicyTraceProvider
 	adminProbeLimiter    *adminProbeRateLimiter
 	startedAt            time.Time
+}
+
+// SetBackendPolicyTraceProvider wires the per-agent resolution trace provider
+// used by GET /agents/{prism_id}/storage-resolution. Optional; when unset the
+// endpoint returns 503.
+func (a *API) SetBackendPolicyTraceProvider(p BackendPolicyTraceProvider) {
+	a.traceProvider = p
 }
 
 // NewAPI creates an admin API.
@@ -79,7 +96,7 @@ func NewAPI(
 	agentMgr AgentManager,
 	groupMgr GroupManager,
 	oauthCallback http.Handler,
-	auth *adminauth.Holder,
+	adminAuth *adminauth.Holder,
 ) *API {
 	return &API{
 		statusFn:             statusFn,
@@ -91,7 +108,7 @@ func NewAPI(
 		agentMgr:             agentMgr,
 		groupMgr:             groupMgr,
 		oauthCallbackHandler: oauthCallback,
-		auth:                 auth,
+		auth:                 adminAuth,
 		adminProbeLimiter:    newAdminProbeRateLimiter(),
 		startedAt:            time.Now(),
 	}
@@ -113,6 +130,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /backends", a.session(http.HandlerFunc(a.handleBackends)))
 	mux.Handle("GET /info", a.session(http.HandlerFunc(a.handleInfo)))
 	mux.Handle("GET /agents", a.session(http.HandlerFunc(a.handleAgents)))
+	mux.Handle("GET /agents/{prism_id}/storage-resolution", a.session(http.HandlerFunc(a.handleAgentStorageResolution)))
 	mux.Handle("GET /agents/", a.session(http.HandlerFunc(a.handleAgentByPrismID)))
 	mux.Handle("GET /events", a.session(http.HandlerFunc(a.handleEvents)))
 	mux.Handle("GET /groups", a.session(http.HandlerFunc(a.handleListGroups)))
@@ -137,11 +155,14 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /config/workspace-bridge", a.admin(http.HandlerFunc(a.handlePutWorkspaceBridgeConfig)))
 
 	// Mutation routes — admin role required.
+	mux.Handle("PUT /agents/{prism_id}/backend-policies", a.admin(http.HandlerFunc(a.handleSetAgentBackendPolicies)))
 	mux.Handle("PUT /agents/", a.admin(http.HandlerFunc(a.handlePutAgent)))
 	mux.Handle("DELETE /agents/stale", a.admin(http.HandlerFunc(a.handleRemoveStaleAgents)))
 	mux.Handle("DELETE /agents/", a.admin(http.HandlerFunc(a.handleDeleteAgent)))
+	mux.Handle("PUT /groups/{name}/backend-policies", a.admin(http.HandlerFunc(a.handleSetGroupBackendPolicies)))
 	mux.Handle("PUT /groups/", a.admin(http.HandlerFunc(a.handleSetGroup)))
 	mux.Handle("DELETE /groups/", a.admin(http.HandlerFunc(a.handleDeleteGroup)))
+	mux.Handle("PUT /defaults/backend-policies", a.admin(http.HandlerFunc(a.handleSetDefaultBackendPolicies)))
 	mux.Handle("PUT /defaults", a.admin(http.HandlerFunc(a.handleSetDefaults)))
 	mux.Handle("POST /workspaces", a.admin(http.HandlerFunc(a.handleCreateWorkspace)))
 	mux.Handle("DELETE /workspaces/", a.admin(http.HandlerFunc(a.handleDeleteWorkspace)))

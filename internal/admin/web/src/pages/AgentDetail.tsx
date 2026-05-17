@@ -1,7 +1,7 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { useLocation, useRoute } from "preact-iso";
 import { agents, groups, backends, events } from "../state";
-import { deleteJSON, putJSON } from "../api/client";
+import { deleteJSON, getJSON, putJSON } from "../api/client";
 import { withToast } from "../state/toasts";
 import { canMutate } from "../state/me";
 import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
@@ -9,7 +9,11 @@ import { ScopeList } from "../components/ScopeList";
 import { StatusCell } from "../components/StatusCell";
 import { CopyId } from "../components/CopyId";
 import { decodeAgentRouteID, findAgentForRoute } from "../util/agentRoute";
-import type { Agent, AgentPolicy } from "../api/types";
+import type {
+  Agent,
+  AgentPolicy,
+  AgentStorageResolution,
+} from "../api/types";
 
 const SYSTEM_SCOPE = "mcp:connect";
 
@@ -89,6 +93,7 @@ export function AgentDetail() {
 
       <MetaRow agent={agent} />
       <PolicySection agent={agent} />
+      <StorageResolutionSection agent={agent} />
       <ActivitySection agent={agent} />
       {agent.dynamic && canMutate() && (
         <DangerSection
@@ -576,3 +581,85 @@ function DangerSection({
     </div>
   );
 }
+
+
+function StorageResolutionSection({ agent }: { agent: Agent }) {
+  const [items, setItems] = useState<AgentStorageResolution[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!agent.prism_id) {
+      setItems([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await getJSON<AgentStorageResolution[]>(
+          `/agents/${encodeURIComponent(agent.prism_id!)}/storage-resolution`,
+        );
+        if (!cancelled) setItems(data);
+      } catch (e) {
+        if (!cancelled)
+          setError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [agent.prism_id]);
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">storage resolution</span>
+        <span class="section-sub">
+          which workspace each backend would attach to for this agent, with the
+          policy layer that decided.
+        </span>
+      </div>
+      {error && <div class="error-text">{error}</div>}
+      {items === null ? (
+        <div class="empty-state">loading…</div>
+      ) : items.length === 0 ? (
+        <div class="empty-state">
+          no backends registered — nothing to resolve yet.
+        </div>
+      ) : (
+        <div class="card">
+          <table class="storage-resolution-table">
+            <thead>
+              <tr>
+                <th>backend</th>
+                <th>workspace</th>
+                <th>selector</th>
+                <th>source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((r) => (
+                <tr key={r.backend_id}>
+                  <td class="storage-resolution-backend">{r.backend_id}</td>
+                  <td>
+                    {r.deny_reason ? (
+                      <span class="storage-resolution-deny">
+                        {r.deny_reason}
+                      </span>
+                    ) : (
+                      r.workspace_id || "—"
+                    )}
+                  </td>
+                  <td>
+                    <code>{r.selector}</code>
+                  </td>
+                  <td class="storage-resolution-source">{r.source}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+

@@ -1502,6 +1502,52 @@ func (g *Gateway) loadAllRegisteredWorkspaceEntries() []*workspaceRegistryEntry 
 	return out
 }
 
+// AgentBackendResolution mirrors BackendWorkspaceResolution but is keyed by
+// backend id for an agent-wide preview (admin "why" view).
+type AgentBackendResolution struct {
+	BackendID   string                 `json:"backend_id"`
+	WorkspaceID string                 `json:"workspace_id,omitempty"`
+	Selector    string                 `json:"selector"`
+	Source      string                 `json:"source"`
+	Layers      []ResolutionLayerTrace `json:"layers,omitempty"`
+	DenyReason  string                 `json:"deny_reason,omitempty"`
+}
+
+// PreviewAgentBackendResolutions returns, for each currently-known backend,
+// what workspace policy resolution would pick for the given agent identity.
+// Used by the admin UI to render the "why" view; pure preview, no side
+// effects. Groups are synthesized from the agent's persisted policy only
+// (no IDP claim emulation), so the trace matches what an operator-driven
+// configuration would produce.
+func (g *Gateway) PreviewAgentBackendResolutions(claims *auth.Claims) []AgentBackendResolution {
+	g.mu.RLock()
+	backends := make([]*Backend, 0, len(g.backends))
+	for _, b := range g.backends {
+		backends = append(backends, b)
+	}
+	g.mu.RUnlock()
+	sort.Slice(backends, func(i, j int) bool { return backends[i].Config.ID < backends[j].Config.ID })
+
+	out := make([]AgentBackendResolution, 0, len(backends))
+	for _, b := range backends {
+		cfg, res, deny := g.ResolveBackendWorkspace(claims, b)
+		entry := AgentBackendResolution{
+			BackendID:  b.Config.ID,
+			Selector:   res.Selector,
+			Source:     res.Source,
+			Layers:     res.Layers,
+			DenyReason: deny,
+		}
+		if cfg != nil {
+			entry.WorkspaceID = cfg.ID
+		} else if res.WorkspaceID != "" {
+			entry.WorkspaceID = res.WorkspaceID
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // validateBackendWorkspaceBinding rejects a backend configuration whose
 // declared workspace type conflicts with an existing registry entry. Lazy
 // references (workspace.id set but no registry entry yet) are allowed — the

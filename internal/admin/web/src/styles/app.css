@@ -2529,6 +2529,77 @@ tr:hover .remove-btn {
 .workspace-create-card {
   padding: 12px;
 }
+.storage-layer {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px;
+  margin-top: 12px;
+  background: var(--bg);
+}
+.storage-layer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.storage-layer-title {
+  font-weight: 600;
+}
+.storage-layer-sub {
+  color: var(--muted);
+  font-size: 11px;
+}
+.storage-layer-rows {
+  display: grid;
+  gap: 8px;
+}
+.storage-layer-row {
+  display: grid;
+  grid-template-columns: 160px 220px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+.storage-layer-backend {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.storage-group-layers {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+.storage-resolution-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.storage-resolution-table th,
+.storage-resolution-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.storage-resolution-table th {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.storage-resolution-table tr:last-child td {
+  border-bottom: none;
+}
+.storage-resolution-backend {
+  font-family: var(--font-mono);
+}
+.storage-resolution-source {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.storage-resolution-deny {
+  color: var(--accent);
+}
 .storage-row {
   display: grid;
   grid-template-columns: 140px 1fr;

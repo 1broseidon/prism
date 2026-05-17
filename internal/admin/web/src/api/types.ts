@@ -10,6 +10,7 @@ export interface AgentPolicy {
   groups?: string[];
   grant?: string[];
   deny?: string[];
+  backend_policies?: Record<string, BackendPolicy>;
 }
 
 export interface AgentBreakdown {
@@ -92,14 +93,34 @@ export interface Backend {
   disconnected?: boolean;
 }
 
+export interface BackendPolicy {
+  workspace_selector?: string;
+}
+
 export interface Group {
   name: string;
   scopes: string[];
   source: "config" | "dynamic";
+  backend_policies?: Record<string, BackendPolicy>;
 }
 
 export interface DefaultsResponse {
   default_scopes: string[];
+  backend_policies?: Record<string, BackendPolicy>;
+}
+
+export interface AgentStorageResolutionLayer {
+  source: string;
+  selector?: string;
+}
+
+export interface AgentStorageResolution {
+  backend_id: string;
+  workspace_id?: string;
+  selector: string;
+  source: string;
+  layers?: AgentStorageResolutionLayer[];
+  deny_reason?: string;
 }
 
 export interface AuditEvent {

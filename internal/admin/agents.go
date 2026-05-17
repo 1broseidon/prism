@@ -4,13 +4,40 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/1broseidon/prism/internal/auth"
 )
 
 // AgentPolicy mirrors authserver.AgentPolicy for the admin API boundary.
 type AgentPolicy struct {
-	Groups []string `json:"groups"`
-	Grant  []string `json:"grant,omitempty"`
-	Deny   []string `json:"deny,omitempty"`
+	Groups          []string                      `json:"groups"`
+	Grant           []string                      `json:"grant,omitempty"`
+	Deny            []string                      `json:"deny,omitempty"`
+	BackendPolicies map[string]auth.BackendPolicy `json:"backend_policies,omitempty"`
+}
+
+// AgentStorageResolution describes the workspace policy decision for a single
+// (agent, backend) pair, including the layer chain that produced it.
+type AgentStorageResolution struct {
+	BackendID   string                        `json:"backend_id"`
+	WorkspaceID string                        `json:"workspace_id,omitempty"`
+	Selector    string                        `json:"selector"`
+	Source      string                        `json:"source"`
+	Layers      []AgentStorageResolutionLayer `json:"layers,omitempty"`
+	DenyReason  string                        `json:"deny_reason,omitempty"`
+}
+
+// AgentStorageResolutionLayer is one tier of the resolution trace.
+type AgentStorageResolutionLayer struct {
+	Source   string `json:"source"`
+	Selector string `json:"selector,omitempty"`
+}
+
+// BackendPolicyTraceProvider returns the layered workspace resolution for an
+// agent across all known backends. Powers the admin "why this workspace?"
+// view on Agent detail.
+type BackendPolicyTraceProvider interface {
+	AgentStorageResolutions(prismID string) []AgentStorageResolution
 }
 
 // AgentManager is the interface the admin API uses to manage agents and policy.
@@ -21,6 +48,9 @@ type AgentManager interface {
 	GetAgentByPrismID(prismID string) any
 	// SetAgentPolicy sets groups/grant/deny for a DCR agent by PrismID.
 	SetAgentPolicy(prismID string, groups []string, grant []string, deny []string) error
+	// SetAgentBackendPolicies replaces the per-backend policies for an agent.
+	// Empty map clears the entry.
+	SetAgentBackendPolicies(prismID string, policies map[string]auth.BackendPolicy) error
 	// DeleteAgentPolicy removes custom policy for a DCR agent (falls back to defaults).
 	DeleteAgentPolicy(prismID string) error
 	// RemoveAgent deletes a dynamic agent by client_id.
@@ -87,6 +117,48 @@ func (a *API) handleSetAgentPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "prism_id": prismID})
+}
+
+// handleSetAgentBackendPolicies handles PUT /agents/{prism_id}/backend-policies.
+func (a *API) handleSetAgentBackendPolicies(w http.ResponseWriter, r *http.Request) {
+	if a.agentMgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent management not available"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	path := strings.TrimPrefix(r.URL.Path, "/agents/")
+	prismID := strings.TrimSuffix(path, "/backend-policies")
+	if prismID == path || !isValidID(prismID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/backend-policies with a valid prism_id"})
+		return
+	}
+
+	var body map[string]auth.BackendPolicy
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if err := a.agentMgr.SetAgentBackendPolicies(prismID, body); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "prism_id": prismID})
+}
+
+// handleAgentStorageResolution handles GET /agents/{prism_id}/storage-resolution.
+func (a *API) handleAgentStorageResolution(w http.ResponseWriter, r *http.Request) {
+	if a.traceProvider == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage resolution preview not available"})
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/agents/")
+	prismID := strings.TrimSuffix(path, "/storage-resolution")
+	if prismID == path || !isValidID(prismID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be /agents/{prism_id}/storage-resolution with a valid prism_id"})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.traceProvider.AgentStorageResolutions(prismID))
 }
 
 // handleDeleteAgentPolicy handles DELETE /agents/{prism_id}/policy — remove custom policy.

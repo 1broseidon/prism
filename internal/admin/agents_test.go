@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/1broseidon/prism/internal/auth"
 )
 
 // mockAgentManager is a test double for AgentManager.
@@ -66,6 +68,30 @@ func (m *mockAgentManager) SetAgentPolicy(prismID string, groups []string, grant
 	return nil
 }
 
+func (m *mockAgentManager) SetAgentBackendPolicies(prismID string, policies map[string]auth.BackendPolicy) error {
+	found := false
+	for _, a := range m.agents {
+		if a.PrismID == prismID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("agent not found: %s", prismID)
+	}
+	p, ok := m.policies[prismID]
+	if !ok {
+		p = &AgentPolicy{}
+		m.policies[prismID] = p
+	}
+	if len(policies) == 0 {
+		p.BackendPolicies = nil
+	} else {
+		p.BackendPolicies = policies
+	}
+	return nil
+}
+
 func (m *mockAgentManager) DeleteAgentPolicy(prismID string) error {
 	delete(m.policies, prismID)
 	return nil
@@ -100,6 +126,54 @@ func newTestAPI() (*API, *mockAgentManager) {
 		nil, // no admin auth — open mode for tests
 	)
 	return api, mgr
+}
+
+type stubTraceProvider struct{ resolutions []AgentStorageResolution }
+
+func (s *stubTraceProvider) AgentStorageResolutions(_ string) []AgentStorageResolution {
+	return s.resolutions
+}
+
+func TestSetAgentBackendPolicies(t *testing.T) {
+	api, mgr := newTestAPI()
+	body := `{"brainfile":{"workspace_selector":"agent"}}`
+	r := httptest.NewRequest(
+		http.MethodPut,
+		"/agents/prism-uuid-1/backend-policies",
+		strings.NewReader(body),
+	)
+	w := httptest.NewRecorder()
+	api.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	p, ok := mgr.policies["prism-uuid-1"]
+	if !ok || p.BackendPolicies["brainfile"].WorkspaceSelector != "agent" {
+		t.Fatalf("policy not stored: %+v", p)
+	}
+}
+
+func TestAgentStorageResolutionEndpoint(t *testing.T) {
+	api, _ := newTestAPI()
+	api.SetBackendPolicyTraceProvider(&stubTraceProvider{
+		resolutions: []AgentStorageResolution{
+			{BackendID: "brainfile", Selector: "agent", Source: "defaults", WorkspaceID: "a-repo"},
+		},
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/agents/prism-uuid-1/storage-resolution", nil)
+	w := httptest.NewRecorder()
+	api.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var got []AgentStorageResolution
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].BackendID != "brainfile" || got[0].WorkspaceID != "a-repo" {
+		t.Fatalf("trace = %+v", got)
+	}
 }
 
 func TestGetAgents(t *testing.T) {
