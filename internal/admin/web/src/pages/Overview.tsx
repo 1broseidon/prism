@@ -76,7 +76,7 @@ export function Overview() {
         <Tile
           label="agents"
           value={ag.length}
-          href="/identity"
+          href="/agents"
           sub={
             ag.length === 0
               ? "no agents"
@@ -141,7 +141,7 @@ function McpConnectBanner() {
             <button
               type="button"
               class="section-btn"
-              onClick={() => loc.route("/config")}
+              onClick={() => loc.route("/settings/general")}
             >
               settings
             </button>

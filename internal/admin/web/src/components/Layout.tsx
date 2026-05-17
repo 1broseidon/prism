@@ -9,14 +9,28 @@ interface Props {
   children: ComponentChildren;
 }
 
-const NAV_ITEMS = [
+interface NavItem {
+  href: string;
+  label: string;
+}
+
+const CONSOLE_NAV: NavItem[] = [
   { href: "/", label: "Overview" },
   { href: "/servers", label: "MCP Servers" },
-  { href: "/identity", label: "Identity" },
+  { href: "/agents", label: "Agents" },
+  { href: "/policy", label: "Policy" },
   { href: "/audit", label: "Audit" },
 ];
 
-const NAV_FOOTER_ITEMS = [{ href: "/config", label: "Settings" }];
+const CONSOLE_FOOTER: NavItem[] = [{ href: "/settings/general", label: "Settings" }];
+
+const SETTINGS_NAV: NavItem[] = [
+  { href: "/settings/general", label: "General" },
+  { href: "/settings/workspaces", label: "Workspaces" },
+  { href: "/settings/authentication", label: "Authentication" },
+];
+
+const SETTINGS_FOOTER: NavItem[] = [{ href: "/", label: "← Back to Console" }];
 
 export function Layout({ children }: Props) {
   const loc = useLocation();
@@ -61,7 +75,12 @@ export function Layout({ children }: Props) {
     setNavOpen(false);
   };
 
-  const renderNavLink = (n: (typeof NAV_ITEMS)[number]) => {
+  const inSettings = path.startsWith("/settings");
+  const navItems = inSettings ? SETTINGS_NAV : CONSOLE_NAV;
+  const footerItems = inSettings ? SETTINGS_FOOTER : CONSOLE_FOOTER;
+  const sectionLabel = inSettings ? "Settings" : "Console";
+
+  const renderNavLink = (n: NavItem) => {
     const active =
       path === n.href || (n.href !== "/" && path.startsWith(n.href));
     return (
@@ -126,9 +145,9 @@ export function Layout({ children }: Props) {
       />
 
       <nav class="shell-nav" id="primary-nav">
-        <div class="nav-section-label">Console</div>
-        {NAV_ITEMS.map(renderNavLink)}
-        <div class="nav-footer">{NAV_FOOTER_ITEMS.map(renderNavLink)}</div>
+        <div class="nav-section-label">{sectionLabel}</div>
+        {navItems.map(renderNavLink)}
+        <div class="nav-footer">{footerItems.map(renderNavLink)}</div>
       </nav>
 
       <main class="shell-content">{children}</main>

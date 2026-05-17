@@ -39,8 +39,8 @@ export function GroupDetail() {
       <Shell title={name}>
         <div class="empty-state">
           group not found.{" "}
-          <a href="/identity" class="link-accent">
-            back to identity
+          <a href="/policy" class="link-accent">
+            back to policy
           </a>
         </div>
       </Shell>
@@ -73,13 +73,13 @@ export function GroupDetail() {
       await groups.refresh();
       await agents.refresh();
     });
-    if (ok !== undefined) loc.route("/identity");
+    if (ok !== undefined) loc.route("/policy");
   };
 
   return (
     <div>
       <div class="detail-breadcrumb">
-        <a href="/identity">identity</a>
+        <a href="/policy">policy</a>
         <span class="breadcrumb-sep">/</span>
         <span>groups</span>
         <span class="breadcrumb-sep">/</span>
@@ -192,7 +192,7 @@ function Shell({
   return (
     <div>
       <div class="detail-breadcrumb">
-        <a href="/identity">identity</a>
+        <a href="/policy">policy</a>
         <span class="breadcrumb-sep">/</span>
         <span>groups</span>
         <span class="breadcrumb-sep">/</span>
@@ -225,7 +225,7 @@ function MemberRow({ agent, groupName }: { agent: Agent; groupName: string }) {
 
   const onClick = () => {
     if (canOpen) {
-      loc.route(`/identity/agents/${encodeURIComponent(agent.prism_id!)}`);
+      loc.route(`/agents/${encodeURIComponent(agent.prism_id!)}`);
     }
   };
 

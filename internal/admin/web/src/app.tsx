@@ -5,11 +5,14 @@ import { me } from "./state/me";
 import { Overview } from "./pages/Overview";
 import { Servers } from "./pages/Servers";
 import { ServerDetail } from "./pages/ServerDetail";
-import { Identity } from "./pages/Identity";
+import { Agents } from "./pages/Agents";
 import { AgentDetail } from "./pages/AgentDetail";
+import { Policy } from "./pages/Policy";
 import { GroupDetail } from "./pages/GroupDetail";
 import { Audit } from "./pages/Audit";
-import { Config } from "./pages/Config";
+import { SettingsGeneral } from "./pages/SettingsGeneral";
+import { SettingsWorkspaces } from "./pages/SettingsWorkspaces";
+import { SettingsAuthentication } from "./pages/SettingsAuthentication";
 import { Login } from "./pages/Login";
 
 export function App() {
@@ -38,11 +41,17 @@ export function App() {
           <Route path="/" component={Overview} />
           <Route path="/servers" component={Servers} />
           <Route path="/servers/:id" component={ServerDetail} />
-          <Route path="/identity" component={Identity} />
-          <Route path="/identity/agents/:prismId" component={AgentDetail} />
-          <Route path="/identity/groups/:name" component={GroupDetail} />
+          <Route path="/agents" component={Agents} />
+          <Route path="/agents/:prismId" component={AgentDetail} />
+          <Route path="/policy" component={Policy} />
+          <Route path="/policy/groups/:name" component={GroupDetail} />
           <Route path="/audit" component={Audit} />
-          <Route path="/config" component={Config} />
+          <Route path="/settings/general" component={SettingsGeneral} />
+          <Route path="/settings/workspaces" component={SettingsWorkspaces} />
+          <Route
+            path="/settings/authentication"
+            component={SettingsAuthentication}
+          />
           <Route default component={NotFound} />
         </Router>
       </Layout>

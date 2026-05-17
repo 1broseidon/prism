@@ -46,8 +46,8 @@ export function AgentDetail() {
       <Shell title={routeID}>
         <div class="empty-state">
           agent not found.{" "}
-          <a href="/identity" class="link-accent">
-            back to identity
+          <a href="/agents" class="link-accent">
+            back to agents
           </a>
         </div>
       </Shell>
@@ -57,9 +57,7 @@ export function AgentDetail() {
   return (
     <div>
       <div class="detail-breadcrumb">
-        <a href="/identity">identity</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>agents</span>
+        <a href="/agents">agents</a>
         <span class="breadcrumb-sep">/</span>
         <span class="breadcrumb-current">
           {agent.label || agent.description || agent.client_id}
@@ -97,7 +95,7 @@ export function AgentDetail() {
           agent={agent}
           onRemoved={async () => {
             await agents.refresh();
-            loc.route("/identity");
+            loc.route("/agents");
           }}
         />
       )}
@@ -115,9 +113,7 @@ function Shell({
   return (
     <div>
       <div class="detail-breadcrumb">
-        <a href="/identity">identity</a>
-        <span class="breadcrumb-sep">/</span>
-        <span>agents</span>
+        <a href="/agents">agents</a>
         <span class="breadcrumb-sep">/</span>
         <span class="breadcrumb-current">{title}</span>
       </div>

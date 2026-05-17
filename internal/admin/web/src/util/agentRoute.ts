@@ -5,7 +5,7 @@ const CLIENT_ROUTE_PREFIX = "client:";
 export function agentDetailHref(agent: Agent): string | null {
   if (!agent.dynamic) return null;
   const id = agent.prism_id || `${CLIENT_ROUTE_PREFIX}${agent.client_id}`;
-  return `/identity/agents/${encodeURIComponent(id)}`;
+  return `/agents/${encodeURIComponent(id)}`;
 }
 
 export function decodeAgentRouteID(value: string | undefined): string {
