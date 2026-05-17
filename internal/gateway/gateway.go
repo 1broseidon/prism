@@ -67,6 +67,7 @@ type policyResolverBox struct{ r auth.PolicyResolver }
 type Gateway struct {
 	mu             sync.RWMutex
 	backends       map[string]*Backend // keyed by server ID
+	workspaceInst  map[string]*Backend // keyed by backend ID + workspace ID; tools are not registered
 	server         *mcp.Server
 	logger         *slog.Logger
 	auditor        *audit.Logger
@@ -87,11 +88,12 @@ func New(logger *slog.Logger) *Gateway {
 		logger = slog.Default()
 	}
 	g := &Gateway{
-		backends:  make(map[string]*Backend),
-		logger:    logger,
-		auditor:   audit.Noop(), // replaced via SetAuditLogger if audit is configured
-		credStore: credentials.NewStore(),
-		network:   newNetworkRuntime(nil),
+		backends:      make(map[string]*Backend),
+		workspaceInst: make(map[string]*Backend),
+		logger:        logger,
+		auditor:       audit.Noop(), // replaced via SetAuditLogger if audit is configured
+		credStore:     credentials.NewStore(),
+		network:       newNetworkRuntime(nil),
 	}
 	g.workspace = newWorkspaceBridgeManager(g)
 
@@ -810,6 +812,9 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 			Description: fmt.Sprintf("[%s] %s", b.Config.Namespace, tool.Description),
 			InputSchema: tool.InputSchema,
 		}
+		if b.Config.BridgeManaged && len(b.Config.OriginalCommand) > 0 && config.NormalizeWorkspaceConfig(b.Config.Workspace) != nil {
+			namespacedTool.InputSchema = addWorkspaceSelectorToSchema(tool.InputSchema)
+		}
 
 		handler := func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return g.routeToolCall(ctx, backendID, originalName, req)
@@ -828,10 +833,71 @@ func (g *Gateway) registerBackendTools(ctx context.Context, b *Backend) error {
 	return nil
 }
 
+const prismWorkspaceArg = "_prism_workspace"
+
+func addWorkspaceSelectorToSchema(schema any) any {
+	var out map[string]any
+	data, err := json.Marshal(schema)
+	if err == nil {
+		_ = json.Unmarshal(data, &out)
+	}
+	if out == nil {
+		out = map[string]any{"type": "object"}
+	}
+	if out["type"] == nil {
+		out["type"] = "object"
+	}
+	props, _ := out["properties"].(map[string]any)
+	if props == nil {
+		props = make(map[string]any)
+	}
+	props[prismWorkspaceArg] = map[string]any{
+		"type":        "string",
+		"description": "Optional Prism workspace ID to attach this stdio server call to. Prism authorizes and strips this before forwarding to the backend.",
+	}
+	out["properties"] = props
+	return out
+}
+
+func splitWorkspaceSelector(req *mcp.CallToolRequest) (workspaceID string, forwarded *mcp.CallToolRequest, err error) {
+	if req == nil || req.Params == nil || len(req.Params.Arguments) == 0 {
+		return "", req, nil
+	}
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return "", req, nil
+	}
+	raw, ok := args[prismWorkspaceArg]
+	if !ok {
+		return "", req, nil
+	}
+	if err := json.Unmarshal(raw, &workspaceID); err != nil {
+		return "", nil, fmt.Errorf("%s must be a string", prismWorkspaceArg)
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return "", nil, fmt.Errorf("%s must not be empty", prismWorkspaceArg)
+	}
+	delete(args, prismWorkspaceArg)
+	nextArgs := json.RawMessage(`{}`)
+	if len(args) > 0 {
+		data, err := json.Marshal(args)
+		if err != nil {
+			return "", nil, err
+		}
+		nextArgs = data
+	}
+	clone := *req
+	params := *req.Params
+	params.Arguments = nextArgs
+	clone.Params = &params
+	return workspaceID, &clone, nil
+}
+
 // routeToolCall forwards a tool call to the correct backend.
 // It enforces scope-based access control and emits a structured audit log entry
 // for every call (allowed or denied).
-func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) { //nolint:gocyclo // tool-call routing is the auth, workspace, circuit-breaker, and audit boundary
 	tracer := otel.Tracer("prism.gateway")
 	ctx, span := tracer.Start(ctx, "prism.gateway.tool_call",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -873,6 +939,37 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 	// The actual injection happens in the HTTP transport; we record the fact (not the value).
 	credHeader, _, _ := g.credStore.Resolve(ctx, backendID)
 	credInjected := credHeader != ""
+	requestedWorkspaceID, forwardedReq, selectorErr := splitWorkspaceSelector(req)
+	if selectorErr != nil {
+		return &mcp.CallToolResult{
+			IsError: true,
+			Content: []mcp.Content{&mcp.TextContent{Text: selectorErr.Error()}},
+		}, nil
+	}
+	if forwardedReq == nil {
+		forwardedReq = req
+	}
+
+	workspaceCfg := config.NormalizeWorkspaceConfig(b.Config.Workspace)
+	effectiveWorkspaceID := ""
+	if workspaceCfg != nil {
+		effectiveWorkspaceID = workspaceCfg.ID
+	}
+	if requestedWorkspaceID != "" {
+		if !workspaceIDRE.MatchString(requestedWorkspaceID) {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: "invalid workspace id"}},
+			}, nil
+		}
+		if workspaceCfg == nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: "this backend is not workspace-backed"}},
+			}, nil
+		}
+		effectiveWorkspaceID = requestedWorkspaceID
+	}
 
 	// Scope enforcement: check if the caller has permission for this tool.
 	// Uses LivePolicy to resolve from KV store (not stale session context).
@@ -899,18 +996,17 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 				},
 			}, nil
 		}
-		if workspaceCfg := config.NormalizeWorkspaceConfig(b.Config.Workspace); workspaceCfg != nil &&
-			policy.HasWorkspaceConstraints() && !policy.CanAccessWorkspace(workspaceCfg.ID) {
+		if effectiveWorkspaceID != "" && policy.HasWorkspaceConstraints() && !policy.CanAccessWorkspace(effectiveWorkspaceID) {
 			span.SetAttributes(
 				attribute.Bool("tool.allowed", false),
-				attribute.String("workspace.id", workspaceCfg.ID),
+				attribute.String("workspace.id", effectiveWorkspaceID),
 			)
 			span.SetStatus(codes.Error, "workspace access denied")
 			g.logger.Warn("tool call denied by workspace policy",
 				"backend", backendID,
 				"tool", toolName,
 				"namespace", b.Config.Namespace,
-				"workspace", workspaceCfg.ID,
+				"workspace", effectiveWorkspaceID,
 			)
 			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, credInjected, 0, nil)
 			metrics.RecordScopeDenial(b.Config.Namespace, toolName)
@@ -920,7 +1016,7 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 				Content: []mcp.Content{
 					&mcp.TextContent{Text: fmt.Sprintf(
 						"access denied: workspace %q not granted",
-						workspaceCfg.ID,
+						effectiveWorkspaceID,
 					)},
 				},
 			}, nil
@@ -928,6 +1024,25 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 	}
 
 	span.SetAttributes(attribute.Bool("tool.allowed", true))
+	if effectiveWorkspaceID != "" {
+		span.SetAttributes(attribute.String("workspace.id", effectiveWorkspaceID))
+	}
+
+	target := b
+	targetBackendID := backendID
+	if requestedWorkspaceID != "" && workspaceCfg != nil && requestedWorkspaceID != workspaceCfg.ID {
+		instance, err := g.ensureWorkspaceBackendInstance(ctx, b, requestedWorkspaceID)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, err
+		}
+		target = instance
+		targetBackendID = instance.Config.ID
+	}
+	if target != b {
+		target.inflight.Add(1)
+		defer target.inflight.Done()
+	}
 
 	if b.CB != nil && !b.CB.Allow() {
 		span.SetStatus(codes.Error, "circuit breaker open")
@@ -940,9 +1055,9 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 	}
 
 	start := time.Now()
-	result, err := b.Session.CallTool(ctx, &mcp.CallToolParams{
+	result, err := target.Session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      toolName,
-		Arguments: req.Params.Arguments,
+		Arguments: forwardedReq.Params.Arguments,
 	})
 	elapsed := time.Since(start)
 	latencyMS := elapsed.Milliseconds()
@@ -950,8 +1065,8 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 	span.SetAttributes(attribute.Int64("tool.latency_ms", latencyMS))
 
 	// Audit: log the outcome after the call (success or backend error).
-	g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, true, credInjected, latencyMS, err)
-	metrics.RecordToolCall(b.Config.Namespace, toolName, backendID, true, elapsed)
+	g.auditor.LogCall(ctx, b.Config.Namespace, toolName, targetBackendID, true, credInjected, latencyMS, err)
+	metrics.RecordToolCall(b.Config.Namespace, toolName, targetBackendID, true, elapsed)
 
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -969,9 +1084,96 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}
 	}
 
-	g.syncWorkspaceAfterToolCall(ctx, backendID, b.Config)
+	g.syncWorkspaceAfterToolCall(ctx, targetBackendID, target.Config)
 
 	return result, nil
+}
+
+func (g *Gateway) ensureWorkspaceBackendInstance(ctx context.Context, template *Backend, workspaceID string) (*Backend, error) {
+	if template == nil || template.Config == nil {
+		return nil, errors.New("backend template is missing")
+	}
+	if !template.Config.BridgeManaged || len(template.Config.OriginalCommand) == 0 {
+		return nil, fmt.Errorf("backend %q cannot attach to alternate workspaces", template.Config.ID)
+	}
+	baseWorkspace := config.NormalizeWorkspaceConfig(template.Config.Workspace)
+	if baseWorkspace == nil {
+		return nil, fmt.Errorf("backend %q has no workspace template", template.Config.ID)
+	}
+	workspaceCfg := *baseWorkspace
+	workspaceCfg.ID = workspaceID
+
+	key := workspaceInstanceKey(template.Config.ID, workspaceID)
+	g.mu.RLock()
+	if existing := g.workspaceInst[key]; existing != nil {
+		g.mu.RUnlock()
+		return existing, nil
+	}
+	g.mu.RUnlock()
+
+	instanceID := workspaceInstanceID(template.Config.ID, workspaceID)
+	command := template.Config.OriginalCommand[0]
+	args := append([]string(nil), template.Config.OriginalCommand[1:]...)
+	env := cloneStringMap(template.Config.Env)
+	sandbox := template.Config.Sandbox
+	spawned, err := g.spawnBridgeBackend(ctx, instanceID, command, args, env, template.Config.BridgeRuntime, &sandbox, &workspaceCfg)
+	if err != nil {
+		return nil, err
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "prism-workspace-instance", Version: "0.1.0"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: spawned.Endpoint}, nil)
+	if err != nil {
+		_ = g.removeBridgeBackend(instanceID)
+		return nil, fmt.Errorf("connect workspace backend instance %q: %w", instanceID, err)
+	}
+
+	cfg := *template.Config
+	cfg.ID = instanceID
+	cfg.URL = spawned.Endpoint
+	cfg.Command = nil
+	cfg.Env = env
+	cfg.Workspace = &workspaceCfg
+	cfg.BridgeManaged = true
+	cfg.OriginalCommand = append([]string(nil), template.Config.OriginalCommand...)
+	instance := &Backend{
+		Config:  &cfg,
+		Client:  client,
+		Session: session,
+	}
+
+	g.mu.Lock()
+	if g.workspaceInst == nil {
+		g.workspaceInst = make(map[string]*Backend)
+	}
+	if existing := g.workspaceInst[key]; existing != nil {
+		g.mu.Unlock()
+		_ = session.Close()
+		_ = g.removeBridgeBackend(instanceID)
+		return existing, nil
+	}
+	g.workspaceInst[key] = instance
+	g.mu.Unlock()
+	g.logger.Info("connected workspace backend instance", "template", template.Config.ID, "workspace", workspaceID, "id", instanceID)
+	return instance, nil
+}
+
+func workspaceInstanceKey(backendID, workspaceID string) string {
+	return backendID + "\x00" + workspaceID
+}
+
+func workspaceInstanceID(backendID, workspaceID string) string {
+	return backendID + "-ws-" + workspaceID
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // DisconnectBackend closes the connection to a backend and removes its tools.
@@ -990,6 +1192,7 @@ func (g *Gateway) disconnectBackend(id string, preserveState bool) error {
 	if !ok {
 		return fmt.Errorf("backend %q not found", id)
 	}
+	instances := g.takeWorkspaceInstancesForTemplate(id)
 
 	// Remove tools registered under this backend's namespace
 	g.removeBackendTools(b)
@@ -1009,9 +1212,41 @@ func (g *Gateway) disconnectBackend(id string, preserveState bool) error {
 	if b.Session != nil {
 		_ = b.Session.Close()
 	}
+	for _, inst := range instances {
+		g.closeWorkspaceInstance(inst)
+	}
 	g.logger.Info("disconnected backend", "id", id)
 	metrics.DecActiveBackends()
 	return nil
+}
+
+func (g *Gateway) takeWorkspaceInstancesForTemplate(templateID string) []*Backend {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	prefix := templateID + "\x00"
+	instances := make([]*Backend, 0)
+	for key, inst := range g.workspaceInst {
+		if strings.HasPrefix(key, prefix) {
+			instances = append(instances, inst)
+			delete(g.workspaceInst, key)
+		}
+	}
+	return instances
+}
+
+func (g *Gateway) closeWorkspaceInstance(inst *Backend) {
+	if inst == nil {
+		return
+	}
+	inst.inflight.Wait()
+	if inst.Session != nil {
+		_ = inst.Session.Close()
+	}
+	if inst.Config != nil && inst.Config.ID != "" {
+		if err := g.removeBridgeBackend(inst.Config.ID); err != nil {
+			g.logger.Warn("failed to remove workspace backend instance", "id", inst.Config.ID, "error", err)
+		}
+	}
 }
 
 // removeBackendTools removes all tools registered by a backend.
@@ -1030,6 +1265,8 @@ func (g *Gateway) Close() {
 	g.mu.Lock()
 	backends := g.backends
 	g.backends = make(map[string]*Backend)
+	instances := g.workspaceInst
+	g.workspaceInst = make(map[string]*Backend)
 	g.mu.Unlock()
 
 	for id, b := range backends {
@@ -1038,6 +1275,9 @@ func (g *Gateway) Close() {
 			_ = b.Session.Close()
 		}
 		g.logger.Info("disconnected backend", "id", id)
+	}
+	for _, inst := range instances {
+		g.closeWorkspaceInstance(inst)
 	}
 }
 

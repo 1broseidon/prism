@@ -347,6 +347,119 @@ func TestRouteToolCallRequiresWorkspaceScopeWhenPolicyUsesWorkspaces(t *testing.
 	}
 }
 
+func TestWorkspaceSelectorHelpers(t *testing.T) {
+	schema := addWorkspaceSelectorToSchema(map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"query": map[string]any{"type": "string"}},
+	})
+	props := schema.(map[string]any)["properties"].(map[string]any)
+	if props[prismWorkspaceArg] == nil || props["query"] == nil {
+		t.Fatalf("schema properties = %+v", props)
+	}
+
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"query":"x","_prism_workspace":"repo"}`)}}
+	workspaceID, forwarded, err := splitWorkspaceSelector(req)
+	if err != nil {
+		t.Fatalf("split workspace selector: %v", err)
+	}
+	if workspaceID != "repo" {
+		t.Fatalf("workspace id = %q", workspaceID)
+	}
+	if strings.Contains(string(forwarded.Params.Arguments), prismWorkspaceArg) {
+		t.Fatalf("workspace selector was not stripped: %s", forwarded.Params.Arguments)
+	}
+}
+
+func TestRouteToolCallCanAttachAlternateWorkspaceInstance(t *testing.T) {
+	var mu sync.Mutex
+	var spawnPayloads []map[string]any
+	var callArgs []string
+
+	backendServer := mcp.NewServer(&mcp.Implementation{Name: "backend", Version: "0.1.0"}, nil)
+	backendServer.AddTool(&mcp.Tool{
+		Name:        "list_tasks",
+		Description: "test tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		mu.Lock()
+		callArgs = append(callArgs, string(req.Params.Arguments))
+		mu.Unlock()
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /manage/spawn", func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode spawn payload: %v", err)
+		}
+		mu.Lock()
+		spawnPayloads = append(spawnPayloads, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":       payload["id"],
+			"endpoint": "/mcp/" + payload["id"].(string),
+			"status":   "running",
+			"tools":    []string{"list_tasks"},
+		})
+	})
+	mux.Handle("/mcp/", mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return backendServer },
+		nil,
+	))
+	mux.HandleFunc("DELETE /manage/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
+	})
+	bridge := httptest.NewServer(mux)
+	defer bridge.Close()
+
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetBridgeURL(bridge.URL)
+	if err := gw.ConnectBackendViaBridge(context.Background(), &config.ServerConfig{
+		ID:              "brainfile",
+		Namespace:       "brainfile",
+		Command:         []string{"npx", "@brainfile/cli", "mcp"},
+		BridgeManaged:   true,
+		BridgeRuntime:   "node",
+		Sandbox:         config.DefaultSandboxConfig(),
+		Workspace:       &config.WorkspaceConfig{ID: "repo", Type: config.WorkspaceTypeVirtual},
+		OriginalCommand: []string{"npx", "@brainfile/cli", "mcp"},
+	}); err != nil {
+		t.Fatalf("connect backend: %v", err)
+	}
+
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"_prism_workspace":"other","query":"x"}`)}}
+	result, err := gw.routeToolCall(contextWithPolicy("brainfile:list_tasks workspace:other"), "brainfile", "list_tasks", req)
+	if err != nil {
+		t.Fatalf("route tool: %v", err)
+	}
+	if result == nil || result.IsError {
+		t.Fatalf("result = %+v", result)
+	}
+	result, err = gw.routeToolCall(contextWithPolicy("brainfile:list_tasks workspace:other"), "brainfile", "list_tasks", req)
+	if err != nil {
+		t.Fatalf("second route tool: %v", err)
+	}
+	if result == nil || result.IsError {
+		t.Fatalf("second result = %+v", result)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(spawnPayloads) != 2 {
+		t.Fatalf("spawn payload count = %d, want 2: %+v", len(spawnPayloads), spawnPayloads)
+	}
+	workspace, _ := spawnPayloads[1]["workspace"].(map[string]any)
+	if workspace["id"] != "other" {
+		t.Fatalf("dynamic workspace payload = %+v", workspace)
+	}
+	if len(callArgs) != 2 || strings.Contains(callArgs[0], prismWorkspaceArg) || strings.Contains(callArgs[1], prismWorkspaceArg) {
+		t.Fatalf("forwarded call args = %+v", callArgs)
+	}
+}
+
 func TestReconnectPersistedBackendsForWorkspace(t *testing.T) {
 	backendServer := mcp.NewServer(&mcp.Implementation{Name: "backend", Version: "0.1.0"}, nil)
 	backendServer.AddTool(&mcp.Tool{
