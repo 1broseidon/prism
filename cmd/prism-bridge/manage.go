@@ -159,6 +159,7 @@ func runManage(logger *slog.Logger, args []string) error {
 func (m *Manager) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /manage/spawn", m.handleSpawn)
 	mux.HandleFunc("GET /manage", m.handleList)
+	mux.HandleFunc("GET /manage/workspaces", m.handleWorkspaceUsages)
 	mux.HandleFunc("GET /manage/{id}/changes", m.handleChanges)
 	mux.HandleFunc("POST /manage/{id}/changes/refresh", m.handleRefreshChanges)
 	mux.HandleFunc("POST /manage/{id}/changes/discard", m.handleDiscardChanges)
@@ -166,6 +167,27 @@ func (m *Manager) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /manage/", m.handleDelete)
 	mux.HandleFunc("GET /health", m.handleHealth)
 	mux.HandleFunc("/mcp/", m.handleMCPProxy)
+}
+
+// handleWorkspaceUsages exposes the runtime's workspace disk usage so the
+// gateway can surface bytes-used for virtual/ephemeral workspace registry
+// entries (proxied bridges already report via the long-poll URL).
+func (m *Manager) handleWorkspaceUsages(w http.ResponseWriter, r *http.Request) {
+	reporter, ok := m.runtime.(WorkspaceUsageReporter)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"workspaces": []any{}})
+		return
+	}
+	usages, err := reporter.WorkspaceUsages(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	entries := make([]map[string]any, 0, len(usages))
+	for id, bytes := range usages {
+		entries = append(entries, map[string]any{"id": id, "used_bytes": bytes})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workspaces": entries})
 }
 
 func (m *Manager) handleSpawn(w http.ResponseWriter, r *http.Request) {

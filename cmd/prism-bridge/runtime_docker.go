@@ -637,23 +637,38 @@ func (d *DockerRuntime) checkWorkspaceQuota(ctx context.Context, spec *dockerSpe
 }
 
 func (d *DockerRuntime) workspaceDiskUsage(ctx context.Context, spec *dockerSpec) (int64, error) {
+	return d.probeVolumeUsage(ctx, spec.image, spec.volumeName, spec.name+"-workspace-du", spec.labels, spec.networking)
+}
+
+// probeVolumeUsage runs `du -sk` in a one-shot container that mounts the
+// given volume read-only. Used both by quota enforcement (per-backend
+// spawn) and by the WorkspaceUsages reporter (periodic batch).
+func (d *DockerRuntime) probeVolumeUsage(
+	ctx context.Context,
+	image, volumeName, containerName string,
+	labels map[string]string,
+	networking *networktypes.NetworkingConfig,
+) (int64, error) {
+	if image == "" || volumeName == "" {
+		return 0, fmt.Errorf("probe needs image and volume name")
+	}
 	cfg := &container.Config{
-		Image:      spec.image,
+		Image:      image,
 		Entrypoint: []string{"sh", "-c"},
 		Cmd:        []string{"du -sk /workspace | cut -f1"},
-		Labels:     spec.labels,
+		Labels:     labels,
 		Tty:        true,
 	}
 	hostCfg := &container.HostConfig{
 		SecurityOpt: []string{"no-new-privileges:true"},
 		Mounts: []mounttypes.Mount{{
 			Type:     mounttypes.TypeVolume,
-			Source:   spec.volumeName,
+			Source:   volumeName,
 			Target:   "/workspace",
 			ReadOnly: true,
 		}},
 	}
-	resp, err := d.client.ContainerCreate(ctx, cfg, hostCfg, spec.networking, nil, spec.name+"-workspace-du")
+	resp, err := d.client.ContainerCreate(ctx, cfg, hostCfg, networking, nil, containerName)
 	if err != nil {
 		return 0, fmt.Errorf("create workspace quota container: %w", err)
 	}
@@ -681,6 +696,37 @@ func (d *DockerRuntime) workspaceDiskUsage(ctx context.Context, spec *dockerSpec
 		return 0, ctx.Err()
 	}
 	return 0, nil
+}
+
+// WorkspaceUsages returns current disk usage in bytes for every known
+// workspace volume. Implements WorkspaceUsageReporter. Failures on
+// individual workspaces are logged and skipped; the rest still report.
+func (d *DockerRuntime) WorkspaceUsages(ctx context.Context) (map[string]int64, error) {
+	if d.defaultImage == "" {
+		return nil, fmt.Errorf("no default image configured for usage probe")
+	}
+	d.mu.RLock()
+	type probe struct{ id, volume string }
+	probes := make([]probe, 0, len(d.workspaces))
+	for id, ws := range d.workspaces {
+		if ws == nil || ws.volumeName == "" {
+			continue
+		}
+		probes = append(probes, probe{id: id, volume: ws.volumeName})
+	}
+	d.mu.RUnlock()
+
+	out := make(map[string]int64, len(probes))
+	for _, p := range probes {
+		used, err := d.probeVolumeUsage(ctx, d.defaultImage, p.volume,
+			d.namePrefix+"usage-"+sanitizeContainerName(p.id), nil, nil)
+		if err != nil {
+			d.logger.Warn("workspace usage probe failed", "workspace", p.id, "error", err)
+			continue
+		}
+		out[p.id] = used
+	}
+	return out, nil
 }
 
 func sandboxUserForSpec(user string) (uid, gid int) {

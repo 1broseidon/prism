@@ -16,6 +16,14 @@ type Runtime interface {
 	Cleanup(ctx context.Context) error
 }
 
+// WorkspaceUsageReporter is an optional runtime capability that returns the
+// current disk usage of every known workspace volume. Manage mode exposes
+// this over /manage/workspaces so the gateway can surface bytes-used for
+// virtual/ephemeral entries.
+type WorkspaceUsageReporter interface {
+	WorkspaceUsages(ctx context.Context) (map[string]int64, error)
+}
+
 // SpawnRequest describes a backend the manager should start.
 type SpawnRequest struct {
 	ID                string                  `json:"id"`

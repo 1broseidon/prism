@@ -743,6 +743,50 @@ func TestValidateBackendWorkspaceBinding(t *testing.T) {
 	}
 }
 
+func TestListWorkspacesBackfillsUsedBytesFromBridge(t *testing.T) {
+	// Stand up a fake bridge that reports usage for two workspaces.
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manage/workspaces" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"shared","used_bytes":12345},{"id":"scratch","used_bytes":99}]}`))
+	}))
+	defer bridge.Close()
+
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+	gw.SetBridgeURL(bridge.URL)
+
+	// Register one virtual + one ephemeral workspace in the registry.
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:   "shared",
+		Type: config.WorkspaceTypeVirtual,
+	}); err != nil {
+		t.Fatalf("create virtual: %v", err)
+	}
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:   "scratch",
+		Type: config.WorkspaceTypeEphemeral,
+	}); err != nil {
+		t.Fatalf("create ephemeral: %v", err)
+	}
+
+	statuses := gw.ListWorkspaces()
+	got := map[string]int64{}
+	for _, s := range statuses {
+		got[s.ID] = s.UsedBytes
+	}
+	if got["shared"] != 12345 {
+		t.Errorf("shared used_bytes = %d, want 12345", got["shared"])
+	}
+	if got["scratch"] != 99 {
+		t.Errorf("scratch used_bytes = %d, want 99", got["scratch"])
+	}
+}
+
 func TestPersistProxiedRegistryEntryStampsOwner(t *testing.T) {
 	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer gw.Close()

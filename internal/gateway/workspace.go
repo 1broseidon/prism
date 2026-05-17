@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -59,7 +60,15 @@ type workspaceBridgeManager struct {
 	mu         sync.Mutex
 	settings   workspaceBridgeSettings
 	workspaces map[string]*workspaceConnection
+
+	usageMu        sync.Mutex
+	usageByID      map[string]int64
+	usageRefreshed time.Time
 }
+
+// registryUsageTTL is how long a usage snapshot from /manage/workspaces is
+// trusted before the next ListWorkspaces call triggers a refresh.
+const registryUsageTTL = 60 * time.Second
 
 type workspaceConnection struct {
 	id        string
@@ -699,12 +708,32 @@ func (m *workspaceBridgeManager) handleUnregister(w http.ResponseWriter, r *http
 
 // ListWorkspaces returns connected workspace bridge status for the admin API.
 func (g *Gateway) ListWorkspaces() []admin.WorkspaceStatus {
+	if g.workspace != nil {
+		// Lazy refresh of the registry-side usage cache so virtual/ephemeral
+		// rows populate without a separate poller. Best-effort; a slow bridge
+		// just produces stale numbers, not an error.
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		g.workspace.refreshRegistryUsageIfStale(ctx)
+		cancel()
+	}
 	statuses := make([]admin.WorkspaceStatus, 0)
 	if g.workspace != nil {
 		statuses = append(statuses, g.workspace.list()...)
 	}
 	if g.kvStore != nil {
 		statuses = mergeWorkspaceRegistryStatuses(statuses, g.loadRegisteredWorkspaces())
+	}
+	// Backfill UsedBytes on registry-side rows from the bridge usage cache.
+	// Proxied entries already carry their own (poll-reported) value.
+	if g.workspace != nil {
+		for i := range statuses {
+			if statuses[i].UsedBytes != 0 {
+				continue
+			}
+			if u := g.workspace.registryUsage(statuses[i].ID); u > 0 {
+				statuses[i].UsedBytes = u
+			}
+		}
 	}
 	for i := range statuses {
 		statuses[i].HealthStatus = workspaceHealth(
@@ -884,6 +913,74 @@ func (m *workspaceBridgeManager) persistOwnerIfPresent(workspaceID, owner string
 		m.gateway.logger.Warn("failed to persist proxied workspace ownership",
 			"workspace", workspaceID, "owner", owner, "error", err)
 	}
+}
+
+// refreshRegistryUsageIfStale queries every connected bridge's
+// /manage/workspaces endpoint when the cached snapshot is older than
+// registryUsageTTL. Best-effort: failures are logged and the previous cache
+// is kept so a transient bridge outage doesn't blank the UI.
+func (m *workspaceBridgeManager) refreshRegistryUsageIfStale(ctx context.Context) {
+	m.usageMu.Lock()
+	if time.Since(m.usageRefreshed) < registryUsageTTL && m.usageByID != nil {
+		m.usageMu.Unlock()
+		return
+	}
+	m.usageMu.Unlock()
+
+	urls := m.gateway.BridgeURLs()
+	if len(urls) == 0 {
+		return
+	}
+	merged := make(map[string]int64)
+	client := &http.Client{Timeout: 10 * time.Second}
+	for _, base := range urls {
+		base = strings.TrimRight(base, "/")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/manage/workspaces", http.NoBody)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			m.gateway.logger.Debug("workspace usage poll failed", "bridge", base, "error", err)
+			continue
+		}
+		var body struct {
+			Workspaces []struct {
+				ID        string `json:"id"`
+				UsedBytes int64  `json:"used_bytes"`
+			} `json:"workspaces"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body)
+		_ = resp.Body.Close()
+		if err != nil {
+			m.gateway.logger.Debug("workspace usage decode failed", "bridge", base, "error", err)
+			continue
+		}
+		for _, w := range body.Workspaces {
+			if w.ID == "" {
+				continue
+			}
+			// If multiple bridges report the same workspace id, the larger
+			// number wins (it's the same volume on a duplicated mount).
+			if existing := merged[w.ID]; w.UsedBytes > existing {
+				merged[w.ID] = w.UsedBytes
+			}
+		}
+	}
+
+	m.usageMu.Lock()
+	m.usageByID = merged
+	m.usageRefreshed = time.Now()
+	m.usageMu.Unlock()
+}
+
+// registryUsage returns the cached bytes-used for a workspace id, or 0 if
+// the cache has no entry. Cheap; callers refresh via
+// refreshRegistryUsageIfStale.
+func (m *workspaceBridgeManager) registryUsage(id string) int64 {
+	m.usageMu.Lock()
+	defer m.usageMu.Unlock()
+	return m.usageByID[id]
 }
 
 // agentOwnerFromContext returns the most-stable identifier on the validated
