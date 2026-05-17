@@ -1,20 +1,53 @@
 services:
+  prism-bridge:
+    build:
+      context: .
+      dockerfile: cmd/prism-bridge/Dockerfile
+    image: prism-bridge:full
+    restart: unless-stopped
+    expose:
+      - "3001"
+    command:
+      - manage
+      - --runtime
+      - docker
+      - --network
+      - prism_default
+      - --image-full
+      - prism-bridge:full
+      - --image-node
+      - prism-bridge:full
+      - --image-python
+      - prism-bridge:full
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
   prism:
     build: .
     image: prism:dev
     container_name: prism
     restart: unless-stopped
+    environment:
+      PRISM_KV_KEY_FILE: /data/.prism/kv-encryption.key
+      PRISM_SIGNING_KEY_FILE: /data/.prism/signing-key.pem
     expose:
-      - "8080"   # MCP gateway (Caddy fronts this on :8443)
-      - "9086"   # admin console (Caddy fronts this on :443)
-    # Direct ports kept for local access when you want to bypass Caddy
-    # (e.g. when admin_public_url targets http://prism.localhost:9086).
+      - "8080"   # MCP gateway (Caddy path-routes /mcp, /token, /authorize, /register, /.well-known/*)
+      - "9086"   # admin console (Caddy catch-all)
+    # Direct ports kept for local access when you want to bypass Caddy.
     ports:
       - "8080:8080"
       - "9086:9086"
     volumes:
       - prism-data:/data
       - ./deploy/config.json:/etc/prism/config.json:ro
+    depends_on:
+      prism-bridge:
+        condition: service_healthy
 
   # TLS termination + X-Forwarded-* injection. Toggle "trust proxy headers"
   # in the admin Settings page so OAuth callbacks use the public hostname
@@ -24,8 +57,7 @@ services:
     container_name: prism-caddy
     restart: unless-stopped
     ports:
-      - "443:443"     # admin console (HTTPS)
-      - "8443:8443"   # MCP gateway  (HTTPS)
+      - "443:443"     # single HTTPS vhost — gateway + admin both live here
       # Add "- 80:80" if you switch the Caddyfile to a public domain for
       # Let's Encrypt — the HTTP-01 challenge needs it.
     volumes:
@@ -39,3 +71,7 @@ volumes:
   prism-data:
   caddy-data:
   caddy-config:
+
+networks:
+  default:
+    name: prism_default

@@ -1,11 +1,13 @@
-import { useState, useMemo } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useLocation, useRoute } from "preact-iso";
 import { backends, events } from "../state";
-import { deleteJSON, postJSON } from "../api/client";
-import { withToast } from "../state/toasts";
+import { deleteJSON, getJSON, postJSON } from "../api/client";
+import { showError, withToast } from "../state/toasts";
 import { canMutate } from "../state/me";
 import type {
   AddBackendBody,
+  AddBackendResponse,
+  AuthStatus,
   Backend,
   BackendTool,
   CredentialInput,
@@ -99,6 +101,9 @@ export function ServerDetail() {
       </div>
 
       <MetaRow backend={backend} />
+      {backend.disconnected && canMutate() && (
+        <ReconnectSection backend={backend} />
+      )}
       <ToolsSection backend={backend} />
       <CredentialSection backend={backend} />
       <ActivitySection backendId={backend.id} backend={backend} />
@@ -141,6 +146,9 @@ function PageShell({
 
 function StatusPill({ backend }: { backend: Backend }) {
   const cb = backend.circuit_breaker;
+  if (backend.disconnected) {
+    return <span class="pill pill-error">disconnected</span>;
+  }
   if (cb === "open") {
     return <span class="pill pill-error">circuit open</span>;
   }
@@ -166,9 +174,196 @@ function MetaRow({ backend }: { backend: Backend }) {
       <MetaItem label="endpoint" value={backend.url || "stdio"} mono />
       <MetaItem label="tools" value={String(toolCount)} />
       <MetaItem label="credential" value={credType} />
+      {backend.bridge_managed && (
+        <MetaItem label="bridge" value={backend.runtime || "managed"} />
+      )}
       {backend.circuit_breaker && (
         <MetaItem label="breaker" value={backend.circuit_breaker} />
       )}
+    </div>
+  );
+}
+
+function ReconnectSection({ backend }: { backend: Backend }) {
+  const [busy, setBusy] = useState(false);
+  const [oauth, setOauth] = useState<{
+    backendId: string;
+    authUrl: string;
+  } | null>(null);
+
+  const reconnect = async () => {
+    setBusy(true);
+    await withToast(async () => {
+      await postJSON(`/backends/${encodeURIComponent(backend.id)}/reconnect`, {});
+      await backends.refresh();
+    });
+    setBusy(false);
+  };
+
+  const reauthorize = async () => {
+    if (!backend.url) return;
+    setBusy(true);
+    let startedOAuth = false;
+    await withToast(async () => {
+      const res = await postJSON<AddBackendResponse>(
+        `/backends/${encodeURIComponent(backend.id)}`,
+        { url: backend.url },
+      );
+      if (res.status === "auth_required") {
+        startedOAuth = true;
+        setOauth({ backendId: backend.id, authUrl: res.auth_url });
+        return;
+      }
+      if (res.status === "manual_oauth_required") {
+        throw new Error("manual OAuth credentials required");
+      }
+      await backends.refresh();
+    });
+    if (!startedOAuth) setBusy(false);
+  };
+
+  if (oauth) {
+    return (
+      <OAuthReconnectFlow
+        backendId={oauth.backendId}
+        authUrl={oauth.authUrl}
+        onConnected={async () => {
+          setOauth(null);
+          setBusy(false);
+          await backends.refresh();
+        }}
+        onCancel={() => {
+          setOauth(null);
+          setBusy(false);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div class="section">
+      <div class="card reconnect-card">
+        <div>
+          <div class="danger-card-title">backend is disconnected</div>
+          <div class="danger-card-desc">
+            reconnect uses the persisted backend configuration and any stored
+            OAuth token without deleting state.
+          </div>
+        </div>
+        <div class="inline-form">
+          <button class="save-btn" onClick={reconnect} disabled={busy}>
+            {busy ? "reconnecting…" : "reconnect"}
+          </button>
+          {backend.url && (
+            <button class="section-btn" onClick={reauthorize} disabled={busy}>
+              reauthorize
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OAuthReconnectFlow({
+  backendId,
+  authUrl,
+  onConnected,
+  onCancel,
+}: {
+  backendId: string;
+  authUrl: string;
+  onConnected: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const [status, setStatus] = useState<"idle" | "waiting" | "error" | "timeout">(
+    "idle",
+  );
+  const [message, setMessage] = useState(
+    "click authenticate to open the provider in a popup.",
+  );
+  const pollRef = useRef<number | null>(null);
+  const timeoutRef = useRef<number | null>(null);
+
+  const stop = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => stop, []);
+
+  const start = () => {
+    window.open(authUrl, "prism-auth", "width=600,height=700");
+    setStatus("waiting");
+    setMessage("authorization in progress…");
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const d = await getJSON<AuthStatus>(
+          `/backends/${encodeURIComponent(backendId)}/auth-status`,
+        );
+        if (d.status === "connected") {
+          stop();
+          await onConnected();
+        } else if (d.status.startsWith("failed")) {
+          stop();
+          setStatus("error");
+          const reason = d.status.replace("failed:", "");
+          setMessage("failed: " + reason);
+          showError(`auth failed for ${backendId}: ${reason}`);
+        }
+      } catch {
+        // keep polling
+      }
+    }, 2000);
+    timeoutRef.current = window.setTimeout(
+      () => {
+        stop();
+        setStatus("timeout");
+        setMessage("authentication timed out.");
+      },
+      5 * 60 * 1000,
+    );
+  };
+
+  return (
+    <div class="section">
+      <div class="card form-card">
+        <div class="form-card-title">authenticate with provider</div>
+        <div class="oauth-flow">
+          <button class="save-btn" onClick={start} disabled={status === "waiting"}>
+            {status === "idle"
+              ? "authenticate"
+              : status === "waiting"
+                ? "waiting…"
+                : "retry"}
+          </button>
+          <span
+            class={
+              status === "error" || status === "timeout"
+                ? "oauth-status error"
+                : "oauth-status"
+            }
+          >
+            {message}
+          </span>
+          <button
+            class="cancel-btn"
+            style="margin-left:auto"
+            onClick={() => {
+              stop();
+              onCancel();
+            }}
+          >
+            cancel
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

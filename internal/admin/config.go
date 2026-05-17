@@ -111,6 +111,10 @@ func (a *API) handlePutAdminAuth(w http.ResponseWriter, r *http.Request) {
 // handleTestAdminAuth probes the OIDC issuer for discovery and returns the
 // authorization/token endpoints. Does not persist anything.
 func (a *API) handleTestAdminAuth(w http.ResponseWriter, r *http.Request) {
+	if a.adminProbeLimiter != nil && !a.adminProbeLimiter.allow(r) {
+		http.Error(w, "too many discovery probes; try again in a moment", http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAdminAuthPayloadBytes)
 	var p adminAuthPutPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {

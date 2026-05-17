@@ -1,7 +1,11 @@
-import { useMemo } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { useLocation } from "preact-iso";
 import { info, agents, backends, events } from "../state";
 import { fmtTimeOfDay, splitLabel } from "../util/time";
+import { mcpURLFromBase } from "../util/mcp";
+import { getJSON } from "../api/client";
+import type { NetworkSettings } from "../api/types";
+import { CopyId } from "../components/CopyId";
 
 export function Overview() {
   const i = info.data.value;
@@ -44,6 +48,8 @@ export function Overview() {
           </div>
         </div>
       </div>
+
+      <McpConnectBanner />
 
       <div class="tile-grid">
         <Tile
@@ -93,6 +99,55 @@ export function Overview() {
       </div>
 
       <RecentActivity events={ev} nameCacheBuilder={ag} />
+    </div>
+  );
+}
+
+function McpConnectBanner() {
+  const loc = useLocation();
+  const [publicURL, setPublicURL] = useState<string | null>(null);
+
+  useEffect(() => {
+    getJSON<NetworkSettings>("/config/network")
+      .then((v) => setPublicURL(v.public_url || ""))
+      .catch(() => setPublicURL(""));
+  }, []);
+
+  if (publicURL === null) return null;
+  const mcpURL = mcpURLFromBase(publicURL);
+
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">mcp endpoint</span>
+        <span class="section-sub">
+          give this url to agents (Claude, Cursor, …) to connect via OAuth + DCR
+        </span>
+      </div>
+      <div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        {mcpURL ? (
+          <>
+            <code style="font-size:14px;flex:1;min-width:0;overflow-wrap:anywhere">
+              {mcpURL}
+            </code>
+            <CopyId value={mcpURL} label="copy" />
+          </>
+        ) : (
+          <>
+            <div class="hint-text" style="flex:1;min-width:0">
+              set <strong>gateway public url</strong> in settings to publish
+              an mcp endpoint url.
+            </div>
+            <button
+              type="button"
+              class="section-btn"
+              onClick={() => loc.route("/config")}
+            >
+              settings
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

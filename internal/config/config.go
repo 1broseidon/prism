@@ -69,6 +69,16 @@ type Config struct {
 	// bridge instead of being spawned inside the gateway process.
 	BridgeURL string `json:"bridge_url,omitempty"`
 
+	// BridgeURLs is the advanced multi-bridge form. When set, command-type
+	// backends are assigned to a bridge deterministically by backend ID.
+	BridgeURLs []string `json:"bridge_urls,omitempty"`
+
+	// StdioSpawnMode controls how command-type MCP servers are spawned.
+	// "auto" starts an internal Docker bridge when possible, "bridge_http"
+	// requires bridge_url/bridge_urls, "internal_docker" requires a local Docker
+	// socket, and "process" runs commands directly in the Prism process.
+	StdioSpawnMode string `json:"stdio_spawn_mode,omitempty"`
+
 	// ShutdownTimeout is the graceful shutdown duration. Default: "10s".
 	ShutdownTimeout Duration `json:"shutdown_timeout,omitempty"`
 }
@@ -363,6 +373,8 @@ type Loaded struct {
 	PublicURLConfigured      string
 	AdminPublicURLConfigured string
 	BridgeURL                string
+	BridgeURLs               []string
+	StdioSpawnMode           string
 	Servers                  []ServerConfig
 	EmbeddedAuth             *EmbeddedAuthConfig
 	Store                    *StoreConfig
@@ -422,6 +434,10 @@ func validate(cfg *Config) error {
 		if err := validateAdminAuth(cfg.AdminAuth); err != nil {
 			return err
 		}
+	}
+
+	if err := validateStdioSpawnMode(cfg.StdioSpawnMode); err != nil {
+		return err
 	}
 
 	return validateRateLimit(cfg.RateLimit)
@@ -569,6 +585,15 @@ func validateRateLimit(rl *RateLimitConfig) error {
 	return nil
 }
 
+func validateStdioSpawnMode(mode string) error {
+	switch strings.TrimSpace(mode) {
+	case "", "auto", "bridge_http", "internal_docker", "process", "disabled":
+		return nil
+	default:
+		return fmt.Errorf("stdio_spawn_mode must be one of auto, bridge_http, internal_docker, process, disabled")
+	}
+}
+
 // --- Expansion ---
 
 // expand converts the user-facing Config into the internal Loaded representation.
@@ -576,7 +601,9 @@ func expand(cfg *Config) (*Loaded, error) {
 	loaded := &Loaded{
 		Listen:          cfg.Listen,
 		Admin:           cfg.Admin,
-		BridgeURL:       strings.TrimRight(cfg.BridgeURL, "/"),
+		BridgeURL:       firstBridgeURL(cfg.BridgeURL, cfg.BridgeURLs),
+		BridgeURLs:      normalizeBridgeURLs(cfg.BridgeURL, cfg.BridgeURLs),
+		StdioSpawnMode:  normalizeStdioSpawnMode(cfg.StdioSpawnMode),
 		Store:           cfg.Store,
 		TLS:             cfg.TLS,
 		Audit:           cfg.Audit,
@@ -638,6 +665,42 @@ func expand(cfg *Config) (*Loaded, error) {
 	}
 
 	return loaded, nil
+}
+
+func normalizeStdioSpawnMode(mode string) string {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return "auto"
+	}
+	return mode
+}
+
+func normalizeBridgeURLs(primary string, rest []string) []string {
+	inputs := make([]string, 0, len(rest)+1)
+	if primary != "" {
+		inputs = append(inputs, primary)
+	}
+	inputs = append(inputs, rest...)
+
+	seen := make(map[string]bool, len(inputs))
+	urls := make([]string, 0, len(inputs))
+	for _, raw := range inputs {
+		u := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		urls = append(urls, u)
+	}
+	return urls
+}
+
+func firstBridgeURL(primary string, rest []string) string {
+	urls := normalizeBridgeURLs(primary, rest)
+	if len(urls) == 0 {
+		return ""
+	}
+	return urls[0]
 }
 
 // derivePublicURL resolves the external base URL for a listener.

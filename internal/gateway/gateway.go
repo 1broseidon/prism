@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -74,6 +75,8 @@ type Gateway struct {
 	policyResolver atomic.Pointer[policyResolverBox]
 	authFlows      any //nolint:unused // used by oauth.go behind mcp_go_client_oauth build tag
 	bridgeURL      string
+	bridgeURLs     []string
+	stdioDisabled  string
 	network        *networkRuntime
 }
 
@@ -162,12 +165,36 @@ func (g *Gateway) SetStore(s store.Store) {
 
 // SetBridgeURL configures the prism-bridge manage endpoint used for delegated command backends.
 func (g *Gateway) SetBridgeURL(u string) {
-	g.bridgeURL = strings.TrimRight(u, "/")
+	g.SetBridgeURLs([]string{u})
+}
+
+// SetBridgeURLs configures one or more prism-bridge manage endpoints used for
+// delegated command backends. Backend IDs are mapped to bridges
+// deterministically so delete/reconnect operations find the same bridge.
+func (g *Gateway) SetBridgeURLs(urls []string) {
+	normalized := normalizeBridgeURLs(urls)
+	g.bridgeURLs = normalized
+	if len(normalized) == 0 {
+		g.bridgeURL = ""
+		return
+	}
+	g.bridgeURL = normalized[0]
 }
 
 // BridgeURL returns the configured prism-bridge manage URL, if any.
 func (g *Gateway) BridgeURL() string {
 	return g.bridgeURL
+}
+
+// BridgeURLs returns the configured prism-bridge manage URLs, if any.
+func (g *Gateway) BridgeURLs() []string {
+	return append([]string(nil), g.bridgeURLs...)
+}
+
+// DisableProcessStdio prevents command backends from falling back to running
+// directly in the Prism process when no bridge is configured.
+func (g *Gateway) DisableProcessStdio(reason string) {
+	g.stdioDisabled = strings.TrimSpace(reason)
 }
 
 // NetworkSettings returns the current runtime network settings.
@@ -357,36 +384,69 @@ func (g *Gateway) LoadPersistedBackends(ctx context.Context) {
 			continue
 		}
 
-		sc := &config.ServerConfig{
-			ID:            backendID,
-			Namespace:     backendID,
-			URL:           pb.URL,
-			Env:           pb.Env,
-			BridgeManaged: pb.BridgeManaged,
-			BridgeRuntime: pb.Runtime,
-			Timeout:       config.Duration(30 * time.Second),
-		}
-		if pb.Command != "" {
-			sc.OriginalCommand = append([]string{pb.Command}, pb.Args...)
-			if g.bridgeURL != "" {
-				endpoint, err := g.spawnBridgeBackend(ctx, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime)
-				if err != nil {
-					g.logger.Warn("failed to delegate persisted backend to bridge", "id", backendID, "error", err)
-					continue
-				}
-				sc.URL = endpoint
-				sc.BridgeManaged = true
-			} else {
-				sc.Command = append([]string{pb.Command}, pb.Args...)
-			}
-		}
-
-		if err := g.ConnectBackend(ctx, sc); err != nil {
+		if err := g.connectPersistedBackend(ctx, backendID, &pb); err != nil {
 			g.logger.Warn("failed to reconnect persisted backend", "id", backendID, "error", err)
 			continue
 		}
 		g.logger.Info("restored persisted backend", "id", backendID)
 	}
+}
+
+// ReconnectBackend reconnects a backend from persisted KV state without
+// deleting its stored config or OAuth tokens. It is used by the admin UI for
+// backends that failed startup restore or were temporarily unreachable.
+func (g *Gateway) ReconnectBackend(ctx context.Context, backendID string) error {
+	if g.kvStore == nil {
+		return fmt.Errorf("backend persistence is not configured")
+	}
+	g.mu.RLock()
+	_, connected := g.backends[backendID]
+	g.mu.RUnlock()
+	if connected {
+		return nil
+	}
+
+	data, err := g.kvStore.Get(backendKVPrefix + backendID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("backend %q is not persisted", backendID)
+		}
+		return fmt.Errorf("read persisted backend %q: %w", backendID, err)
+	}
+	var pb persistedBackend
+	if err := json.Unmarshal(data, &pb); err != nil {
+		return fmt.Errorf("decode persisted backend %q: %w", backendID, err)
+	}
+	return g.connectPersistedBackend(ctx, backendID, &pb)
+}
+
+func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string, pb *persistedBackend) error {
+	sc := &config.ServerConfig{
+		ID:            backendID,
+		Namespace:     backendID,
+		URL:           pb.URL,
+		Env:           pb.Env,
+		BridgeManaged: pb.BridgeManaged,
+		BridgeRuntime: pb.Runtime,
+		Timeout:       config.Duration(30 * time.Second),
+	}
+	if pb.Command != "" {
+		sc.OriginalCommand = append([]string{pb.Command}, pb.Args...)
+		if g.bridgeURL != "" {
+			spawned, err := g.spawnBridgeBackend(ctx, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime)
+			if err != nil {
+				return fmt.Errorf("delegate persisted backend to bridge: %w", err)
+			}
+			sc.URL = spawned.Endpoint
+			sc.BridgeManaged = true
+			return g.connectBackendWithBridgeRetry(ctx, sc, &spawned, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime)
+		}
+		if err := g.stdioUnavailableError(); err != nil {
+			return err
+		}
+		sc.Command = append([]string{pb.Command}, pb.Args...)
+	}
+	return g.ConnectBackend(ctx, sc)
 }
 
 // HasPersistedBackends returns true if the KV store has any persisted backend configs.
@@ -862,6 +922,10 @@ type BackendStatus struct {
 	Tools          []BackendToolInfo      `json:"tools,omitempty"`
 	BridgeManaged  bool                   `json:"bridge_managed,omitempty"`
 	Runtime        string                 `json:"runtime,omitempty"`
+	// Disconnected is true for backends that exist in KV but failed to
+	// reconnect on the current run. Lets the UI flag them as broken/
+	// deletable without confusing them with healthy backends.
+	Disconnected bool `json:"disconnected,omitempty"`
 }
 
 // RegisterCredential registers a credential for a backend in the credential store.
@@ -890,12 +954,13 @@ func (g *Gateway) CredentialInfo(backendID string) *BackendCredentialInfo {
 	}
 }
 
-// Status returns status info for all backends.
+// Status returns status info for all backends, including any KV-persisted
+// entries that failed to reconnect this run (so the UI can show them as
+// broken and the operator can remove them).
 func (g *Gateway) Status() []BackendStatus {
 	g.mu.RLock()
-	defer g.mu.RUnlock()
-
 	statuses := make([]BackendStatus, 0, len(g.backends))
+	connected := make(map[string]struct{}, len(g.backends))
 	for _, b := range g.backends {
 		s := BackendStatus{
 			ID:            b.Config.ID,
@@ -910,6 +975,36 @@ func (g *Gateway) Status() []BackendStatus {
 		}
 		s.Credential = g.CredentialInfo(b.Config.ID)
 		statuses = append(statuses, s)
+		connected[b.Config.ID] = struct{}{}
+	}
+	g.mu.RUnlock()
+
+	if g.kvStore != nil {
+		keys, err := g.kvStore.List(backendKVPrefix)
+		if err == nil {
+			for _, key := range keys {
+				id := strings.TrimPrefix(key, backendKVPrefix)
+				if _, ok := connected[id]; ok {
+					continue
+				}
+				orphan := BackendStatus{
+					ID:             id,
+					Namespace:      id,
+					Disconnected:   true,
+					CircuitBreaker: "open",
+				}
+				if data, getErr := g.kvStore.Get(key); getErr == nil {
+					var pb persistedBackend
+					if json.Unmarshal(data, &pb) == nil {
+						orphan.URL = pb.URL
+						orphan.BridgeManaged = pb.BridgeManaged
+						orphan.Runtime = pb.Runtime
+					}
+				}
+				orphan.Credential = g.CredentialInfo(id)
+				statuses = append(statuses, orphan)
+			}
+		}
 	}
 	return statuses
 }

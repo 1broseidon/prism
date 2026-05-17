@@ -16,12 +16,21 @@ COPY . .
 # Replace the source dist/ with the freshly built SPA so the embed is current.
 COPY --from=spa /spa/dist ./internal/admin/web/dist
 RUN CGO_ENABLED=0 go build -tags mcp_go_client_oauth -o /prism ./cmd/prism
+RUN CGO_ENABLED=0 go build -tags mcp_go_client_oauth -o /prism-bridge ./cmd/prism-bridge
 
 # Stage 3: minimal runtime.
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata bash python3 nodejs npm uv
 COPY --from=build /prism /usr/local/bin/prism
+COPY --from=build /prism-bridge /usr/local/bin/prism-bridge
+COPY deploy/config.container.json /etc/prism/config.json
 WORKDIR /etc/prism
+ENV PRISM_IN_CONTAINER=1 \
+    PRISM_DATA_DIR=/data \
+    PRISM_KV_KEY_FILE=/data/.prism/kv-encryption.key \
+    PRISM_SIGNING_KEY_FILE=/data/.prism/signing-key.pem \
+    PRISM_SANDBOX_IMAGE=ghcr.io/1broseidon/prism:latest
+VOLUME ["/data"]
 EXPOSE 8080 9086
 ENTRYPOINT ["prism"]
 CMD ["-config", "/etc/prism/config.json"]

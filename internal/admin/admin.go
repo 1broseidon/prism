@@ -62,6 +62,7 @@ type API struct {
 	groupMgr             GroupManager
 	oauthCallbackHandler http.Handler      // optional: gateway's OAuth callback handler
 	auth                 *adminauth.Holder // holder for live admin auth service; zero-value = open
+	adminProbeLimiter    *adminProbeRateLimiter
 	startedAt            time.Time
 }
 
@@ -91,6 +92,7 @@ func NewAPI(
 		groupMgr:             groupMgr,
 		oauthCallbackHandler: oauthCallback,
 		auth:                 auth,
+		adminProbeLimiter:    newAdminProbeRateLimiter(),
 		startedAt:            time.Now(),
 	}
 }
@@ -138,7 +140,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /groups/", a.admin(http.HandlerFunc(a.handleSetGroup)))
 	mux.Handle("DELETE /groups/", a.admin(http.HandlerFunc(a.handleDeleteGroup)))
 	mux.Handle("PUT /defaults", a.admin(http.HandlerFunc(a.handleSetDefaults)))
-	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleAddBackend)))
+	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
 	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
 
 	if a.oauthCallbackHandler != nil {
@@ -153,6 +155,16 @@ func (a *API) Handler() http.Handler {
 	// rejects API calls. Auth gating happens inside the SPA via /auth/me.
 	mux.HandleFunc("GET /", a.handleSPA)
 	return mux
+}
+
+// handleBackendPost dispatches POST /backends/{id} and
+// POST /backends/{id}/reconnect.
+func (a *API) handleBackendPost(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/reconnect") {
+		a.handleReconnectBackend(w, r)
+		return
+	}
+	a.handleAddBackend(w, r)
 }
 
 // session wraps a handler with RequireSession when auth is configured.

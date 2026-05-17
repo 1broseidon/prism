@@ -53,6 +53,9 @@ export interface Backend {
   credential?: BackendCredentialInfo;
   tools?: BackendTool[];
   circuit_breaker?: string;
+  bridge_managed?: boolean;
+  runtime?: string;
+  disconnected?: boolean;
 }
 
 export interface Group {
@@ -96,6 +99,7 @@ export interface AddBackendBody {
 
 export type AddBackendResponse =
   | { status: "ok"; id: string }
+  | { status: "connecting"; id: string }
   | { status: "auth_required"; auth_url: string; state: string; backend_id: string }
   | {
       status: "manual_oauth_required";

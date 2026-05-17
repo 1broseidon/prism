@@ -7,6 +7,7 @@ import {
 } from "../api/client";
 import { showError, withToast } from "../state/toasts";
 import { canMutate, refreshMe } from "../state/me";
+import { mcpURLFromBase } from "../util/mcp";
 import type {
   AdminAuthPutPayload,
   AdminAuthRule,
@@ -193,7 +194,7 @@ export function Config() {
         </div>
       </div>
 
-      <NetworkSection mutate={mutate} />
+      <NetworkSection mutate={mutate} onSaved={load} />
 
       <div class="section">
         <div class="section-header">
@@ -568,7 +569,13 @@ function RuleMatchers({
   );
 }
 
-function NetworkSection({ mutate }: { mutate: boolean }) {
+function NetworkSection({
+  mutate,
+  onSaved,
+}: {
+  mutate: boolean;
+  onSaved: () => Promise<void>;
+}) {
   const [loaded, setLoaded] = useState<NetworkSettings | null>(null);
   const [adminURL, setAdminURL] = useState("");
   const [publicURL, setPublicURL] = useState("");
@@ -601,6 +608,7 @@ function NetworkSection({ mutate }: { mutate: boolean }) {
       });
       setLoaded(next);
       setDirty(false);
+      await onSaved();
     });
   };
 
@@ -629,8 +637,8 @@ function NetworkSection({ mutate }: { mutate: boolean }) {
             }}
           />
           <div class="hint-text" style="margin-top:4px">
-            pinned redirect_uri for backend oauth flows. when blank, prism
-            derives it from the inbound request.
+            pins admin sign-in callbacks and backend oauth flows. when blank,
+            backend oauth derives from the inbound request.
           </div>
         </Field>
         <Field label="gateway public url">
@@ -639,7 +647,7 @@ function NetworkSection({ mutate }: { mutate: boolean }) {
             class="config-input"
             value={publicURL}
             spellcheck={false}
-            placeholder="https://prism.example.com:8443"
+            placeholder="https://prism.example.com"
             disabled={!mutate}
             onInput={(e) => {
               setPublicURL((e.target as HTMLInputElement).value);
@@ -650,6 +658,11 @@ function NetworkSection({ mutate }: { mutate: boolean }) {
             advertised in /.well-known/oauth-protected-resource for mcp
             clients. optional; defaults to the listen address.
           </div>
+          {publicURL.trim() && (
+            <div class="hint-text" style="margin-top:4px">
+              mcp clients connect at <code>{mcpURLFromBase(publicURL)}</code>
+            </div>
+          )}
         </Field>
         <label class="config-toggle">
           <input

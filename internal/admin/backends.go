@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // BackendConfig is the JSON body for adding a backend at runtime.
@@ -58,6 +60,12 @@ type BackendManager interface {
 	// NotifyToolsChanged sends tools/list_changed to all MCP sessions,
 	// causing clients to re-fetch their tool list with current policy.
 	NotifyToolsChanged()
+}
+
+// BackendReconnector is implemented by backend managers that can reconnect a
+// KV-persisted backend without deleting its stored config or OAuth tokens.
+type BackendReconnector interface {
+	ReconnectBackend(ctx context.Context, id string) error
 }
 
 // callbackBaseFromRequest derives the externally-reachable base URL the OAuth
@@ -228,12 +236,67 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if shouldAddBackendAsync(&cfg) {
+		a.addBackendAsync(id, &cfg)
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "connecting", "id": id})
+		return
+	}
+
 	if err := a.backendMgr.AddBackend(r.Context(), id, cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok", "id": id})
+}
+
+func shouldAddBackendAsync(cfg *BackendConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.Command != "" && cfg.URL == ""
+}
+
+func (a *API) addBackendAsync(id string, cfg *BackendConfig) {
+	if cfg == nil {
+		return
+	}
+	asyncCfg := *cfg
+	go func() {
+		// Let the HTTP response flush before Docker creates a sandbox veth;
+		// Chrome can otherwise abort the in-flight fetch with ERR_NETWORK_CHANGED.
+		time.Sleep(250 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := a.backendMgr.AddBackend(ctx, id, asyncCfg); err != nil {
+			slog.Warn("async backend add failed", "id", id, "error", err) //nolint:gosec // id was validated before this goroutine starts
+		}
+	}()
+}
+
+func (a *API) handleReconnectBackend(w http.ResponseWriter, r *http.Request) {
+	if a.backendMgr == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "backend management not available"})
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/backends/")
+	id := strings.TrimSuffix(path, "/reconnect")
+	if id == path || !isValidID(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid backend reconnect path"})
+		return
+	}
+
+	reconnector, ok := a.backendMgr.(BackendReconnector)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "backend reconnect not available"})
+		return
+	}
+	if err := reconnector.ReconnectBackend(r.Context(), id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
 }
 
 func (a *API) handleRemoveBackend(w http.ResponseWriter, r *http.Request) {

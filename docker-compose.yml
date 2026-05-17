@@ -1,0 +1,35 @@
+services:
+  prism:
+    build:
+      context: .
+      dockerfile: cmd/prism/Dockerfile
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - prism-data:/data
+      - ./config.docker-qa.json:/etc/prism/config.json:ro
+    environment:
+      - HOME=/data
+    command: ["serve", "--config", "/etc/prism/config.json"]
+    depends_on:
+      bridge:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bridge:
+    build:
+      context: .
+      dockerfile: cmd/prism-bridge/Dockerfile
+    command: ["manage", "--runtime", "docker", "--network", "prism_default", "--image-full", "prism-bridge:full"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  prism-data:

@@ -66,6 +66,28 @@ func TestPolicyFromContext(t *testing.T) {
 	}
 }
 
+func TestProtectedResourceMetadataURL(t *testing.T) {
+	tests := []struct {
+		resource string
+		want     string
+	}{
+		{
+			resource: "https://mcp.dfam.one/mcp",
+			want:     "https://mcp.dfam.one/.well-known/oauth-protected-resource/mcp",
+		},
+		{
+			resource: "https://mcp.dfam.one/",
+			want:     "https://mcp.dfam.one/.well-known/oauth-protected-resource",
+		},
+	}
+
+	for _, tt := range tests {
+		if got := protectedResourceMetadataURL(tt.resource); got != tt.want {
+			t.Fatalf("metadata URL for %q = %q, want %q", tt.resource, got, tt.want)
+		}
+	}
+}
+
 func TestRequireScope(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

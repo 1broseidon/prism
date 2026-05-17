@@ -137,6 +137,33 @@ func TestLoadNoMcpServersField(t *testing.T) {
 	}
 }
 
+func TestLoadBridgeURLsAndStdioMode(t *testing.T) {
+	path := writeConfig(t, `{
+		"bridge_url": "http://bridge-a:3001/",
+		"bridge_urls": ["http://bridge-b:3001", "http://bridge-a:3001"],
+		"stdio_spawn_mode": "bridge_http"
+	}`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if c.BridgeURL != "http://bridge-a:3001" {
+		t.Fatalf("bridge_url = %q", c.BridgeURL)
+	}
+	want := []string{"http://bridge-a:3001", "http://bridge-b:3001"}
+	if len(c.BridgeURLs) != len(want) {
+		t.Fatalf("bridge_urls = %v", c.BridgeURLs)
+	}
+	for i := range want {
+		if c.BridgeURLs[i] != want[i] {
+			t.Fatalf("bridge_urls = %v", c.BridgeURLs)
+		}
+	}
+	if c.StdioSpawnMode != "bridge_http" {
+		t.Fatalf("stdio_spawn_mode = %q", c.StdioSpawnMode)
+	}
+}
+
 func TestLoadBothCommandAndURL(t *testing.T) {
 	path := writeConfig(t, `{
 		"mcpServers": {

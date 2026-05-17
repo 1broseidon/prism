@@ -41,6 +41,11 @@ func main() {
 			logger.Error("tool failed", "error", err)
 			os.Exit(1)
 		}
+	case "manage":
+		if err := runManage(logger, args); err != nil {
+			logger.Error("manage failed", "error", err)
+			os.Exit(1)
+		}
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -54,12 +59,14 @@ func printUsage() {
 	fmt.Fprint(os.Stderr, `prism-bridge — stdio→HTTP adapter for MCP servers
 
 Usage:
-  prism-bridge serve [flags] -- <command> [args...]
-  prism-bridge tool  [flags] -- <command> [args...]
+  prism-bridge serve  [flags] -- <command> [args...]
+  prism-bridge tool   [flags] -- <command> [args...]
+  prism-bridge manage [flags]
 
 Subcommands:
-  serve   Wrap a stdio MCP server as a Streamable HTTP endpoint.
-  tool    Wrap a single function (any script/binary) as an MCP tool.
+  serve    Wrap a stdio MCP server as a Streamable HTTP endpoint.
+  tool     Wrap a single function (any script/binary) as an MCP tool.
+  manage   Start an empty bridge and spawn/remove MCP backends dynamically.
 
 Serve flags:
   --port <port>       Port to listen on (default: 3001)
@@ -71,6 +78,19 @@ Tool flags:
   --manifest <file>   Tool manifest JSON (name, description, input schema)
   --name <name>       Tool name (alternative to manifest)
   --description <desc> Tool description (alternative to manifest)
+
+Manage flags:
+  --port <port>         Port to listen on (default: 3001)
+  --host <host>         Host to bind to (default: 0.0.0.0)
+  --max-backends <n>    Maximum concurrent backends (default: 20, 0 = unlimited)
+  --runtime <mode>      Backend runtime: process or docker (default: process)
+  --image <image>       Default Docker image for managed backends
+  --network <network>   Docker network for managed containers
+  --label-prefix <pfx>  Label prefix for managed containers (default: prism.bridge)
+  --image-base <image>  Docker image for base/runtime-neutral backends
+  --image-node <image>  Docker image for node-based backends
+  --image-python <img>  Docker image for python-based backends
+  --image-full <image>  Docker image fallback for managed backends
 
 The command after -- is the stdio MCP server (serve mode) or the function
 to execute per tool call (tool mode).

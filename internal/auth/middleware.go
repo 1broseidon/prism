@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/1broseidon/prism/internal/metrics"
 	"go.opentelemetry.io/otel"
@@ -122,7 +124,7 @@ func writeWWWAuthenticate(w http.ResponseWriter, resourceURI string, status int,
 	parts := []string{}
 
 	if resourceURI != "" {
-		parts = append(parts, fmt.Sprintf("resource_metadata=%q", resourceURI+"/.well-known/oauth-protected-resource"))
+		parts = append(parts, fmt.Sprintf("resource_metadata=%q", protectedResourceMetadataURL(resourceURI)))
 	}
 
 	if status == http.StatusForbidden && scope != "" {
@@ -145,6 +147,23 @@ func writeWWWAuthenticate(w http.ResponseWriter, resourceURI string, status int,
 	} else {
 		http.Error(w, "Forbidden", status)
 	}
+}
+
+func protectedResourceMetadataURL(resourceURI string) string {
+	u, err := url.Parse(resourceURI)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return strings.TrimRight(resourceURI, "/") + "/.well-known/oauth-protected-resource"
+	}
+
+	resourcePath := strings.TrimRight(u.Path, "/")
+	u.Path = "/.well-known/oauth-protected-resource"
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	if resourcePath != "" {
+		u.Path += resourcePath
+	}
+	return u.String()
 }
 
 func joinParts(parts []string) string {

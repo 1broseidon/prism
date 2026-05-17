@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -103,6 +104,28 @@ func postToken(t *testing.T, srv *Server, form url.Values) *httptest.ResponseRec
 	w := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(w, r)
 	return w
+}
+
+func TestVerifyConsentCSRFRequiresMatchingCookieAndFormToken(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader("_csrf=token-1"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.AddCookie(&http.Cookie{Name: consentCSRFCookie, Value: "token-1"})
+	if err := verifyConsentCSRF(r); err != nil {
+		t.Fatalf("matching csrf token rejected: %v", err)
+	}
+
+	r = httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader("_csrf=token-1"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.AddCookie(&http.Cookie{Name: consentCSRFCookie, Value: "token-2"})
+	if err := verifyConsentCSRF(r); err == nil {
+		t.Fatal("expected csrf mismatch to be rejected")
+	}
+
+	r = httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader("_csrf=token-1"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := verifyConsentCSRF(r); err == nil {
+		t.Fatal("expected missing csrf cookie to be rejected")
+	}
 }
 
 func TestTokenEndpoint_ValidClientCredentials(t *testing.T) {
@@ -237,6 +260,42 @@ func TestTokenEndpoint_ScopeExceeded(t *testing.T) {
 	}
 	if resp.Error != "invalid_scope" {
 		t.Errorf("error = %q, want invalid_scope", resp.Error)
+	}
+}
+
+func TestRefreshTokenExpiredAbsoluteAgeRejected(t *testing.T) {
+	srv := newTestServer(t)
+	refresh := "stale-refresh-token"
+	hash := sha256Hash(refresh)
+
+	srv.oauth.mu.Lock()
+	srv.oauth.refresh[hash] = &refreshToken{
+		clientID: "ci-agent",
+		issuedAt: time.Now().Add(-refreshTokenMaxAge - time.Hour),
+	}
+	srv.oauth.mu.Unlock()
+
+	w := postToken(t, srv, url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp OAuthError
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error != "invalid_grant" {
+		t.Fatalf("error = %q, want invalid_grant", resp.Error)
+	}
+
+	srv.oauth.mu.Lock()
+	_, stillPresent := srv.oauth.refresh[hash]
+	srv.oauth.mu.Unlock()
+	if stillPresent {
+		t.Fatal("expired refresh token should be consumed")
 	}
 }
 

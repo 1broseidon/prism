@@ -12,7 +12,27 @@ This guide walks through setting up Prism end-to-end: backends behind the gatewa
 └──────────────┘      └───────────┘      └─────────────────────────┘
 ```
 
-## Build
+## Fastest Start: Docker
+
+For a homelab install, run one container. Prism stores state in `/data` and,
+when the Docker socket is mounted, starts its built-in bridge manager so stdio
+MCP servers such as `npx ...` and `uvx ...` run in sandbox containers.
+
+```bash
+docker run -d \
+  --name prism \
+  -p 8080:8080 \
+  -p 9086:9086 \
+  -v prism-data:/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ghcr.io/1broseidon/prism:latest
+```
+
+Open the admin UI at `http://localhost:9086` and add HTTP or stdio MCP servers
+from the Servers page. Reverse proxies and sidecar bridges are optional
+advanced deployment choices.
+
+## Build From Source
 
 ```bash
 git clone https://github.com/1broseidon/prism.git
@@ -28,7 +48,10 @@ Prism connects to backends over HTTP. There are three ways to set up a backend:
 
 ### Option A: Bridge a stdio MCP server (most common)
 
-Most MCP servers speak stdio — they read/write JSON-RPC on stdin/stdout. The bridge wraps them as HTTP endpoints, each in its own isolated process (or container in production).
+Most MCP servers speak stdio — they read/write JSON-RPC on stdin/stdout. In
+the single-container Docker install, Prism manages the bridge for you and
+spawns each stdio backend in a sandbox container. When running from source or
+separating concerns with compose, you can run `prism-bridge` yourself.
 
 ```bash
 # Wrap any stdio MCP server
@@ -42,10 +65,12 @@ docker run -p 3001:3001 prism-bridge serve --port 3001 -- npx @modelcontextproto
 
 The bridge spawns the stdio server, discovers its tools, and re-exposes them as Streamable HTTP on `/mcp`. Prism connects to `http://localhost:3001/mcp` as if it were a native HTTP server.
 
-**Why not connect directly?** Prism is a gateway — it speaks HTTP. Running stdio servers behind the bridge means:
+**Why bridge stdio?** Prism is a gateway — it speaks HTTP. Running stdio
+servers behind the bridge means:
 - Each server is isolated (own process, own container, own resource limits)
 - No network endpoint for the raw server (agents can't bypass Prism by curling it)
-- Uniform transport — Prism doesn't need to manage subprocesses
+- Uniform transport — Prism can manage HTTP backends and stdio backends through
+  the same gateway surface
 
 ### Option B: Write a tool as a function (simplest)
 

@@ -11,9 +11,11 @@ make build
 # Run the gateway
 ./bin/prism -config /etc/prism/config.json
 
-# Run a bridge (one per stdio backend)
+# Run a bridge manager for stdio backends (advanced sidecar mode)
+./bin/prism-bridge manage --runtime docker --image-full ghcr.io/1broseidon/prism:latest
+
+# Or wrap one stdio backend manually
 ./bin/prism-bridge serve --port 3001 -- npx @modelcontextprotocol/server-github
-./bin/prism-bridge tool --manifest tool.json --port 3002 -- python3 my-tool.py
 ```
 
 Both are static binaries. No runtime dependencies. Run on any Linux/macOS/Windows amd64 or arm64 system.
@@ -107,40 +109,77 @@ tail -f /var/log/prism/audit.json | jq .
 
 ## Docker
 
-### Dockerfile
+### Single Container
 
-```dockerfile
-FROM golang:1.25-alpine AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /prism ./cmd/prism
-
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates
-COPY --from=build /prism /usr/local/bin/prism
-EXPOSE 8080 9086
-ENTRYPOINT ["prism"]
-CMD ["-config", "/etc/prism/config.json"]
-```
-
-### Build and Run
+This is the default homelab path: one container, one persistent volume, and
+optional Docker-sandboxed stdio MCP servers. When `/var/run/docker.sock` is
+mounted, Prism starts an internal `prism-bridge manage` listener on localhost
+and uses it to spawn sandbox containers. HTTP MCP servers work without the
+socket.
 
 ```bash
-docker build -t prism .
 docker run -d \
   --name prism \
   -p 8080:8080 \
   -p 9086:9086 \
-  -v ./config.json:/etc/prism/config.json:ro \
-  -e GITHUB_TOKEN="Bearer ghp_xxx" \
-  prism
+  -v prism-data:/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ghcr.io/1broseidon/prism:latest
 ```
+
+The image includes:
+
+- `prism` for the admin UI, OAuth server, and MCP gateway
+- `prism-bridge` for managed stdio-to-HTTP adapters
+- Node/npm and Python/uv for common `npx` and `uvx` MCP servers
+- a default config at `/etc/prism/config.json` with bbolt state in `/data`
+
+If you build a local image, set the sandbox image so spawned containers use
+the same local build:
+
+```bash
+docker build -t prism:dev .
+docker run -d \
+  --name prism \
+  -p 8080:8080 \
+  -p 9086:9086 \
+  -v prism-data:/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e PRISM_SANDBOX_IMAGE=prism:dev \
+  prism:dev
+```
+
+### Sidecar Bridge
+
+Use this when you want the gateway/admin process separated from Docker socket
+access. Prism connects to one or more bridge managers over HTTP:
+
+```json
+{
+  "bridge_url": "http://prism-bridge:3001",
+  "stdio_spawn_mode": "bridge_http"
+}
+```
+
+For multiple bridge managers:
+
+```json
+{
+  "bridge_urls": [
+    "http://bridge-1:3001",
+    "http://bridge-2:3001",
+    "http://bridge-3:3001"
+  ],
+  "stdio_spawn_mode": "bridge_http"
+}
+```
+
+Backend IDs are assigned to bridges deterministically, and Prism tries the
+next bridge if the selected bridge cannot spawn the backend.
 
 ### Docker Compose
 
-Full stack with gateway + bridged backends:
+Advanced stack with gateway + sidecar bridge:
 
 ```yaml
 services:
@@ -153,10 +192,11 @@ services:
     volumes:
       - ./config.json:/etc/prism/config.json:ro
       - ./audit:/var/log/prism
+    environment:
+      PRISM_BRIDGE_URL: http://prism-bridge:3001
+      PRISM_STDIO_SPAWN_MODE: bridge_http
     depends_on:
-      bridge-github:
-        condition: service_healthy
-      bridge-dns:
+      prism-bridge:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -165,36 +205,35 @@ services:
       timeout: 3s
       retries: 3
 
-  # Bridge: stdio MCP server → HTTP
-  bridge-github:
+  # Bridge manager: spawns stdio MCP servers as sandbox containers.
+  prism-bridge:
     build:
       context: .
       dockerfile: cmd/prism-bridge/Dockerfile
-    command: ["serve", "--port", "3001", "--", "npx", "@modelcontextprotocol/server-github"]
-    environment:
-      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN}
+    image: prism-bridge:full
+    command:
+      - manage
+      - --runtime
+      - docker
+      - --network
+      - prism_default
+      - --image-full
+      - prism-bridge:full
+      - --image-node
+      - prism-bridge:full
+      - --image-python
+      - prism-bridge:full
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
       interval: 10s
       timeout: 3s
       retries: 3
-
-  # Bridge: single function → MCP tool
-  bridge-dns:
-    build:
-      context: .
-      dockerfile: cmd/prism-bridge/Dockerfile
-    command: ["tool", "--manifest", "/tools/check-dns.json", "--port", "3002", "--", "bash", "/tools/check-dns.sh"]
-    volumes:
-      - ./examples/tools:/tools:ro
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3002/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
 ```
 
-Each bridge runs in its own container — isolated resources, isolated filesystem, isolated network. A buggy backend can't affect the gateway or other backends.
+The bridge manager is the only sidecar that needs the Docker socket. It spawns
+one sandbox container per stdio backend.
 
 ## Kubernetes
 

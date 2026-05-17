@@ -80,7 +80,7 @@ func runServe() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	gw := setupGateway(ctx, cfg, logger)
+	gw := setupGateway(logger)
 	defer gw.Close()
 
 	// Open the KV store for persisting DCR clients and refresh tokens.
@@ -89,10 +89,16 @@ func runServe() {
 
 	// Give the gateway access to the KV store for persisting runtime configs.
 	gw.SetStore(kvStore)
-	gw.SetBridgeURL(cfg.BridgeURL)
+	localBridge, err := configureStdioSpawning(ctx, cfg, gw, logger)
+	if err != nil {
+		logger.Error("failed to configure stdio spawning", "error", err)
+		return
+	}
+	defer localBridge.Stop()
 	gw.LoadPersistedCredentials()
 
 	// Network settings: prefer KV (set via the Settings page) over file config.
+	gatewayPublicURL := cfg.PublicURL
 	if ns, nsErr := gateway.LoadNetworkSettings(kvStore); nsErr != nil {
 		logger.Warn("failed to load network settings from KV", "error", nsErr)
 	} else {
@@ -105,6 +111,10 @@ func runServe() {
 			ns.AdminPublicURL = cfg.AdminPublicURLConfigured
 		}
 		gw.SetNetworkSettings(ns)
+		gatewayPublicURL = ns.PublicURL
+		if gatewayPublicURL == "" {
+			gatewayPublicURL = cfg.PublicURL
+		}
 	}
 
 	// Initialize OAuth client support for upstream MCP servers that require authentication.
@@ -115,6 +125,7 @@ func runServe() {
 	// flow returns to the same host the operator hit.
 	oauthCallback := gw.SetupOAuth(cfg.AdminPublicURLConfigured)
 
+	connectConfigBackends(ctx, gw, cfg, logger)
 	gw.LoadPersistedBackends(ctx)
 
 	// Always start the embedded auth server — agents connect via OAuth DCR.
@@ -124,10 +135,11 @@ func runServe() {
 			RequiredScopes:  []string{"mcp:connect"},
 		}
 	}
-	authSrv, authJWKS := setupEmbeddedAuth(cfg, kvStore, logger)
+	authSrv, authJWKS := setupEmbeddedAuth(cfg, kvStore, logger, gatewayPublicURL)
 
-	handler := buildHandler(cfg, gw, authJWKS, authSrv, logger)
-	mainMux := buildMux(cfg, handler, authSrv, logger)
+	resourceURI := mcpResourceURL(gatewayPublicURL)
+	handler := buildHandler(cfg, gw, authJWKS, authSrv, logger, resourceURI)
+	mainMux := buildMux(cfg, handler, authSrv, logger, resourceURI)
 
 	mainServer := &http.Server{
 		Handler:           mainMux,
@@ -195,7 +207,7 @@ func runServe() {
 
 	errCh := make(chan error, 2)
 	startServers(cfg, mainServer, adminServer, logger, errCh)
-	printStartupBanner(cfg, gw, logger)
+	printStartupBanner(cfg, logger)
 	waitForShutdown(cfg, *configPath, mainServer, adminServer, gw, authSrv, logger, errCh)
 }
 
@@ -220,6 +232,18 @@ func initAdminAuth(ctx context.Context, fileCfg *config.AdminAuthConfig, kv stor
 			logger.Warn("seed admin auth state failed", "error", err)
 		}
 	}
+	if st.Config != nil {
+		changed, err := syncAdminAuthRedirectFromNetwork(kv, st.Config)
+		if err != nil {
+			logger.Warn("sync admin auth redirect from network settings failed", "error", err)
+		} else if changed {
+			if err := adminauth.SaveState(kv, st); err != nil {
+				logger.Warn("persist synced admin auth redirect failed", "error", err)
+			} else {
+				logger.Info("synced admin auth redirect from network settings", "redirect_url", st.Config.RedirectURL)
+			}
+		}
+	}
 	if st.Enabled && st.Config != nil {
 		config.ApplyAdminAuthDefaults(st.Config)
 		if err := holder.Reload(ctx, st.Config); err != nil {
@@ -235,28 +259,53 @@ func initAdminAuth(ctx context.Context, fileCfg *config.AdminAuthConfig, kv stor
 	return holder, nil
 }
 
-// setupGateway creates the gateway and connects backends.
-// Audit logger is wired separately in main() so it can be shared with the admin API.
-func setupGateway(ctx context.Context, cfg *config.Loaded, logger *slog.Logger) *gateway.Gateway {
-	gw := gateway.New(logger)
+func syncAdminAuthRedirectFromNetwork(kv store.Store, cfg *config.AdminAuthConfig) (bool, error) {
+	if cfg == nil {
+		return false, nil
+	}
+	network, err := gateway.LoadNetworkSettings(kv)
+	if err != nil {
+		return false, err
+	}
+	if network.AdminPublicURL == "" {
+		return false, nil
+	}
+	redirectURL := strings.TrimRight(network.AdminPublicURL, "/") + "/auth/callback"
+	if cfg.RedirectURL == redirectURL {
+		return false, nil
+	}
+	cfg.RedirectURL = redirectURL
+	return true, nil
+}
 
+// setupGateway creates the gateway.
+// Audit logger is wired separately in main() so it can be shared with the admin API.
+func setupGateway(logger *slog.Logger) *gateway.Gateway {
+	return gateway.New(logger)
+}
+
+func connectConfigBackends(ctx context.Context, gw *gateway.Gateway, cfg *config.Loaded, logger *slog.Logger) {
 	for i := range cfg.Servers {
-		if err := gw.ConnectBackend(ctx, &cfg.Servers[i]); err != nil {
+		if err := gw.ConnectBackendViaBridge(ctx, &cfg.Servers[i]); err != nil {
 			logger.Error("failed to connect backend", "id", cfg.Servers[i].ID, "error", err)
 		}
 	}
-
-	return gw
 }
 
 // setupEmbeddedAuth creates an in-process OAuth 2.1 authorization server
 // from the policy.agents config. Returns the server and its JWKS bytes
 // (for pre-seeding the token validator).
-func setupEmbeddedAuth(cfg *config.Loaded, kvStore store.Store, logger *slog.Logger) (srv *authserver.Server, jwksData []byte) {
+func setupEmbeddedAuth(cfg *config.Loaded, kvStore store.Store, logger *slog.Logger, publicURL string) (srv *authserver.Server, jwksData []byte) {
 	ea := cfg.EmbeddedAuth
 
-	// Derive issuer from listen address.
-	issuer := "http://localhost" + cfg.Listen
+	// Issuer must equal the externally-reachable URL — discovery docs and
+	// JWT `iss` claims advertise it, and DCR clients use it to derive the
+	// token/authorize/register endpoints. Pinned at startup; runtime changes
+	// to public_url require a restart so existing tokens stay verifiable.
+	issuer := strings.TrimRight(publicURL, "/")
+	if issuer == "" {
+		issuer = "http://localhost" + cfg.Listen
+	}
 	ea.Issuer = issuer
 
 	// Convert embedded clients to authserver clients.
@@ -398,7 +447,7 @@ func (m *authServerGroupManager) SetDefaultScopes(scopes []string) error {
 }
 
 // buildHandler wraps the gateway handler with auth and rate-limit middleware.
-func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, authSrv *authserver.Server, logger *slog.Logger) http.Handler {
+func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, authSrv *authserver.Server, logger *slog.Logger, resourceURI string) http.Handler {
 	var middlewares []middleware.Middleware
 
 	ea := cfg.EmbeddedAuth
@@ -412,7 +461,7 @@ func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, auth
 	})
 
 	logger.Info("OAuth 2.1 token validation enabled", "issuer", ea.Issuer)
-	middlewares = append(middlewares, auth.Middleware(validator, ""))
+	middlewares = append(middlewares, auth.Middleware(validator, resourceURI))
 
 	if cfg.RateLimit != nil {
 		middlewares = append(middlewares, middleware.RateLimit(middleware.RateLimitConfig{
@@ -430,7 +479,7 @@ func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, auth
 }
 
 // buildMux creates the HTTP mux with the MCP handler and auth endpoints.
-func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Server, logger *slog.Logger) *http.ServeMux {
+func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Server, logger *slog.Logger, resourceURI string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Mount embedded auth endpoints if present.
@@ -447,11 +496,15 @@ func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Serv
 
 	// Protected Resource Metadata (RFC 9728) — tells MCP clients where to authenticate.
 	meta := &auth.ProtectedResourceMetadata{
+		Resource:               resourceURI,
 		AuthorizationServers:   []string{cfg.EmbeddedAuth.Issuer},
 		ScopesSupported:        cfg.EmbeddedAuth.ScopesSupported,
 		BearerMethodsSupported: []string{"header"},
 	}
-	mux.Handle("/.well-known/oauth-protected-resource", auth.DiscoveryHandler(meta))
+	resourceMetadataHandler := auth.DiscoveryHandler(meta)
+	mux.Handle("/.well-known/oauth-protected-resource", resourceMetadataHandler)
+	mux.Handle("/.well-known/oauth-protected-resource/mcp", resourceMetadataHandler)
+	mux.Handle("/.well-known/oauth-protected-resource/mcp/", resourceMetadataHandler)
 
 	mux.Handle("/mcp", handler)
 	mux.Handle("/mcp/", handler)
@@ -465,6 +518,14 @@ func buildMux(cfg *config.Loaded, handler http.Handler, authSrv *authserver.Serv
 	})
 
 	return mux
+}
+
+func mcpResourceURL(publicURL string) string {
+	base := strings.TrimRight(publicURL, "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/mcp"
 }
 
 // startServers launches the main and admin HTTP servers.
@@ -499,13 +560,7 @@ func startServers(cfg *config.Loaded, mainSrv, adminSrv *http.Server, logger *sl
 }
 
 // printStartupBanner prints the ready message with connection instructions.
-func printStartupBanner(cfg *config.Loaded, gw *gateway.Gateway, logger *slog.Logger) {
-	toolCount := 0
-	for _, s := range gw.Status() {
-		_ = s // count backends
-		toolCount++
-	}
-
+func printStartupBanner(cfg *config.Loaded, logger *slog.Logger) {
 	// Build listen URL for display.
 	scheme := "http"
 	if cfg.TLS != nil {
@@ -700,12 +755,16 @@ func openStore(cfg *config.Loaded, logger *slog.Logger) store.Store {
 	default: // "bbolt" or empty
 		path := sc.Path
 		if path == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				logger.Warn("cannot determine home dir for store — using temp dir", "error", err)
-				home = os.TempDir()
+			if dataDir := strings.TrimSpace(os.Getenv("PRISM_DATA_DIR")); dataDir != "" {
+				path = filepath.Join(dataDir, "prism.db")
+			} else {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					logger.Warn("cannot determine home dir for store — using temp dir", "error", err)
+					home = os.TempDir()
+				}
+				path = filepath.Join(home, ".prism", "prism.db")
 			}
-			path = filepath.Join(home, ".prism", "prism.db")
 		}
 		s, err := store.NewBoltStore(path)
 		if err != nil {
@@ -718,25 +777,28 @@ func openStore(cfg *config.Loaded, logger *slog.Logger) store.Store {
 }
 
 // ensureSigningKey returns the path to a persistent RSA signing key.
-// On first run, generates a key at ~/.prism/signing-key.pem.
+// On first run, generates a key at $PRISM_SIGNING_KEY_FILE or
+// ~/.prism/signing-key.pem.
 // On subsequent runs, reuses it — tokens survive restarts.
 func ensureSigningKey(logger *slog.Logger) string {
-	home, homeErr := os.UserHomeDir()
-	if homeErr != nil {
-		logger.Warn("cannot determine home dir — using ephemeral signing key", "error", homeErr)
-		return ""
+	keyPath := strings.TrimSpace(os.Getenv("PRISM_SIGNING_KEY_FILE"))
+	if keyPath == "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			logger.Warn("cannot determine home dir — using ephemeral signing key", "error", homeErr)
+			return ""
+		}
+		keyPath = filepath.Join(home, ".prism", "signing-key.pem")
 	}
-
-	dir := filepath.Join(home, ".prism")
-	keyPath := filepath.Join(dir, "signing-key.pem")
+	dir := filepath.Dir(keyPath)
 
 	// Already exists — reuse it.
-	if _, statErr := os.Stat(keyPath); statErr == nil {
+	if _, statErr := os.Stat(keyPath); statErr == nil { //nolint:gosec // operator-configured key path
 		return keyPath
 	}
 
 	// Create dir and generate key.
-	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
+	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil { //nolint:gosec // operator-configured key path
 		logger.Warn("cannot create ~/.prism — using ephemeral signing key", "error", mkErr)
 		return ""
 	}
@@ -752,7 +814,7 @@ func ensureSigningKey(logger *slog.Logger) string {
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
 
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil { //nolint:gosec // operator-configured key path
 		logger.Warn("cannot write signing key — using ephemeral key", "error", err)
 		return ""
 	}

@@ -31,6 +31,7 @@ type PendingAuthFlow struct {
 	Config       *oauth2.Config
 	CodeVerifier string
 	State        string
+	BackendURL   string
 	ResourceURL  string
 	CreatedAt    time.Time
 }
@@ -167,19 +168,9 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 		return nil, fmt.Errorf("401 from %s: no resource_metadata in WWW-Authenticate", backendURL)
 	}
 
-	// Discover protected resource metadata (RFC 9728).
-	// The resource URL may differ from the backend URL (e.g. base URL vs /sse endpoint).
-	// Try the metadata URL's declared resource first, then fall back to base URL.
-	prm, err := oauthex.GetProtectedResourceMetadata(ctx, metadataURL, backendURL, nil)
-	if err != nil {
-		// Resource mismatch — try with the base URL (strip path).
-		baseURL, parseErr := url.Parse(backendURL)
-		if parseErr == nil {
-			baseURL.Path = ""
-			baseURL.RawQuery = ""
-			prm, err = oauthex.GetProtectedResourceMetadata(ctx, metadataURL, baseURL.String(), nil)
-		}
-	}
+	// Discover protected resource metadata (RFC 9728). The metadata resource
+	// identifier is the value that must be used in RFC 8707 resource params.
+	prm, err := getProtectedResourceMetadataForBackend(ctx, metadataURL, backendURL)
 	if err != nil {
 		return nil, fmt.Errorf("get protected resource metadata: %w", err)
 	}
@@ -192,15 +183,10 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	authServerIssuer := prm.AuthorizationServers[0]
 
 	// Gap 1 (MCP auth spec §70-79): Try multiple well-known endpoints.
-	// RFC 8414 first, then OIDC Discovery as fallback.
-	// Fetch auth server metadata with lenient issuer validation.
-	// RFC 8414 §3.3 requires the issuer in the metadata to exactly match the
-	// URL used to fetch it. However, delegated auth setups (Clerk, Auth0 proxies)
-	// commonly violate this — e.g., context7.com serves metadata with issuer
-	// "clerk.context7.com". The SDK's oauthex.GetAuthServerMeta enforces the
-	// strict check and fails on mismatch. Since the operator is manually adding
-	// a trusted backend, the impersonation risk §3.3 guards against doesn't apply.
-	// We fetch and parse the metadata ourselves, logging a warning on mismatch.
+	// RFC 8414 first, then OIDC Discovery as fallback. The issuer value in
+	// metadata must exactly match the authorization server identifier from
+	// protected-resource metadata; accepting aliases here enables issuer
+	// substitution during discovery.
 	asm, discoveredURL, err := discoverAuthServerMeta(ctx, authServerIssuer, g.logger)
 	if err != nil {
 		return nil, fmt.Errorf("get auth server metadata: %w", err)
@@ -212,26 +198,6 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 		"backend", backendID,
 		"url", discoveredURL,
 	)
-	if asm.Issuer != authServerIssuer {
-		// RFC 8414 §3.3 wants exact equality; some delegated setups (Clerk
-		// in front of a customer domain, Auth0 proxies) declare a different
-		// issuer than the URL we fetched metadata from. We tolerate that —
-		// but require the declared issuer's host to match the host we
-		// actually contacted, so a network attacker can't substitute an
-		// arbitrary issuer value (e.g. "https://attacker.example/").
-		if err := assertSameHost(discoveredURL, asm.Issuer); err != nil {
-			return nil, fmt.Errorf(
-				"auth server metadata issuer mismatch: %w (expected %q, got %q, fetched from %q)",
-				err, authServerIssuer, asm.Issuer, discoveredURL,
-			)
-		}
-		g.logger.Warn("auth server metadata issuer differs from requested (allowed: same host)",
-			"expected", authServerIssuer,
-			"got", asm.Issuer,
-			"fetched_from", discoveredURL,
-			"backend", backendID,
-		)
-	}
 
 	// Gap 4 (MCP auth spec §87-155): Check for Client ID Metadata Document support.
 	// This is a SHOULD requirement — detect and log, but fall back to DCR.
@@ -335,7 +301,8 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 		Config:       oauthCfg,
 		CodeVerifier: verifier,
 		State:        state,
-		ResourceURL:  backendURL,
+		BackendURL:   backendURL,
+		ResourceURL:  prm.Resource,
 		CreatedAt:    time.Now(),
 	}
 
@@ -347,6 +314,7 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	g.logger.Info("initiated OAuth flow for backend",
 		"backend", backendID,
 		"auth_server", authServerIssuer,
+		"callback_url", callbackURL,
 		"state", state[:8]+"...",
 	)
 
@@ -416,7 +384,7 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 
 	// Register credential with auto-refresh.
 	ts := flow.Config.TokenSource(ctx, token)
-	rts := oauth2.ReuseTokenSource(token, ts)
+	rts := g.persistingOAuthTokenSource(flow.BackendID, flow.Config, token, ts)
 	cred := credentials.NewOAuth(rts, "")
 	g.credStore.Register(flow.BackendID, cred)
 
@@ -424,7 +392,7 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 	sc := &config.ServerConfig{
 		ID:        flow.BackendID,
 		Namespace: flow.BackendID,
-		URL:       flow.ResourceURL,
+		URL:       flow.BackendURL,
 		Timeout:   config.Duration(30 * time.Second),
 	}
 	if err := g.ConnectBackend(ctx, sc); err != nil {
@@ -434,14 +402,15 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 
 	// Persist backend config.
 	g.persistBackend(flow.BackendID, &persistedBackend{
-		URL: flow.ResourceURL,
+		URL: flow.BackendURL,
 	})
 
 	g.setAuthStatus(flow.BackendID, "connected")
 
 	g.logger.Info("backend connected via OAuth",
 		"backend", flow.BackendID,
-		"url", flow.ResourceURL,
+		"url", flow.BackendURL,
+		"resource", flow.ResourceURL,
 	)
 
 	return nil
@@ -509,6 +478,59 @@ func (g *Gateway) setAuthStatus(backendID, status string) {
 	afm.mu.Unlock()
 }
 
+func getProtectedResourceMetadataForBackend(ctx context.Context, metadataURL, backendURL string) (*oauthex.ProtectedResourceMetadata, error) {
+	var errs []string
+	for _, candidate := range protectedResourceCandidates(backendURL) {
+		prm, err := oauthex.GetProtectedResourceMetadata(ctx, metadataURL, candidate, nil)
+		if err == nil {
+			return prm, nil
+		}
+		errs = append(errs, err.Error())
+	}
+	return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
+}
+
+func protectedResourceCandidates(rawURL string) []string {
+	candidates := []string{rawURL}
+
+	if u, err := url.Parse(rawURL); err == nil {
+		trimmed := *u
+		trimmed.RawQuery = ""
+		trimmed.Fragment = ""
+
+		if trimmed.Path != "" && trimmed.Path != "/" {
+			toggled := trimmed
+			if strings.HasSuffix(toggled.Path, "/") {
+				toggled.Path = strings.TrimRight(toggled.Path, "/")
+			} else {
+				toggled.Path += "/"
+			}
+			candidates = append(candidates, toggled.String())
+		}
+
+		base := trimmed
+		base.Path = ""
+		candidates = append(candidates, base.String())
+		base.Path = "/"
+		candidates = append(candidates, base.String())
+	}
+
+	return uniqueStrings(candidates)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
 // discoverAuthServerMeta tries multiple well-known endpoints to discover auth server
 // metadata, per MCP authorization spec §70-79.
 //
@@ -522,24 +544,12 @@ func (g *Gateway) setAuthStatus(backendID, status string) {
 //  2. https://auth.example.com/.well-known/openid-configuration
 //
 // Returns the metadata, the URL that succeeded, and any error.
-// assertSameHost returns nil iff `a` and `b` are valid URLs with the same
-// host. Used to gate the lenient RFC 8414 issuer match: we accept a
-// non-matching issuer only when its host matches the URL we fetched the
-// metadata from, so a MITM can't inject a foreign issuer value.
-func assertSameHost(a, b string) error {
-	ua, err := url.Parse(a)
-	if err != nil {
-		return fmt.Errorf("parse %q: %w", a, err)
+func validateDiscoveredIssuer(expected, got, discoveredURL string) error {
+	if got == "" {
+		return fmt.Errorf("metadata from %s missing issuer", discoveredURL)
 	}
-	ub, err := url.Parse(b)
-	if err != nil {
-		return fmt.Errorf("parse %q: %w", b, err)
-	}
-	if ua.Host == "" || ub.Host == "" {
-		return fmt.Errorf("missing host in %q or %q", a, b)
-	}
-	if !strings.EqualFold(ua.Host, ub.Host) {
-		return fmt.Errorf("host mismatch: %q vs %q", ua.Host, ub.Host)
+	if got != expected {
+		return fmt.Errorf("issuer mismatch: expected %q, got %q from %q", expected, got, discoveredURL)
 	}
 	return nil
 }
@@ -583,6 +593,9 @@ func discoverAuthServerMeta(ctx context.Context, issuer string, logger *slog.Log
 			return nil, "", err
 		}
 		if asm != nil {
+			if err := validateDiscoveredIssuer(issuer, asm.Issuer, dURL); err != nil {
+				return nil, "", err
+			}
 			return asm, dURL, nil
 		}
 		// asm == nil means 4xx — try next URL.
@@ -593,8 +606,9 @@ func discoverAuthServerMeta(ctx context.Context, issuer string, logger *slog.Log
 	return nil, "", nil
 }
 
-// fetchAuthServerMeta fetches OAuth 2.0 Authorization Server Metadata (RFC 8414)
-// without enforcing strict issuer matching. Returns nil if the server returns 4xx.
+// fetchAuthServerMeta fetches OAuth 2.0 Authorization Server Metadata (RFC 8414).
+// Issuer matching is enforced by discoverAuthServerMeta. Returns nil if the
+// server returns 4xx.
 func fetchAuthServerMeta(ctx context.Context, metadataURL string) (*oauthex.AuthServerMeta, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
 	if err != nil {
@@ -670,11 +684,21 @@ func (g *Gateway) OAuthCallbackHandler() http.HandlerFunc {
 		q := r.URL.Query()
 		code := q.Get("code")
 		state := q.Get("state")
+		errCode := q.Get("error")
+		logState := state
+		if len(logState) > 8 {
+			logState = logState[:8] + "..."
+		}
+		g.logger.Info("OAuth callback received",
+			"state", logState,
+			"has_code", code != "",
+			"error", errCode,
+		)
 
 		// Provider returned an error instead of a code. Show it verbatim
 		// plus, for the common "redirect_uri rejected because http+non-localhost"
 		// case (Clerk, Auth0, many others), a concrete remediation hint.
-		if errCode := q.Get("error"); errCode != "" {
+		if errCode != "" {
 			desc := q.Get("error_description")
 			hint := ""
 			descLower := strings.ToLower(desc)
@@ -755,6 +779,62 @@ type persistedOAuthToken struct {
 	AuthStyle    int       `json:"auth_style"`
 	RedirectURL  string    `json:"redirect_url,omitempty"`
 	Scopes       []string  `json:"scopes,omitempty"`
+}
+
+type persistingTokenSource struct {
+	mu        sync.Mutex
+	backendID string
+	cfg       *oauth2.Config
+	src       oauth2.TokenSource
+	last      *oauth2.Token
+	persist   func(string, *oauth2.Config, *oauth2.Token)
+}
+
+func (g *Gateway) persistingOAuthTokenSource(backendID string, cfg *oauth2.Config, token *oauth2.Token, refresh oauth2.TokenSource) oauth2.TokenSource {
+	return &persistingTokenSource{
+		backendID: backendID,
+		cfg:       cfg,
+		src:       oauth2.ReuseTokenSource(token, refresh),
+		last:      cloneOAuthToken(token),
+		persist:   g.persistOAuthTokens,
+	}
+}
+
+func (p *persistingTokenSource) Token() (*oauth2.Token, error) {
+	token, err := p.src.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	changed := !sameOAuthToken(p.last, token)
+	if changed {
+		p.last = cloneOAuthToken(token)
+	}
+	p.mu.Unlock()
+
+	if changed && p.persist != nil {
+		p.persist(p.backendID, p.cfg, token)
+	}
+	return token, nil
+}
+
+func sameOAuthToken(a, b *oauth2.Token) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.AccessToken == b.AccessToken &&
+		a.RefreshToken == b.RefreshToken &&
+		a.TokenType == b.TokenType &&
+		a.Expiry.Equal(b.Expiry)
+}
+
+func cloneOAuthToken(token *oauth2.Token) *oauth2.Token {
+	if token == nil {
+		return nil
+	}
+	clone := *token
+	return &clone
 }
 
 // persistOAuthTokens saves OAuth tokens and client config to KV (encrypted at rest).
@@ -872,7 +952,7 @@ func (g *Gateway) LoadPersistedOAuthCredentials() {
 		}
 
 		ts := oauthCfg.TokenSource(context.Background(), token)
-		rts := oauth2.ReuseTokenSource(token, ts)
+		rts := g.persistingOAuthTokenSource(backendID, oauthCfg, token, ts)
 		cred := credentials.NewOAuth(rts, "")
 		g.credStore.Register(backendID, cred)
 

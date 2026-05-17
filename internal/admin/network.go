@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
+
+	"github.com/1broseidon/prism/internal/adminauth"
+	"github.com/1broseidon/prism/internal/config"
 )
 
 // ValidateNetworkSettings rejects malformed URLs before they reach KV.
@@ -88,10 +92,115 @@ func (a *API) handlePutNetwork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	previous := cloneNetworkSettings(mgr.NetworkSettings())
+	oldAuthState, nextAuthState, authStateChanged, err := a.adminAuthRedirectState(next.AdminPublicURL)
+	if err != nil {
+		http.Error(w, "admin auth redirect sync failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
 	if err := mgr.PersistNetworkSettings(&next); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	if authStateChanged {
+		if err := adminauth.SaveState(a.auth.KV(), nextAuthState); err != nil {
+			if rollbackErr := rollbackNetworkSettings(mgr, previous); rollbackErr != nil {
+				http.Error(w, "admin auth redirect sync failed: "+err.Error()+"; network rollback failed: "+rollbackErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, "admin auth redirect sync failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if nextAuthState.Enabled {
+			if err := a.auth.Reload(r.Context(), nextAuthState.Config); err != nil {
+				rollbackErr := errors.Join(
+					rollbackNetworkSettings(mgr, previous),
+					adminauth.SaveState(a.auth.KV(), oldAuthState),
+				)
+				if rollbackErr != nil {
+					http.Error(w, "admin auth reload failed: "+err.Error()+"; rollback failed: "+rollbackErr.Error(), http.StatusBadGateway)
+					return
+				}
+				http.Error(w, "admin auth reload failed: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+		}
+	}
+
 	mgr.SetNetworkSettings(&next)
 	writeJSON(w, http.StatusOK, &next)
+}
+
+func (a *API) adminAuthRedirectState(adminPublicURL string) (oldState, nextState *adminauth.State, changed bool, err error) {
+	if adminPublicURL == "" || a.auth == nil || a.auth.KV() == nil {
+		return nil, nil, false, nil
+	}
+	st, err := adminauth.LoadState(a.auth.KV())
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if st.Config == nil {
+		return st, st, false, nil
+	}
+
+	redirectURL := strings.TrimRight(adminPublicURL, "/") + "/auth/callback"
+	if st.Config.RedirectURL == redirectURL {
+		return st, st, false, nil
+	}
+
+	next := cloneAdminAuthState(st)
+	next.Config.RedirectURL = redirectURL
+	config.ApplyAdminAuthDefaults(next.Config)
+	if err := config.ValidateAdminAuth(next.Config); err != nil {
+		return st, nil, false, err
+	}
+	return st, next, true, nil
+}
+
+func rollbackNetworkSettings(mgr NetworkSettingsManager, previous *NetworkSettings) error {
+	if err := mgr.PersistNetworkSettings(previous); err != nil {
+		return err
+	}
+	mgr.SetNetworkSettings(previous)
+	return nil
+}
+
+func cloneNetworkSettings(s *NetworkSettings) *NetworkSettings {
+	if s == nil {
+		return &NetworkSettings{}
+	}
+	next := *s
+	return &next
+}
+
+func cloneAdminAuthState(st *adminauth.State) *adminauth.State {
+	if st == nil {
+		return &adminauth.State{}
+	}
+	next := &adminauth.State{Enabled: st.Enabled}
+	if st.Config != nil {
+		next.Config = cloneAdminAuthConfig(st.Config)
+	}
+	return next
+}
+
+func cloneAdminAuthConfig(c *config.AdminAuthConfig) *config.AdminAuthConfig {
+	if c == nil {
+		return nil
+	}
+	next := *c
+	next.Scopes = append([]string(nil), c.Scopes...)
+	next.Rules = make([]config.AdminAuthRule, len(c.Rules))
+	for i, r := range c.Rules {
+		next.Rules[i] = config.AdminAuthRule{
+			Role:    r.Role,
+			Emails:  append([]string(nil), r.Emails...),
+			Domains: append([]string(nil), r.Domains...),
+			Groups:  append([]string(nil), r.Groups...),
+		}
+	}
+	return &next
 }

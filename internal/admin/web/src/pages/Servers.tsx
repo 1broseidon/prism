@@ -15,6 +15,13 @@ import { fmtAge } from "../util/time";
 
 type CredType = "none" | "static" | "env" | "command";
 
+interface PendingBackend {
+  id: string;
+  command: string;
+  startedAt: number;
+  stale: boolean;
+}
+
 interface CredFormState {
   type: CredType;
   header: string;
@@ -48,6 +55,8 @@ export function Servers() {
   );
   const [addingOpen, setAddingOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [pendingAdds, setPendingAdds] = useState<PendingBackend[]>([]);
+  const [now, setNow] = useState(Date.now());
   const loc = useLocation();
 
   const ev = events.data.value || [];
@@ -75,6 +84,51 @@ export function Servers() {
         (b.tools || []).some((t) => t.name.toLowerCase().includes(q)),
     );
   }, [list, query]);
+
+  const backendIDsKey = useMemo(() => list.map((b) => b.id).join("\0"), [list]);
+
+  const visiblePendingAdds = useMemo(() => {
+    const connected = new Set(list.map((b) => b.id));
+    const q = query.toLowerCase().trim();
+    return pendingAdds.filter((p) => {
+      if (connected.has(p.id)) return false;
+      if (!q) return true;
+      return (
+        p.id.toLowerCase().includes(q) ||
+        p.command.toLowerCase().includes(q)
+      );
+    });
+  }, [list, pendingAdds, query]);
+
+  useEffect(() => {
+    if (pendingAdds.length === 0) return;
+    const connected = new Set(list.map((b) => b.id));
+    setPendingAdds((items) => {
+      if (!items.some((p) => connected.has(p.id))) return items;
+      return items.filter((p) => !connected.has(p.id));
+    });
+  }, [backendIDsKey, pendingAdds.length]);
+
+  useEffect(() => {
+    if (pendingAdds.length === 0) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [pendingAdds.length]);
+
+  const addPendingBackend = (id: string, command: string) => {
+    setPendingAdds((items) => [
+      ...items.filter((p) => p.id !== id),
+      { id, command, startedAt: Date.now(), stale: false },
+    ]);
+    window.setTimeout(() => {
+      setPendingAdds((items) =>
+        items.map((p) => (p.id === id ? { ...p, stale: true } : p)),
+      );
+    }, 45000);
+    window.setTimeout(() => {
+      setPendingAdds((items) => items.filter((p) => p.id !== id));
+    }, 2 * 60 * 1000);
+  };
 
   return (
     <div>
@@ -107,6 +161,7 @@ export function Servers() {
 
       {addingOpen && (
         <AddBackend
+          onConnecting={addPendingBackend}
           onDone={() => {
             setAddingOpen(false);
             backends.refresh();
@@ -115,12 +170,15 @@ export function Servers() {
         />
       )}
 
-      {list.length === 0 && !addingOpen ? (
+      {list.length === 0 && pendingAdds.length === 0 && !addingOpen ? (
         <EmptyServers onConnect={() => setAddingOpen(true)} />
-      ) : filtered.length === 0 ? (
+      ) : filtered.length === 0 && visiblePendingAdds.length === 0 ? (
         <div class="empty-state">no backends match “{query}”.</div>
       ) : (
         <div class="server-list">
+          {visiblePendingAdds.map((p) => (
+            <PendingServerRow key={p.id} pending={p} now={now} />
+          ))}
           {filtered.map((b) => (
             <ServerRow
               key={b.id}
@@ -131,6 +189,46 @@ export function Servers() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function PendingServerRow({
+  pending,
+  now,
+}: {
+  pending: PendingBackend;
+  now: number;
+}) {
+  const seconds = Math.max(
+    1,
+    Math.floor((now - pending.startedAt) / 1000),
+  );
+  return (
+    <div class="server-row server-row-pending" aria-live="polite">
+      <div class="server-row-main">
+        <div class="server-row-header">
+          <span class="status-pip status-pip-pending" />
+          <span class="server-row-name">{pending.id}</span>
+          <span class="server-row-transport">stdio</span>
+          <span class="server-row-pending-label">
+            {pending.stale ? "taking longer" : "connecting"}
+          </span>
+        </div>
+        <div class="server-row-meta">
+          <span class="server-row-url">{pending.command}</span>
+        </div>
+      </div>
+      <div class="server-row-stats">
+        <div class="server-row-stat">
+          <div class="server-row-stat-value">{seconds}s</div>
+          <div class="server-row-stat-label">elapsed</div>
+        </div>
+        <div class="server-row-stat server-row-skeleton-stat">
+          <span class="server-row-skeleton" />
+          <span class="server-row-skeleton server-row-skeleton-short" />
+        </div>
+      </div>
     </div>
   );
 }
@@ -164,6 +262,7 @@ function ServerRow({
   const toolCount = backend.tools?.length ?? 0;
   const statusKind: "ok" | "warn" | "error" | "neutral" = (() => {
     const cb = backend.circuit_breaker;
+    if (backend.disconnected) return "error";
     if (cb === "open") return "error";
     if (cb === "half_open" || cb === "half-open") return "warn";
     if (toolCount > 0) return "ok";
@@ -182,7 +281,10 @@ function ServerRow({
           <span class="server-row-transport">{transport}</span>
         </div>
         <div class="server-row-meta">
-          <span class="server-row-url">{backend.url || "stdio process"}</span>
+          <span class="server-row-url">
+            {backend.disconnected ? "disconnected · " : ""}
+            {backend.url || "stdio process"}
+          </span>
         </div>
       </div>
       <div class="server-row-stats">
@@ -203,9 +305,11 @@ function ServerRow({
 }
 
 function AddBackend({
+  onConnecting,
   onDone,
   onCancel,
 }: {
+  onConnecting: (id: string, command: string) => void;
   onDone: () => void;
   onCancel: () => void;
 }) {
@@ -222,6 +326,28 @@ function AddBackend({
     authServer: string;
     callbackUrl: string;
   } | null>(null);
+
+  const scheduleRefresh = () => {
+    [1000, 2500, 5000, 9000, 15000].forEach((delay) => {
+      window.setTimeout(() => backends.refresh(), delay);
+    });
+  };
+
+  const waitForBackend = async (id: string): Promise<boolean> => {
+    for (const delay of [800, 1600, 3000, 5000, 8000]) {
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
+      try {
+        const list = await getJSON<Backend[]>("/backends");
+        if (list.some((b) => b.id === id)) {
+          await backends.refresh();
+          return true;
+        }
+      } catch {
+        // Network may still be settling after Docker attached the sandbox.
+      }
+    }
+    return false;
+  };
 
   const submitWith = async (extra?: Partial<AddBackendBody>) => {
     setError(null);
@@ -254,9 +380,26 @@ function AddBackend({
         });
         return;
       }
+      if (res.status === "connecting") {
+        onConnecting(id, target);
+        scheduleRefresh();
+        onDone();
+        return;
+      }
       onDone();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (
+        !target.startsWith("http") &&
+        /failed to fetch|networkerror|err_network_changed/i.test(msg)
+      ) {
+        onConnecting(id, target);
+        setError("connection interrupted; checking backend status…");
+        if (await waitForBackend(id)) {
+          onDone();
+          return;
+        }
+      }
       setError(msg);
     }
   };

@@ -1,0 +1,10 @@
+{
+  "bridge_url": "http://bridge:3001",
+  "store": {
+    "path": "/data/prism.db"
+  },
+  "audit": {
+    "enabled": true,
+    "output": "stderr"
+  }
+}
