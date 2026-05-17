@@ -4,6 +4,7 @@ import { showError, withToast } from "../state/toasts";
 import { canMutate } from "../state/me";
 import { mcpURLFromBase } from "../util/mcp";
 import { Field } from "../components/Field";
+import { SettingsLayout } from "../components/SettingsLayout";
 import type { NetworkSettings } from "../api/types";
 
 export function SettingsNetwork() {
@@ -44,10 +45,9 @@ export function SettingsNetwork() {
   };
 
   return (
-    <div>
+    <SettingsLayout>
       <div class="page-header">
         <div>
-          <div class="page-title">network</div>
           <div class="page-subtitle">
             how prism advertises itself to oauth providers and clients
           </div>
@@ -134,6 +134,6 @@ export function SettingsNetwork() {
           </div>
         </div>
       )}
-    </div>
+    </SettingsLayout>
   );
 }

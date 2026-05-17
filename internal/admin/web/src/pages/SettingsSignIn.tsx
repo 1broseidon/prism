@@ -8,6 +8,7 @@ import {
 import { showError, withToast } from "../state/toasts";
 import { canMutate, refreshMe } from "../state/me";
 import { Field } from "../components/Field";
+import { SettingsLayout } from "../components/SettingsLayout";
 import type {
   AdminAuthPutPayload,
   AdminAuthRule,
@@ -176,14 +177,9 @@ export function SettingsSignIn() {
 
   if (view === null) {
     return (
-      <div>
-        <div class="page-header">
-          <div>
-            <div class="page-title">sign-in</div>
-          </div>
-        </div>
+      <SettingsLayout>
         <div class="empty-state">loading…</div>
-      </div>
+      </SettingsLayout>
     );
   }
 
@@ -192,10 +188,9 @@ export function SettingsSignIn() {
   const hasSavedConfig = view.config !== null;
 
   return (
-    <div>
+    <SettingsLayout>
       <div class="page-header">
         <div>
-          <div class="page-title">sign-in</div>
           <div class="page-subtitle">
             console sign-in. when disabled, the console runs open.
           </div>
@@ -386,7 +381,7 @@ export function SettingsSignIn() {
           )}
         </div>
       )}
-    </div>
+    </SettingsLayout>
   );
 }
 

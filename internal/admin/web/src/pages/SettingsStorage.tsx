@@ -5,6 +5,7 @@ import { canMutate } from "../state/me";
 import { fmtAge } from "../util/time";
 import { fmtBytes, pctOfQuota } from "../util/bytes";
 import { Field } from "../components/Field";
+import { SettingsLayout } from "../components/SettingsLayout";
 import type {
   Workspace,
   WorkspaceBridgeConfig,
@@ -100,22 +101,16 @@ export function SettingsStorage() {
 
   if (config === null) {
     return (
-      <div>
-        <div class="page-header">
-          <div>
-            <div class="page-title">storage</div>
-          </div>
-        </div>
+      <SettingsLayout>
         <div class="empty-state">loading…</div>
-      </div>
+      </SettingsLayout>
     );
   }
 
   return (
-    <div>
+    <SettingsLayout>
       <div class="page-header">
         <div>
-          <div class="page-title">storage</div>
           <div class="page-subtitle">
             storage attached to mcp servers. virtual workspaces persist on the
             gateway; proxied bridges sync from local repos; ephemeral storage
@@ -142,7 +137,7 @@ export function SettingsStorage() {
       {ephemeral.length > 0 && (
         <EphemeralListSection ephemeral={ephemeral} mutate={mutate} onChange={load} />
       )}
-    </div>
+    </SettingsLayout>
   );
 }
 

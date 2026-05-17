@@ -22,16 +22,6 @@ const CONSOLE_NAV: NavItem[] = [
   { href: "/activity", label: "Activity" },
 ];
 
-const CONSOLE_FOOTER: NavItem[] = [{ href: "/settings/network", label: "Settings" }];
-
-const SETTINGS_NAV: NavItem[] = [
-  { href: "/settings/network", label: "Network" },
-  { href: "/settings/storage", label: "Storage" },
-  { href: "/settings/sign-in", label: "Sign-in" },
-];
-
-const SETTINGS_FOOTER: NavItem[] = [{ href: "/", label: "← Back to Console" }];
-
 export function Layout({ children }: Props) {
   const loc = useLocation();
   const path = loc.path || "/";
@@ -75,9 +65,6 @@ export function Layout({ children }: Props) {
   };
 
   const inSettings = path.startsWith("/settings");
-  const navItems = inSettings ? SETTINGS_NAV : CONSOLE_NAV;
-  const footerItems = inSettings ? SETTINGS_FOOTER : CONSOLE_FOOTER;
-  const sectionLabel = inSettings ? "Settings" : "Console";
 
   const renderNavLink = (n: NavItem) => {
     const active =
@@ -108,8 +95,10 @@ export function Layout({ children }: Props) {
           <span class="nav-toggle-bar" />
           <span class="nav-toggle-bar" />
         </button>
-        <div class="logo-mark">P</div>
-        <h1>prism</h1>
+        <a class="shell-brand" href="/">
+          <div class="logo-mark">P</div>
+          <h1>prism</h1>
+        </a>
       </div>
 
       <header class="shell-header">
@@ -125,6 +114,27 @@ export function Layout({ children }: Props) {
               </button>
             </span>
           )}
+          <a
+            class={inSettings ? "header-cog header-cog-active" : "header-cog"}
+            href="/settings/network"
+            aria-label="Settings"
+            title="Settings"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </a>
         </div>
       </header>
 
@@ -136,9 +146,8 @@ export function Layout({ children }: Props) {
       />
 
       <nav class="shell-nav" id="primary-nav">
-        <div class="nav-section-label">{sectionLabel}</div>
-        {navItems.map(renderNavLink)}
-        <div class="nav-footer">{footerItems.map(renderNavLink)}</div>
+        <div class="nav-section-label">Console</div>
+        {CONSOLE_NAV.map(renderNavLink)}
         {i && (
           <div class="nav-meta">
             <span>v{i.version}</span>

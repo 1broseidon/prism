@@ -4,6 +4,7 @@ import { getJSON } from "../api/client";
 import { showError } from "../state/toasts";
 import { fmtAge } from "../util/time";
 import { fmtBytes, pctOfQuota } from "../util/bytes";
+import { SettingsLayout } from "../components/SettingsLayout";
 import type {
   WorkspaceDetail as WorkspaceDetailType,
   WorkspaceHealth,
@@ -45,26 +46,26 @@ export function WorkspaceDetail() {
 
   if (error) {
     return (
-      <div>
+      <SettingsLayout>
         <div class="detail-breadcrumb">
           <a href="/settings/storage">workspaces</a>
           <span class="breadcrumb-sep">/</span>
           <span class="breadcrumb-current">{id}</span>
         </div>
         <div class="empty-state">{error}</div>
-      </div>
+      </SettingsLayout>
     );
   }
   if (!data) {
     return (
-      <div>
+      <SettingsLayout>
         <div class="detail-breadcrumb">
           <a href="/settings/storage">workspaces</a>
           <span class="breadcrumb-sep">/</span>
           <span class="breadcrumb-current">{id}</span>
         </div>
         <div class="empty-state">loading…</div>
-      </div>
+      </SettingsLayout>
     );
   }
 
@@ -72,7 +73,7 @@ export function WorkspaceDetail() {
   const pct = pctOfQuota(ws.used_bytes, ws.quota_bytes);
 
   return (
-    <div>
+    <SettingsLayout>
       <div class="detail-breadcrumb">
         <a href="/settings/storage">workspaces</a>
         <span class="breadcrumb-sep">/</span>
@@ -202,7 +203,7 @@ export function WorkspaceDetail() {
           ← back to workspaces
         </button>
       </div>
-    </div>
+    </SettingsLayout>
   );
 }
 
