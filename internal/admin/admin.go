@@ -123,14 +123,60 @@ func NewAPI(
 }
 
 // Handler returns the admin HTTP handler.
+//
+// Layout:
+//   - /api/v1/*           JSON endpoints (handlers see paths without the prefix)
+//   - /auth/callback      IdP redirect target (config-locked at root)
+//   - /oauth/callback     gateway's outbound OAuth callback for backends
+//   - /health             liveness probe (root-level convention)
+//   - /metrics            Prometheus convention
+//   - everything else     SPA shell (preact-iso owns client-side routing)
+//
+// The /api/v1/ prefix prevents collisions between SPA paths (/agents, /servers,
+// /policy, ...) and API resources of the same name. The SPA fetches all JSON
+// via /api/v1/... so hard refreshes of any SPA route fall through to the SPA
+// shell rather than being captured by an API handler.
 func (a *API) Handler() http.Handler {
-	mux := http.NewServeMux()
+	api := http.NewServeMux()
+	a.registerAPIRoutes(api)
 
-	// Public routes — no auth, always available.
-	mux.HandleFunc("GET /health", a.handleHealth)
+	outer := http.NewServeMux()
+	outer.Handle("/api/v1/", http.StripPrefix("/api/v1", api))
+
+	// OIDC redirect target — IdPs are configured with this exact path, so it
+	// cannot move under /api/v1/. Same idea for the gateway's outbound OAuth
+	// callback below.
+	outer.HandleFunc("GET /auth/callback", a.handleAuthCallback)
+	if a.oauthCallbackHandler != nil {
+		outer.Handle("GET /oauth/callback", a.oauthCallbackHandler)
+	}
+
+	// Probe and metrics conventions live at root.
+	outer.HandleFunc("GET /health", a.handleHealth)
+	if metrics.Enabled() {
+		outer.Handle("GET /metrics", metrics.Handler())
+	}
+
+	// SPA catch-all. Registered without a method prefix because Go's ServeMux
+	// rejects "GET /" alongside the more-permissive "/api/v1/" pattern (the
+	// former matches fewer methods but a more general path). handleSPA itself
+	// ignores the method — non-GET requests to unknown paths get the SPA shell,
+	// which is harmless for browser traffic.
+	//
+	// Public so the login screen can load when admin auth rejects API calls.
+	// Auth gating happens inside the SPA via /api/v1/auth/me.
+	outer.HandleFunc("/", a.handleSPA)
+	return outer
+}
+
+// registerAPIRoutes registers JSON endpoints on the supplied mux. The mux is
+// expected to be mounted at /api/v1/ via http.StripPrefix, so handlers see
+// canonical paths like /agents/{id}, not /api/v1/agents/{id}.
+func (a *API) registerAPIRoutes(mux *http.ServeMux) {
+	// Auth — /auth/callback stays at root (IdP-configured) but the JSON
+	// endpoints live here.
 	mux.HandleFunc("GET /auth/me", a.handleAuthMe)
 	mux.HandleFunc("GET /auth/login", a.handleAuthLogin)
-	mux.HandleFunc("GET /auth/callback", a.handleAuthCallback)
 	mux.HandleFunc("POST /auth/logout", a.handleAuthLogout)
 
 	// Read-only routes — require a session (admin or viewer). When auth is
@@ -178,19 +224,6 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
 	mux.Handle("PATCH /backends/", a.admin(http.HandlerFunc(a.handlePatchBackend)))
 	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
-
-	if a.oauthCallbackHandler != nil {
-		// Gateway's outbound-OAuth callback (backend authentication).
-		// Different concept from admin auth; stays public.
-		mux.Handle("GET /oauth/callback", a.oauthCallbackHandler)
-	}
-	if metrics.Enabled() {
-		mux.Handle("GET /metrics", metrics.Handler())
-	}
-	// SPA catch-all. Public so the login screen can load when admin auth
-	// rejects API calls. Auth gating happens inside the SPA via /auth/me.
-	mux.HandleFunc("GET /", a.handleSPA)
-	return mux
 }
 
 // handleBackendPost dispatches POST /backends/{id} and

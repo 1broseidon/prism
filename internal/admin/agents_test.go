@@ -139,7 +139,7 @@ func TestSetAgentBackendPolicies(t *testing.T) {
 	body := `{"brainfile":{"workspace_selector":"agent"}}`
 	r := httptest.NewRequest(
 		http.MethodPut,
-		"/agents/prism-uuid-1/backend-policies",
+		"/api/v1/agents/prism-uuid-1/backend-policies",
 		strings.NewReader(body),
 	)
 	w := httptest.NewRecorder()
@@ -169,7 +169,7 @@ func TestAgentPolicyResolutionEndpoint(t *testing.T) {
 		},
 	})
 
-	r := httptest.NewRequest(http.MethodGet, "/agents/prism-uuid-1/policy-resolution", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/prism-uuid-1/policy-resolution", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
@@ -189,7 +189,7 @@ func TestAgentPolicyResolutionEndpoint(t *testing.T) {
 func TestGetAgents(t *testing.T) {
 	api, _ := newTestAPI()
 
-	r := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 
@@ -209,7 +209,7 @@ func TestGetAgents(t *testing.T) {
 func TestGetAgentByPrismID(t *testing.T) {
 	api, _ := newTestAPI()
 
-	r := httptest.NewRequest(http.MethodGet, "/agents/prism-uuid-1", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/prism-uuid-1", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 
@@ -232,7 +232,7 @@ func TestGetAgentByPrismID(t *testing.T) {
 func TestGetAgentByPrismID_NotFound(t *testing.T) {
 	api, _ := newTestAPI()
 
-	r := httptest.NewRequest(http.MethodGet, "/agents/nonexistent", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/nonexistent", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 
@@ -245,7 +245,7 @@ func TestSetAgentPolicy(t *testing.T) {
 	api, mgr := newTestAPI()
 
 	body := `{"groups": ["readers", "writers"], "grant": ["extra:tool"], "deny": ["bad:tool"]}`
-	r := httptest.NewRequest(http.MethodPut, "/agents/prism-uuid-1/policy", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPut, "/api/v1/agents/prism-uuid-1/policy", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
@@ -273,7 +273,7 @@ func TestSetAgentPolicy(t *testing.T) {
 func TestSetAgentPolicy_InvalidJSON(t *testing.T) {
 	api, _ := newTestAPI()
 
-	r := httptest.NewRequest(http.MethodPut, "/agents/prism-uuid-1/policy", strings.NewReader("not json"))
+	r := httptest.NewRequest(http.MethodPut, "/api/v1/agents/prism-uuid-1/policy", strings.NewReader("not json"))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
@@ -289,7 +289,7 @@ func TestDeleteAgentPolicy(t *testing.T) {
 	// First set a policy.
 	mgr.policies["prism-uuid-1"] = &AgentPolicy{Groups: []string{"readers"}}
 
-	r := httptest.NewRequest(http.MethodDelete, "/agents/prism-uuid-1/policy", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/prism-uuid-1/policy", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 
@@ -307,7 +307,7 @@ func TestRemoveAgent(t *testing.T) {
 	api, mgr := newTestAPI()
 
 	initial := len(mgr.agents)
-	r := httptest.NewRequest(http.MethodDelete, "/agents/dcr-1", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dcr-1", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 
@@ -323,7 +323,7 @@ func TestRemoveAgent(t *testing.T) {
 func TestRemoveStaticAgent_Fails(t *testing.T) {
 	api, _ := newTestAPI()
 
-	r := httptest.NewRequest(http.MethodDelete, "/agents/static-1", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/static-1", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 
@@ -346,7 +346,7 @@ func TestAgentMgrNil_Returns503(t *testing.T) {
 		nil, // no admin auth
 	)
 
-	r := httptest.NewRequest(http.MethodGet, "/agents/some-id", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/some-id", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 

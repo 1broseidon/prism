@@ -28,7 +28,7 @@ func TestAdminAuthProbeRateLimit(t *testing.T) {
 
 	body := `{"issuer":"http://127.0.0.1:5555"}`
 	for i := 0; i < adminProbeRateBucketSize; i++ {
-		r := httptest.NewRequest(http.MethodPost, "/config/admin-auth/test", strings.NewReader(body))
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/config/admin-auth/test", strings.NewReader(body))
 		w := httptest.NewRecorder()
 		api.Handler().ServeHTTP(w, r)
 		if w.Code == http.StatusTooManyRequests {
@@ -36,7 +36,7 @@ func TestAdminAuthProbeRateLimit(t *testing.T) {
 		}
 	}
 
-	r := httptest.NewRequest(http.MethodPost, "/config/admin-auth/test", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/config/admin-auth/test", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusTooManyRequests {
@@ -60,7 +60,7 @@ func TestPutAdminAuthPayloadSizeLimit(t *testing.T) {
 	)
 
 	body := `{"issuer":"` + strings.Repeat("a", maxAdminAuthPayloadBytes+1) + `"}`
-	r := httptest.NewRequest(http.MethodPut, "/config/admin-auth", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPut, "/api/v1/config/admin-auth", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, r)
 

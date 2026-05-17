@@ -75,7 +75,7 @@ func TestPutNetworkSyncsAdminAuthRedirectURL(t *testing.T) {
 		auth,
 	)
 	body := `{"admin_public_url":"https://mcp.dfam.one","public_url":"https://mcp.dfam.one:8443","trust_proxy_headers":true}`
-	r := httptest.NewRequest(http.MethodPut, "/config/network", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPut, "/api/v1/config/network", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, r)
@@ -138,7 +138,7 @@ func TestPutNetworkRollsBackWhenAdminAuthReloadFails(t *testing.T) {
 		auth,
 	)
 	body := `{"admin_public_url":"https://new.example","public_url":"https://new.example:8443","trust_proxy_headers":false}`
-	r := httptest.NewRequest(http.MethodPut, "/config/network", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPut, "/api/v1/config/network", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, r)

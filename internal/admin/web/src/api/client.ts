@@ -9,12 +9,19 @@ export class ApiError extends Error {
   }
 }
 
+const API_PREFIX = "/api/v1";
+
+// Every JSON endpoint lives under /api/v1/. Path arguments use the canonical
+// shape ("/agents", "/workspaces/{id}", ...) and we prepend the version prefix
+// here so callers don't repeat it. The prefix keeps API routes from colliding
+// with SPA paths of the same name when the browser hard-refreshes.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = {
     "Content-Type": "application/json",
     ...(init?.headers ?? {}),
   };
-  const res = await fetch(path, {
+  const url = path.startsWith("/") ? `${API_PREFIX}${path}` : path;
+  const res = await fetch(url, {
     ...init,
     headers,
   });
@@ -51,7 +58,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       res.status,
       text,
-      `expected JSON from ${path} but got: ${preview}`,
+      `expected JSON from ${url} but got: ${preview}`,
     );
   }
 }

@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -360,7 +361,26 @@ func (s *Server) ListAgents() []AgentInfo {
 		agents = append(agents, ai)
 	}
 	s.mu.RUnlock()
+	// Stable order across calls — the clients map is unordered, so without
+	// sorting the UI reshuffles agents every refresh.
+	sort.Slice(agents, func(i, j int) bool {
+		ki, kj := agentSortKey(&agents[i]), agentSortKey(&agents[j])
+		if ki != kj {
+			return ki < kj
+		}
+		return agents[i].ClientID < agents[j].ClientID
+	})
 	return agents
+}
+
+func agentSortKey(a *AgentInfo) string {
+	if a.Label != "" {
+		return strings.ToLower(a.Label)
+	}
+	if a.Description != "" {
+		return strings.ToLower(a.Description)
+	}
+	return strings.ToLower(a.ClientID)
 }
 
 // GetAgentByPrismID returns agent info for a specific PrismID, or nil if not found.

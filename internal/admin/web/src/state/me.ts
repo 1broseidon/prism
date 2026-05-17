@@ -17,7 +17,7 @@ const meError = signal<string | null>(null);
 
 async function refresh(): Promise<void> {
   try {
-    const res = await fetch("/auth/me");
+    const res = await fetch("/api/v1/auth/me");
     // 401 is the not-signed-in signal — still valid JSON, parse it.
     if (res.status === 401) {
       const body = (await res.json()) as Me;
@@ -26,7 +26,7 @@ async function refresh(): Promise<void> {
       return;
     }
     if (!res.ok) {
-      throw new Error(`/auth/me returned ${res.status}`);
+      throw new Error(`/api/v1/auth/me returned ${res.status}`);
     }
     me.value = (await res.json()) as Me;
     meError.value = null;

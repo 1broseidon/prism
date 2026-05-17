@@ -2014,6 +2014,11 @@ func (g *Gateway) Status() []BackendStatus {
 			}
 		}
 	}
+	// Stable order keeps the UI deterministic across refreshes — backends come
+	// from a map, so iteration order would otherwise reshuffle every call.
+	sort.Slice(statuses, func(i, j int) bool {
+		return statuses[i].ID < statuses[j].ID
+	})
 	return statuses
 }
 

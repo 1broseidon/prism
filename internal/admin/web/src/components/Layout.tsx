@@ -36,7 +36,6 @@ export function Layout({ children }: Props) {
   const loc = useLocation();
   const path = loc.path || "/";
   const i = info.data.value;
-  const err = info.error.value;
   const m = me.value;
   const [navOpen, setNavOpen] = useState(false);
 
@@ -66,7 +65,7 @@ export function Layout({ children }: Props) {
 
   const signOut = async () => {
     try {
-      await fetch("/auth/logout", { method: "POST" });
+      await fetch("/api/v1/auth/logout", { method: "POST" });
     } catch {
       // ignore; we'll still refresh me below
     }
@@ -114,10 +113,6 @@ export function Layout({ children }: Props) {
       </div>
 
       <header class="shell-header">
-        <div class="status-badge">
-          <div class={err ? "status-dot error" : "status-dot"} />
-          <span class="status-text">{err ? "disconnected" : "live"}</span>
-        </div>
         <div class="shell-meta">
           {m?.auth === "session" && m.email && (
             <span class="shell-identity">
@@ -130,10 +125,6 @@ export function Layout({ children }: Props) {
               </button>
             </span>
           )}
-          {i ? <span class="shell-meta-version">v{i.version}</span> : null}
-          {i ? (
-            <span class="shell-meta-uptime">up {fmtUptime(i.uptime)}</span>
-          ) : null}
         </div>
       </header>
 
@@ -148,6 +139,13 @@ export function Layout({ children }: Props) {
         <div class="nav-section-label">{sectionLabel}</div>
         {navItems.map(renderNavLink)}
         <div class="nav-footer">{footerItems.map(renderNavLink)}</div>
+        {i && (
+          <div class="nav-meta">
+            <span>v{i.version}</span>
+            <span class="nav-meta-dot">·</span>
+            <span>up {fmtUptime(i.uptime)}</span>
+          </div>
+        )}
       </nav>
 
       <main class="shell-content">{children}</main>

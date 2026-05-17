@@ -6,7 +6,7 @@ export function Login() {
 
   const signIn = () => {
     const ret = window.location.pathname + window.location.search;
-    window.location.href = `/auth/login?return=${encodeURIComponent(ret)}`;
+    window.location.href = `/api/v1/auth/login?return=${encodeURIComponent(ret)}`;
   };
 
   return (

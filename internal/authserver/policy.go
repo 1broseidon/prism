@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -603,6 +604,11 @@ func (s *Server) ListGroups() []GroupInfo {
 	for _, gi := range merged {
 		result = append(result, gi)
 	}
+	// Stable order across calls — merged is a map, so without sorting the
+	// Policy page reshuffles group rows every refresh.
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
