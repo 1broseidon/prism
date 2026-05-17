@@ -75,6 +75,26 @@ textarea {
   font-size: inherit;
 }
 
+/*
+ * Dark dropdown popups.
+ *
+ * Native <select> popups are owned by the browser, not the page DOM.
+ * We can't restyle the popup list with .config-input rules, so two things
+ * fix the white-on-white render:
+ *   1. color-scheme tells the browser to draw widget chrome in dark mode.
+ *   2. explicit <option> bg/color is honored by Chrome/Firefox/Safari for
+ *      the popup list contents, so options render readably even when the
+ *      OS theme is light.
+ */
+select {
+  color-scheme: dark;
+}
+option,
+optgroup {
+  background-color: var(--bg-surface);
+  color: var(--fg);
+}
+
 a {
   color: inherit;
   text-decoration: none;
