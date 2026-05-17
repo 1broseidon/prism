@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/1broseidon/prism/internal/admin"
+	"github.com/1broseidon/prism/internal/auth"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -376,8 +377,13 @@ func TestWorkspaceRegistryCreatesListsDeletesRemoteWorkspaces(t *testing.T) {
 	gw.SetStore(store.NewMemoryStore())
 
 	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
-		ID:   "team-a",
-		Type: config.WorkspaceTypeVirtual,
+		ID:               "team-a",
+		Type:             config.WorkspaceTypeVirtual,
+		Owner:            "owner@example.com",
+		AllowedAgents:    []string{"agent-b", "agent-a", "agent-a"},
+		AllowedTemplates: []string{"brainfile"},
+		QuotaBytes:       42,
+		RetentionSeconds: 3600,
 	}); err != nil {
 		t.Fatalf("create virtual workspace: %v", err)
 	}
@@ -392,11 +398,100 @@ func TestWorkspaceRegistryCreatesListsDeletesRemoteWorkspaces(t *testing.T) {
 	if len(list) != 1 || list[0].ID != "team-a" || list[0].Type != config.WorkspaceTypeVirtual || !list[0].Connected {
 		t.Fatalf("workspace list = %+v", list)
 	}
+	if list[0].Owner != "owner@example.com" ||
+		strings.Join(list[0].AllowedAgents, ",") != "agent-a,agent-b" ||
+		strings.Join(list[0].AllowedTemplates, ",") != "brainfile" ||
+		list[0].QuotaBytes != 42 ||
+		list[0].RetentionSeconds != 3600 {
+		t.Fatalf("workspace policy metadata = %+v", list[0])
+	}
 	if !gw.DisconnectWorkspace("team-a") {
 		t.Fatal("expected registry workspace delete to succeed")
 	}
 	if gw.DisconnectWorkspace("team-a") {
 		t.Fatal("second delete should report not found")
+	}
+}
+
+func TestRouteToolCallEnforcesWorkspaceRegistryTemplatePolicy(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:               "team-a",
+		Type:             config.WorkspaceTypeVirtual,
+		AllowedAgents:    []string{"*"},
+		AllowedTemplates: []string{"linear"},
+	}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	gw.backends["brainfile"] = &Backend{
+		Config: &config.ServerConfig{
+			ID:              "brainfile",
+			Namespace:       "brainfile",
+			BridgeManaged:   true,
+			OriginalCommand: []string{"npx", "@brainfile/cli", "mcp"},
+			Workspace:       &config.WorkspaceConfig{ID: "default", Type: config.WorkspaceTypeVirtual},
+		},
+	}
+
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"_prism_workspace":"team-a"}`)}}
+	result, err := gw.routeToolCall(
+		contextWithPolicyAndClaims("brainfile:list_tasks workspace:team-a", &auth.Claims{ClientID: "agent-a"}),
+		"brainfile",
+		"list_tasks",
+		req,
+	)
+	if err != nil {
+		t.Fatalf("route tool: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected registry denial, got %+v", result)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "backend") || !strings.Contains(text, "team-a") {
+		t.Fatalf("denial text = %q", text)
+	}
+}
+
+func TestRouteToolCallEnforcesWorkspaceRegistryAgentPolicy(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	gw.SetStore(store.NewMemoryStore())
+	if _, err := gw.CreateWorkspace(context.Background(), admin.WorkspaceCreateRequest{
+		ID:               "team-a",
+		Type:             config.WorkspaceTypeVirtual,
+		AllowedAgents:    []string{"agent-a"},
+		AllowedTemplates: []string{"brainfile"},
+	}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	gw.backends["brainfile"] = &Backend{
+		Config: &config.ServerConfig{
+			ID:              "brainfile",
+			Namespace:       "brainfile",
+			BridgeManaged:   true,
+			OriginalCommand: []string{"npx", "@brainfile/cli", "mcp"},
+			Workspace:       &config.WorkspaceConfig{ID: "default", Type: config.WorkspaceTypeVirtual},
+		},
+	}
+
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"_prism_workspace":"team-a"}`)}}
+	result, err := gw.routeToolCall(
+		contextWithPolicyAndClaims("brainfile:list_tasks workspace:team-a", &auth.Claims{ClientID: "agent-b", PrismID: "prism-b"}),
+		"brainfile",
+		"list_tasks",
+		req,
+	)
+	if err != nil {
+		t.Fatalf("route tool: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected registry denial, got %+v", result)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "agent") || !strings.Contains(text, "team-a") {
+		t.Fatalf("denial text = %q", text)
 	}
 }
 

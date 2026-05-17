@@ -432,6 +432,13 @@ function Field({
   );
 }
 
+function commaList(value: string): string[] {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function RulesEditor({
   rules,
   onChange,
@@ -582,6 +589,11 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
   const [dirty, setDirty] = useState(false);
   const [workspaceID, setWorkspaceID] = useState("");
   const [workspaceType, setWorkspaceType] = useState<"virtual" | "ephemeral">("virtual");
+  const [workspaceOwner, setWorkspaceOwner] = useState("");
+  const [workspaceAgents, setWorkspaceAgents] = useState("");
+  const [workspaceTemplates, setWorkspaceTemplates] = useState("");
+  const [workspaceQuotaMB, setWorkspaceQuotaMB] = useState("");
+  const [workspaceRetentionDays, setWorkspaceRetentionDays] = useState("");
 
   const load = async () => {
     try {
@@ -628,11 +640,27 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
 
   const createWorkspace = async () => {
     await withToast(async () => {
+      const quotaMB = Number(workspaceQuotaMB);
+      const retentionDays = Number(workspaceRetentionDays);
       await postJSON<Workspace>("/workspaces", {
         id: workspaceID.trim(),
         type: workspaceType,
+        owner: workspaceOwner.trim() || undefined,
+        allowed_agents: commaList(workspaceAgents),
+        allowed_templates: commaList(workspaceTemplates),
+        quota_bytes: Number.isFinite(quotaMB) && quotaMB > 0
+          ? Math.round(quotaMB * 1024 * 1024)
+          : undefined,
+        retention_seconds: Number.isFinite(retentionDays) && retentionDays > 0
+          ? Math.round(retentionDays * 24 * 60 * 60)
+          : undefined,
       });
       setWorkspaceID("");
+      setWorkspaceOwner("");
+      setWorkspaceAgents("");
+      setWorkspaceTemplates("");
+      setWorkspaceQuotaMB("");
+      setWorkspaceRetentionDays("");
       await load();
     });
   };
@@ -723,6 +751,46 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
               <option value="virtual">remote persistent</option>
               <option value="ephemeral">temporary scratch</option>
             </select>
+            <input
+              type="text"
+              class="config-input"
+              value={workspaceOwner}
+              placeholder="owner email"
+              spellcheck={false}
+              onInput={(e) => setWorkspaceOwner((e.target as HTMLInputElement).value)}
+            />
+            <input
+              type="text"
+              class="config-input"
+              value={workspaceAgents}
+              placeholder="allowed agents"
+              spellcheck={false}
+              onInput={(e) => setWorkspaceAgents((e.target as HTMLInputElement).value)}
+            />
+            <input
+              type="text"
+              class="config-input"
+              value={workspaceTemplates}
+              placeholder="allowed servers"
+              spellcheck={false}
+              onInput={(e) => setWorkspaceTemplates((e.target as HTMLInputElement).value)}
+            />
+            <input
+              type="number"
+              min="0"
+              class="config-input"
+              value={workspaceQuotaMB}
+              placeholder="quota mb"
+              onInput={(e) => setWorkspaceQuotaMB((e.target as HTMLInputElement).value)}
+            />
+            <input
+              type="number"
+              min="0"
+              class="config-input"
+              value={workspaceRetentionDays}
+              placeholder="retention days"
+              onInput={(e) => setWorkspaceRetentionDays((e.target as HTMLInputElement).value)}
+            />
             <button
               class="section-btn"
               disabled={!workspaceID.trim()}
@@ -769,7 +837,22 @@ function WorkspaceBridgeSection({ mutate }: { mutate: boolean }) {
                     </span>
                   </div>
                   <div class="workspace-meta">
-                    {[ws.hostname, ws.root, fmtAge(ws.last_seen)]
+                    {[
+                      ws.owner ? `owner ${ws.owner}` : "",
+                      ws.allowed_agents?.length
+                        ? `agents ${ws.allowed_agents.join(", ")}`
+                        : "",
+                      ws.allowed_templates?.length
+                        ? `servers ${ws.allowed_templates.join(", ")}`
+                        : "",
+                      ws.quota_bytes ? `quota ${Math.round(ws.quota_bytes / 1024 / 1024)}mb` : "",
+                      ws.retention_seconds
+                        ? `retention ${Math.round(ws.retention_seconds / 86400)}d`
+                        : "",
+                      ws.hostname,
+                      ws.root,
+                      fmtAge(ws.last_seen),
+                    ]
                       .filter(Boolean)
                       .join(" · ")}
                   </div>

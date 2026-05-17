@@ -1022,6 +1022,31 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 			}, nil
 		}
 	}
+	if effectiveWorkspaceID != "" {
+		if denyReason := g.authorizeWorkspaceRegistry(ctx, b, effectiveWorkspaceID); denyReason != "" {
+			span.SetAttributes(
+				attribute.Bool("tool.allowed", false),
+				attribute.String("workspace.id", effectiveWorkspaceID),
+			)
+			span.SetStatus(codes.Error, "workspace registry access denied")
+			g.logger.Warn("tool call denied by workspace registry",
+				"backend", backendID,
+				"tool", toolName,
+				"namespace", b.Config.Namespace,
+				"workspace", effectiveWorkspaceID,
+				"reason", denyReason,
+			)
+			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, credInjected, 0, nil)
+			metrics.RecordScopeDenial(b.Config.Namespace, toolName)
+			metrics.RecordToolCall(b.Config.Namespace, toolName, backendID, false, 0)
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: denyReason},
+				},
+			}, nil
+		}
+	}
 
 	span.SetAttributes(attribute.Bool("tool.allowed", true))
 	if effectiveWorkspaceID != "" {
@@ -1174,6 +1199,40 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func (g *Gateway) authorizeWorkspaceRegistry(ctx context.Context, b *Backend, workspaceID string) string {
+	if b == nil || b.Config == nil || workspaceID == "" {
+		return ""
+	}
+	entry, ok := g.registeredWorkspace(workspaceID)
+	if !ok {
+		return ""
+	}
+	if len(entry.AllowedTemplates) > 0 && !workspaceValueAllowed(entry.AllowedTemplates, b.Config.ID, b.Config.Namespace) {
+		return fmt.Sprintf("access denied: backend %q is not allowed to attach to workspace %q", b.Config.ID, workspaceID)
+	}
+	if len(entry.AllowedAgents) > 0 {
+		claims := auth.ClaimsFromContext(ctx)
+		if claims == nil || !workspaceValueAllowed(entry.AllowedAgents, claims.ClientID, claims.PrismID, claims.Subject) {
+			return fmt.Sprintf("access denied: agent is not allowed to attach to workspace %q", workspaceID)
+		}
+	}
+	return ""
+}
+
+func workspaceValueAllowed(allowed []string, candidates ...string) bool {
+	for _, value := range allowed {
+		if value == "*" {
+			return true
+		}
+		for _, candidate := range candidates {
+			if candidate != "" && value == candidate {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // DisconnectBackend closes the connection to a backend and removes its tools.

@@ -9,8 +9,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// policyCtx is a context.Context that satisfies auth.PolicyFromContext by
-// intercepting Value() calls for the key "auth.policy".
+// policyCtx is a context.Context that satisfies auth.PolicyFromContext and
+// auth.ClaimsFromContext by intercepting Value() calls for auth context keys.
 //
 // auth uses: type contextKey string; policyKey contextKey = "auth.policy"
 // Because contextKey is unexported we cannot reference it directly. However,
@@ -19,12 +19,15 @@ import (
 type policyCtx struct {
 	context.Context
 	policy *auth.Policy
+	claims *auth.Claims
 }
 
 func (c *policyCtx) Value(key any) any {
-	// Intercept the policy key lookup.
-	if fmt.Sprintf("%v", key) == "auth.policy" {
+	switch fmt.Sprintf("%v", key) {
+	case "auth.policy":
 		return c.policy
+	case "auth.claims":
+		return c.claims
 	}
 	return c.Context.Value(key)
 }
@@ -33,6 +36,10 @@ func (c *policyCtx) Value(key any) any {
 // to a policy built from the given scope string.
 func contextWithPolicy(scopeString string) context.Context {
 	return &policyCtx{Context: context.Background(), policy: auth.NewPolicy(scopeString)}
+}
+
+func contextWithPolicyAndClaims(scopeString string, claims *auth.Claims) context.Context {
+	return &policyCtx{Context: context.Background(), policy: auth.NewPolicy(scopeString), claims: claims}
 }
 
 // makeListToolsResult builds a synthetic ListToolsResult with the given tool names.

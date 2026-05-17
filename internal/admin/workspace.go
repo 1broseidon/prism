@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/1broseidon/prism/internal/adminauth"
 )
 
 // WorkspaceBridgeConfigView is the operator-facing runtime configuration for
@@ -25,8 +27,13 @@ type WorkspaceBridgeUpdate struct {
 
 // WorkspaceCreateRequest creates a remote-only workspace registry entry.
 type WorkspaceCreateRequest struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
+	ID               string   `json:"id"`
+	Type             string   `json:"type"`
+	Owner            string   `json:"owner,omitempty"`
+	AllowedAgents    []string `json:"allowed_agents,omitempty"`
+	AllowedTemplates []string `json:"allowed_templates,omitempty"`
+	QuotaBytes       int64    `json:"quota_bytes,omitempty"`
+	RetentionSeconds int64    `json:"retention_seconds,omitempty"`
 }
 
 // WorkspaceToolStatus is a tool exposed by a connected workspace bridge.
@@ -45,15 +52,20 @@ type WorkspaceBackendStatus struct {
 
 // WorkspaceStatus is shown in the admin console.
 type WorkspaceStatus struct {
-	ID        string                   `json:"id"`
-	Type      string                   `json:"type,omitempty"`
-	Hostname  string                   `json:"hostname,omitempty"`
-	Root      string                   `json:"root,omitempty"`
-	Version   string                   `json:"version,omitempty"`
-	CreatedAt time.Time                `json:"created_at,omitempty"`
-	LastSeen  time.Time                `json:"last_seen,omitempty"`
-	Connected bool                     `json:"connected"`
-	Backends  []WorkspaceBackendStatus `json:"backends,omitempty"`
+	ID               string                   `json:"id"`
+	Type             string                   `json:"type,omitempty"`
+	Owner            string                   `json:"owner,omitempty"`
+	AllowedAgents    []string                 `json:"allowed_agents,omitempty"`
+	AllowedTemplates []string                 `json:"allowed_templates,omitempty"`
+	QuotaBytes       int64                    `json:"quota_bytes,omitempty"`
+	RetentionSeconds int64                    `json:"retention_seconds,omitempty"`
+	Hostname         string                   `json:"hostname,omitempty"`
+	Root             string                   `json:"root,omitempty"`
+	Version          string                   `json:"version,omitempty"`
+	CreatedAt        time.Time                `json:"created_at,omitempty"`
+	LastSeen         time.Time                `json:"last_seen,omitempty"`
+	Connected        bool                     `json:"connected"`
+	Backends         []WorkspaceBackendStatus `json:"backends,omitempty"`
 }
 
 // WorkspaceBridgeManager is implemented by the gateway.
@@ -114,6 +126,11 @@ func (a *API) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	if req.Owner == "" {
+		if sess := adminauth.FromContext(r.Context()); sess != nil {
+			req.Owner = sess.Email
+		}
 	}
 	status, err := mgr.CreateWorkspace(r.Context(), req)
 	if err != nil {

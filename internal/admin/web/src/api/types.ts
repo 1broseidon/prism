@@ -247,6 +247,11 @@ export interface WorkspaceBackend {
 export interface Workspace {
   id: string;
   type?: "proxied" | "virtual" | "ephemeral";
+  owner?: string;
+  allowed_agents?: string[];
+  allowed_templates?: string[];
+  quota_bytes?: number;
+  retention_seconds?: number;
   hostname?: string;
   root?: string;
   version?: string;

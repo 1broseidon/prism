@@ -33,6 +33,7 @@ const (
 )
 
 var workspaceIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+var workspacePolicyValueRE = regexp.MustCompile(`^[A-Za-z0-9_.@:/-]{1,128}$`)
 
 type workspaceBridgeSettings struct {
 	Enabled   bool   `json:"enabled"`
@@ -40,9 +41,14 @@ type workspaceBridgeSettings struct {
 }
 
 type workspaceRegistryEntry struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	CreatedAt time.Time `json:"created_at"`
+	ID               string    `json:"id"`
+	Type             string    `json:"type"`
+	Owner            string    `json:"owner,omitempty"`
+	AllowedAgents    []string  `json:"allowed_agents,omitempty"`
+	AllowedTemplates []string  `json:"allowed_templates,omitempty"`
+	QuotaBytes       int64     `json:"quota_bytes,omitempty"`
+	RetentionSeconds int64     `json:"retention_seconds,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type workspaceBridgeManager struct {
@@ -673,7 +679,7 @@ func (g *Gateway) ListWorkspaces() []admin.WorkspaceStatus {
 
 // CreateWorkspace persists a remote-only workspace. Proxied workspaces are
 // created by running a local workspace bridge.
-func (g *Gateway) CreateWorkspace(_ context.Context, req admin.WorkspaceCreateRequest) (admin.WorkspaceStatus, error) {
+func (g *Gateway) CreateWorkspace(_ context.Context, req admin.WorkspaceCreateRequest) (admin.WorkspaceStatus, error) { //nolint:gocritic // admin.WorkspaceBridgeManager interface uses value DTOs
 	if g.kvStore == nil {
 		return admin.WorkspaceStatus{}, errors.New("workspace persistence is not configured")
 	}
@@ -689,10 +695,29 @@ func (g *Gateway) CreateWorkspace(_ context.Context, req admin.WorkspaceCreateRe
 	default:
 		return admin.WorkspaceStatus{}, fmt.Errorf("workspace type must be %q or %q", config.WorkspaceTypeVirtual, config.WorkspaceTypeEphemeral)
 	}
+	allowedAgents, err := cleanWorkspacePolicyValues(req.AllowedAgents)
+	if err != nil {
+		return admin.WorkspaceStatus{}, fmt.Errorf("allowed_agents: %w", err)
+	}
+	allowedTemplates, err := cleanWorkspacePolicyValues(req.AllowedTemplates)
+	if err != nil {
+		return admin.WorkspaceStatus{}, fmt.Errorf("allowed_templates: %w", err)
+	}
+	if req.QuotaBytes < 0 {
+		return admin.WorkspaceStatus{}, errors.New("quota_bytes must be >= 0")
+	}
+	if req.RetentionSeconds < 0 {
+		return admin.WorkspaceStatus{}, errors.New("retention_seconds must be >= 0")
+	}
 	entry := workspaceRegistryEntry{
-		ID:        id,
-		Type:      typ,
-		CreatedAt: time.Now().UTC(),
+		ID:               id,
+		Type:             typ,
+		Owner:            strings.TrimSpace(req.Owner),
+		AllowedAgents:    allowedAgents,
+		AllowedTemplates: allowedTemplates,
+		QuotaBytes:       req.QuotaBytes,
+		RetentionSeconds: req.RetentionSeconds,
+		CreatedAt:        time.Now().UTC(),
 	}
 	data, err := json.Marshal(&entry)
 	if err != nil {
@@ -701,7 +726,28 @@ func (g *Gateway) CreateWorkspace(_ context.Context, req admin.WorkspaceCreateRe
 	if err := g.kvStore.Set(workspaceRegistryPrefix+id, data); err != nil {
 		return admin.WorkspaceStatus{}, err
 	}
-	return workspaceStatusFromRegistry(entry), nil
+	return workspaceStatusFromRegistry(&entry), nil
+}
+
+func cleanWorkspacePolicyValues(values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if value != "*" && !workspacePolicyValueRE.MatchString(value) {
+			return nil, fmt.Errorf("%q must be 1-128 chars of [A-Za-z0-9_.@:/-] or *", value)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (g *Gateway) loadRegisteredWorkspaces() []admin.WorkspaceStatus {
@@ -722,9 +768,32 @@ func (g *Gateway) loadRegisteredWorkspaces() []admin.WorkspaceStatus {
 			g.logger.Warn("failed to decode workspace registry entry", "key", key, "error", err)
 			continue
 		}
-		out = append(out, workspaceStatusFromRegistry(entry))
+		out = append(out, workspaceStatusFromRegistry(&entry))
 	}
 	return out
+}
+
+func (g *Gateway) registeredWorkspace(id string) (*workspaceRegistryEntry, bool) {
+	if g.kvStore == nil || !workspaceIDRE.MatchString(id) {
+		return nil, false
+	}
+	data, err := g.kvStore.Get(workspaceRegistryPrefix + id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, false
+	}
+	if err != nil {
+		g.logger.Warn("failed to read workspace registry entry", "workspace", id, "error", err)
+		return nil, false
+	}
+	var entry workspaceRegistryEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		g.logger.Warn("failed to decode workspace registry entry", "workspace", id, "error", err)
+		return nil, false
+	}
+	if entry.ID == "" {
+		entry.ID = id
+	}
+	return &entry, true
 }
 
 func mergeWorkspaceRegistryStatuses(live, registered []admin.WorkspaceStatus) []admin.WorkspaceStatus {
@@ -741,6 +810,21 @@ func mergeWorkspaceRegistryStatuses(live, registered []admin.WorkspaceStatus) []
 			if live[idx].CreatedAt.IsZero() {
 				live[idx].CreatedAt = status.CreatedAt
 			}
+			if live[idx].Owner == "" {
+				live[idx].Owner = status.Owner
+			}
+			if len(live[idx].AllowedAgents) == 0 {
+				live[idx].AllowedAgents = append([]string(nil), status.AllowedAgents...)
+			}
+			if len(live[idx].AllowedTemplates) == 0 {
+				live[idx].AllowedTemplates = append([]string(nil), status.AllowedTemplates...)
+			}
+			if live[idx].QuotaBytes == 0 {
+				live[idx].QuotaBytes = status.QuotaBytes
+			}
+			if live[idx].RetentionSeconds == 0 {
+				live[idx].RetentionSeconds = status.RetentionSeconds
+			}
 			continue
 		}
 		live = append(live, *status)
@@ -748,12 +832,17 @@ func mergeWorkspaceRegistryStatuses(live, registered []admin.WorkspaceStatus) []
 	return live
 }
 
-func workspaceStatusFromRegistry(entry workspaceRegistryEntry) admin.WorkspaceStatus {
+func workspaceStatusFromRegistry(entry *workspaceRegistryEntry) admin.WorkspaceStatus {
 	return admin.WorkspaceStatus{
-		ID:        entry.ID,
-		Type:      entry.Type,
-		CreatedAt: entry.CreatedAt,
-		Connected: entry.Type == config.WorkspaceTypeVirtual,
+		ID:               entry.ID,
+		Type:             entry.Type,
+		Owner:            entry.Owner,
+		AllowedAgents:    append([]string(nil), entry.AllowedAgents...),
+		AllowedTemplates: append([]string(nil), entry.AllowedTemplates...),
+		QuotaBytes:       entry.QuotaBytes,
+		RetentionSeconds: entry.RetentionSeconds,
+		CreatedAt:        entry.CreatedAt,
+		Connected:        entry.Type == config.WorkspaceTypeVirtual,
 	}
 }
 
