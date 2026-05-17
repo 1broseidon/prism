@@ -899,6 +899,32 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 				},
 			}, nil
 		}
+		if workspaceCfg := config.NormalizeWorkspaceConfig(b.Config.Workspace); workspaceCfg != nil &&
+			policy.HasWorkspaceConstraints() && !policy.CanAccessWorkspace(workspaceCfg.ID) {
+			span.SetAttributes(
+				attribute.Bool("tool.allowed", false),
+				attribute.String("workspace.id", workspaceCfg.ID),
+			)
+			span.SetStatus(codes.Error, "workspace access denied")
+			g.logger.Warn("tool call denied by workspace policy",
+				"backend", backendID,
+				"tool", toolName,
+				"namespace", b.Config.Namespace,
+				"workspace", workspaceCfg.ID,
+			)
+			g.auditor.LogCall(ctx, b.Config.Namespace, toolName, backendID, false, credInjected, 0, nil)
+			metrics.RecordScopeDenial(b.Config.Namespace, toolName)
+			metrics.RecordToolCall(b.Config.Namespace, toolName, backendID, false, 0)
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: fmt.Sprintf(
+						"access denied: workspace %q not granted",
+						workspaceCfg.ID,
+					)},
+				},
+			}, nil
+		}
 	}
 
 	span.SetAttributes(attribute.Bool("tool.allowed", true))

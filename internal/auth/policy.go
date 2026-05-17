@@ -87,6 +87,48 @@ func (p *Policy) CanAccessTool(namespace, tool string) bool {
 	return false
 }
 
+// HasWorkspaceConstraints reports whether this policy opts into workspace
+// authorization. Policies without workspace scopes keep legacy tool-only
+// behavior for existing deployments.
+func (p *Policy) HasWorkspaceConstraints() bool {
+	if p == nil {
+		return false
+	}
+	for scope := range p.AllowedScopes {
+		if scope == "*" || strings.HasPrefix(scope, "workspace:") {
+			return true
+		}
+	}
+	return false
+}
+
+// CanAccessWorkspace checks whether the policy allows attaching tools to the
+// given workspace ID. Workspace scopes use "workspace:<id>", "workspace:*",
+// or glob scopes like "workspace:team-*".
+func (p *Policy) CanAccessWorkspace(workspaceID string) bool {
+	if p == nil || len(p.AllowedScopes) == 0 || workspaceID == "" {
+		return false
+	}
+	if _, ok := p.AllowedScopes["*"]; ok {
+		return true
+	}
+	if _, ok := p.AllowedScopes["workspace:*"]; ok {
+		return true
+	}
+	full := "workspace:" + workspaceID
+	if _, ok := p.AllowedScopes[full]; ok {
+		return true
+	}
+	for scope := range p.AllowedScopes {
+		if strings.HasPrefix(scope, "workspace:") && strings.ContainsAny(scope, "*?[") {
+			if matched, _ := path.Match(scope, full); matched {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // CanListTools checks if the policy allows listing tools at all.
 // Any valid scope grants list access — you can see what exists,
 // but calls are still gated per-tool.

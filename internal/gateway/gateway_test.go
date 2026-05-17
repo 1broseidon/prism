@@ -281,6 +281,72 @@ func TestReconnectBackendUsesPersistedConfig(t *testing.T) {
 	}
 }
 
+func TestRouteToolCallRequiresWorkspaceScopeWhenPolicyUsesWorkspaces(t *testing.T) {
+	called := false
+	backendServer := mcp.NewServer(&mcp.Implementation{Name: "backend", Version: "0.1.0"}, nil)
+	backendServer.AddTool(&mcp.Tool{
+		Name:        "list_tasks",
+		Description: "test tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		called = true
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+	})
+	upstream := httptest.NewServer(mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return backendServer },
+		nil,
+	))
+	defer upstream.Close()
+
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	if err := gw.ConnectBackend(context.Background(), &config.ServerConfig{
+		ID:        "brainfile",
+		Namespace: "brainfile",
+		URL:       upstream.URL,
+		Workspace: &config.WorkspaceConfig{
+			ID: "repo",
+		},
+	}); err != nil {
+		t.Fatalf("connect backend: %v", err)
+	}
+
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{}`)}}
+	denied, err := gw.routeToolCall(contextWithPolicy("brainfile:list_tasks workspace:other"), "brainfile", "list_tasks", req)
+	if err != nil {
+		t.Fatalf("denied route returned error: %v", err)
+	}
+	if denied == nil || !denied.IsError {
+		t.Fatalf("expected workspace denial, got %+v", denied)
+	}
+	if called {
+		t.Fatal("backend should not be called when workspace scope is denied")
+	}
+
+	legacyAllowed, err := gw.routeToolCall(contextWithPolicy("brainfile:list_tasks"), "brainfile", "list_tasks", req)
+	if err != nil {
+		t.Fatalf("legacy route returned error: %v", err)
+	}
+	if legacyAllowed == nil || legacyAllowed.IsError {
+		t.Fatalf("expected legacy tool-only policy to remain allowed, got %+v", legacyAllowed)
+	}
+	if !called {
+		t.Fatal("backend should be called for legacy tool-only policy")
+	}
+
+	called = false
+	allowed, err := gw.routeToolCall(contextWithPolicy("brainfile:list_tasks workspace:repo"), "brainfile", "list_tasks", req)
+	if err != nil {
+		t.Fatalf("allowed route returned error: %v", err)
+	}
+	if allowed == nil || allowed.IsError {
+		t.Fatalf("expected allowed result, got %+v", allowed)
+	}
+	if !called {
+		t.Fatal("backend should be called when workspace scope is allowed")
+	}
+}
+
 func TestReconnectPersistedBackendsForWorkspace(t *testing.T) {
 	backendServer := mcp.NewServer(&mcp.Implementation{Name: "backend", Version: "0.1.0"}, nil)
 	backendServer.AddTool(&mcp.Tool{

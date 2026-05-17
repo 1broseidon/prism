@@ -59,10 +59,45 @@ func TestPolicyCanListTools(t *testing.T) {
 	}
 }
 
+func TestPolicyCanAccessWorkspace(t *testing.T) {
+	tests := []struct {
+		name        string
+		scopes      string
+		workspaceID string
+		constrained bool
+		want        bool
+	}{
+		{"legacy tool only policy is unconstrained", "brainfile:*", "repo", false, false},
+		{"exact workspace", "brainfile:* workspace:repo", "repo", true, true},
+		{"wrong workspace", "brainfile:* workspace:repo", "other", true, false},
+		{"workspace wildcard", "workspace:*", "any", true, true},
+		{"superuser", "*", "any", true, true},
+		{"workspace glob", "workspace:team-*", "team-api", true, true},
+		{"workspace glob miss", "workspace:team-*", "personal", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPolicy(tt.scopes)
+			if got := p.HasWorkspaceConstraints(); got != tt.constrained {
+				t.Fatalf("HasWorkspaceConstraints() = %v, want %v", got, tt.constrained)
+			}
+			if got := p.CanAccessWorkspace(tt.workspaceID); got != tt.want {
+				t.Fatalf("CanAccessWorkspace(%q) = %v, want %v", tt.workspaceID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNilPolicy(t *testing.T) {
 	var p *Policy
 	if p.CanAccessTool("a", "b") {
 		t.Error("nil policy should deny access")
+	}
+	if p.HasWorkspaceConstraints() {
+		t.Error("nil policy should not have workspace constraints")
+	}
+	if p.CanAccessWorkspace("repo") {
+		t.Error("nil policy should deny workspace access")
 	}
 	if p.CanListTools() {
 		t.Error("nil policy should deny listing")
