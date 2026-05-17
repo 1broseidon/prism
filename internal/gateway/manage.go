@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -269,6 +270,9 @@ func (g *Gateway) UpdateBackend(ctx context.Context, id string, update admin.Bac
 	if update.Enabled != nil {
 		pb.Enabled = boolPtr(*update.Enabled)
 	}
+	if update.DisabledTools != nil {
+		pb.DisabledTools = normalizeDisabledToolList(*update.DisabledTools)
+	}
 
 	enabled := pb.isEnabled()
 
@@ -315,8 +319,41 @@ func (g *Gateway) UpdateBackend(ctx context.Context, id string, update admin.Bac
 			return err
 		}
 	}
+	g.applyDisabledTools(id, pb.DisabledTools)
 	g.persistBackend(id, pb)
+	if update.DisabledTools != nil {
+		// MCP clients cache tools/list — push a tools/list_changed so they
+		// re-fetch and the toggle takes effect without a manual reload.
+		g.NotifyToolsChanged()
+	}
 	return nil
+}
+
+// normalizeDisabledToolList trims, deduplicates, and drops empty entries. nil
+// vs empty stays meaningful upstream (BackendUpdate.DisabledTools is a
+// pointer); past that boundary we want a clean slice for persistence.
+func normalizeDisabledToolList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, name := range in {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		if _, dup := seen[trimmed]; dup {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func clonePersistedBackend(pb *persistedBackend) *persistedBackend {

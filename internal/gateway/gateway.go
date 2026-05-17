@@ -45,6 +45,11 @@ type Backend struct {
 	CB        *middleware.CircuitBreaker
 	ToolNames []string          // namespaced tool names registered on the gateway
 	Tools     []BackendToolInfo // tool metadata captured at registration
+	// DisabledTools is the set of bare (un-namespaced) tool names the
+	// operator has switched off on this backend. tools/list filters them out
+	// for callers; tools/call rejects them with a "method not found" style
+	// error so a cached client can't bypass the toggle. Empty/nil = all on.
+	DisabledTools map[string]struct{}
 	// inflight counts in-progress tool calls so DisconnectBackend can drain
 	// them before Session.Close(). Add() is called only while the gateway
 	// mutex is held + the backend is still in the map, so no new Adds can
@@ -59,6 +64,10 @@ type Backend struct {
 type BackendToolInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	// Disabled is true when the operator has switched this tool off on the
+	// backend. The status response still lists it so the UI can re-enable
+	// it; tools/list to MCP clients filters it out.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // policyResolverBox is a typed wrapper so atomic.Pointer can hold an interface
@@ -316,6 +325,9 @@ type persistedBackend struct {
 	Enabled       *bool                   `json:"enabled,omitempty"`
 	Sandbox       *config.SandboxConfig   `json:"sandbox,omitempty"`
 	Workspace     *config.WorkspaceConfig `json:"workspace,omitempty"`
+	// DisabledTools persists the operator's per-tool toggles across restarts.
+	// Bare tool names (no namespace prefix).
+	DisabledTools []string `json:"disabled_tools,omitempty"`
 }
 
 func boolPtr(v bool) *bool { return &v }
@@ -579,6 +591,7 @@ func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string,
 			if err := g.connectBackendWithBridgeRetry(ctx, sc, &spawned, backendID, pb.Command, pb.Args, pb.Env, pb.Runtime, &sc.Sandbox, sc.Workspace); err != nil {
 				return err
 			}
+			g.applyDisabledTools(backendID, pb.DisabledTools)
 			g.persistBackend(backendID, pb)
 			return nil
 		}
@@ -590,8 +603,30 @@ func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string,
 	if err := g.ConnectBackend(ctx, sc); err != nil {
 		return err
 	}
+	g.applyDisabledTools(backendID, pb.DisabledTools)
 	g.persistBackend(backendID, pb)
 	return nil
+}
+
+// applyDisabledTools sets the live disabled-tools set on a connected backend.
+// Idempotent; safe to call from both connect paths. Holds the gateway lock
+// for the duration so concurrent tools/list / tools/call see a consistent set.
+func (g *Gateway) applyDisabledTools(backendID string, list []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	b, ok := g.backends[backendID]
+	if !ok {
+		return
+	}
+	if len(list) == 0 {
+		b.DisabledTools = nil
+		return
+	}
+	next := make(map[string]struct{}, len(list))
+	for _, name := range list {
+		next[name] = struct{}{}
+	}
+	b.DisabledTools = next
 }
 
 // HasPersistedBackends returns true if the KV store has any persisted backend configs.
@@ -683,6 +718,26 @@ func buildCredentialFromPersisted(pc *persistedCredential) credentials.Credentia
 	}
 }
 
+// disabledToolsByNamespace returns a snapshot of every backend's disabled
+// tool set, keyed by namespace, so the scope filter can drop disabled tools
+// in one O(1) lookup per tool rather than re-scanning the backends map.
+func (g *Gateway) disabledToolsByNamespace() map[string]map[string]struct{} {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make(map[string]map[string]struct{}, len(g.backends))
+	for _, b := range g.backends {
+		if len(b.DisabledTools) == 0 {
+			continue
+		}
+		copySet := make(map[string]struct{}, len(b.DisabledTools))
+		for name := range b.DisabledTools {
+			copySet[name] = struct{}{}
+		}
+		out[b.Config.Namespace] = copySet
+	}
+	return out
+}
+
 // scopeFilterMiddleware returns an MCP receiving middleware that intercepts
 // tools/list responses and strips out tools the caller cannot access.
 //
@@ -716,6 +771,8 @@ func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
 
 			toolsBefore := len(toolsResult.Tools)
 
+			disabledByNS := g.disabledToolsByNamespace()
+
 			filtered := make([]*mcp.Tool, 0, len(toolsResult.Tools))
 			for _, t := range toolsResult.Tools {
 				ns, name, ok := parseNamespacedTool(t.Name)
@@ -727,9 +784,15 @@ func (g *Gateway) scopeFilterMiddleware() mcp.Middleware {
 					}
 					continue
 				}
-				if policy.CanAccessTool(ns, name) {
-					filtered = append(filtered, t)
+				if !policy.CanAccessTool(ns, name) {
+					continue
 				}
+				if d, ok := disabledByNS[ns]; ok {
+					if _, off := d[name]; off {
+						continue
+					}
+				}
+				filtered = append(filtered, t)
 			}
 
 			toolsResult.Tools = filtered
@@ -983,6 +1046,25 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}, nil
 	}
 	defer b.inflight.Done()
+
+	// Tool may have been switched off after a cached client already saw it
+	// in tools/list. Reject before doing any auth/credential/workspace work.
+	if _, off := b.DisabledTools[toolName]; off {
+		span.SetAttributes(
+			attribute.String("tool.namespace", b.Config.Namespace),
+			attribute.String("tool.name", toolName),
+			attribute.String("tool.backend", backendID),
+			attribute.Bool("tool.allowed", false),
+			attribute.String("tool.deny_reason", "disabled"),
+		)
+		span.SetStatus(codes.Error, "tool disabled")
+		return &mcp.CallToolResult{
+			IsError: true,
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: fmt.Sprintf("tool %q is disabled on backend %q", toolName, backendID)},
+			},
+		}, nil
+	}
 
 	span.SetAttributes(
 		attribute.String("tool.namespace", b.Config.Namespace),
@@ -1953,6 +2035,28 @@ func (g *Gateway) CredentialInfo(backendID string) *BackendCredentialInfo {
 	}
 }
 
+// annotateDisabledTools copies BackendToolInfo entries with the Disabled flag
+// set from the live disabled set. The slice in Backend.Tools doesn't carry
+// the flag itself — keeping the source-of-truth on Backend.DisabledTools
+// avoids drift when toggles are flipped after registration.
+func annotateDisabledTools(tools []BackendToolInfo, namespace string, disabled map[string]struct{}) []BackendToolInfo {
+	if len(tools) == 0 {
+		return tools
+	}
+	out := make([]BackendToolInfo, len(tools))
+	prefix := namespace + namespaceSeparator
+	for i, t := range tools {
+		bare := strings.TrimPrefix(t.Name, prefix)
+		_, off := disabled[bare]
+		out[i] = BackendToolInfo{
+			Name:        t.Name,
+			Description: t.Description,
+			Disabled:    off,
+		}
+	}
+	return out
+}
+
 // Status returns status info for all backends, including any KV-persisted
 // entries that failed to reconnect this run (so the UI can show them as
 // broken and the operator can remove them).
@@ -1966,7 +2070,7 @@ func (g *Gateway) Status() []BackendStatus {
 			Namespace:     b.Config.Namespace,
 			URL:           b.Config.URL,
 			Enabled:       true,
-			Tools:         b.Tools,
+			Tools:         annotateDisabledTools(b.Tools, b.Config.Namespace, b.DisabledTools),
 			BridgeManaged: b.Config.BridgeManaged,
 			Runtime:       b.Config.BridgeRuntime,
 			Sandbox:       config.NormalizeSandboxConfig(&b.Config.Sandbox, config.SandboxProfileDefault),

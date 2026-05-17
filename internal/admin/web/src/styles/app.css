@@ -140,6 +140,13 @@ a {
   line-height: 1;
   color: var(--fg-emphasis);
 }
+.shell-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: inherit;
+}
 
 .shell-header {
   grid-area: header;
@@ -209,13 +216,9 @@ a {
   height: 22px;
   background: var(--accent);
 }
-.nav-footer {
-  margin-top: auto;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-}
 .nav-meta {
-  padding: 14px 28px 4px;
+  margin-top: auto;
+  padding: 16px 28px;
   display: flex;
   gap: 8px;
   font-family: var(--font-mono);
@@ -223,9 +226,66 @@ a {
   color: var(--faint);
   letter-spacing: 0.05em;
   font-variant-numeric: tabular-nums;
+  border-top: 1px solid var(--line);
 }
 .nav-meta-dot {
   opacity: 0.6;
+}
+
+/* ---------- Header cog ---------- */
+
+.header-cog {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-left: 8px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease;
+}
+.header-cog:hover {
+  color: var(--fg-emphasis);
+  background: var(--hover);
+}
+.header-cog-active {
+  color: var(--fg-emphasis);
+  background: var(--hover);
+}
+
+/* ---------- Settings tabs ---------- */
+
+.settings-shell {
+  display: flex;
+  flex-direction: column;
+}
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 32px;
+  border-bottom: 1px solid var(--line);
+}
+.settings-tab {
+  position: relative;
+  padding: 10px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+.settings-tab:hover {
+  color: var(--fg-emphasis);
+}
+.settings-tab-active {
+  color: var(--fg-emphasis);
+  border-bottom-color: var(--accent);
 }
 
 /* ---------- Content frame ---------- */
@@ -1755,6 +1815,53 @@ tr:hover .remove-btn {
   font-style: italic;
   opacity: 0.6;
 }
+.tool-row-disabled {
+  opacity: 0.55;
+}
+.tool-row-disabled .tool-name {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.tool-toggle {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.tool-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.tool-toggle-track {
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--line);
+  position: relative;
+  transition: background 120ms ease;
+}
+.tool-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: var(--bg-elev);
+  border-radius: 50%;
+  transition: transform 120ms ease;
+}
+.tool-toggle input:checked ~ .tool-toggle-track {
+  background: var(--accent, #4f9cf9);
+}
+.tool-toggle input:checked ~ .tool-toggle-track .tool-toggle-thumb {
+  transform: translateX(12px);
+}
+.tool-toggle input:disabled ~ .tool-toggle-track {
+  opacity: 0.5;
+  cursor: wait;
+}
 
 /* Section button variant */
 .section-btn-primary {
@@ -2869,12 +2976,8 @@ tr:hover .remove-btn {
   .nav-section-label {
     padding: 8px 22px 8px;
   }
-  .nav-footer {
-    padding: 12px 0 0;
-  }
-  .nav-footer .nav-link {
-    padding-top: 14px;
-    padding-bottom: 14px;
+  .nav-meta {
+    padding: 14px 22px;
   }
 
   /* Scrim */

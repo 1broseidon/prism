@@ -45,6 +45,7 @@ export interface BackendCredentialInfo {
 export interface BackendTool {
   name: string;
   description?: string;
+  disabled?: boolean;
 }
 
 export interface SandboxMount {
@@ -190,6 +191,10 @@ export interface BackendUpdateBody {
   enabled?: boolean;
   sandbox?: SandboxConfig;
   workspace?: WorkspaceConfig;
+  // disabled_tools is the list of bare (un-namespaced) tool names switched
+  // off on this backend. Omit to leave the toggle state unchanged; pass an
+  // empty array to re-enable every tool.
+  disabled_tools?: string[];
 }
 
 export interface WorkspaceChange {

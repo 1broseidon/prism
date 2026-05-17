@@ -34,10 +34,16 @@ type BackendConfig struct {
 }
 
 // BackendUpdate is the PATCH /backends/{id} body for operational settings.
+//
+// DisabledTools uses *[]string so the handler can distinguish "field omitted"
+// (nil — don't change anything) from "set to empty" (&[]string{} — enable
+// every tool). A non-empty slice is the literal list of bare tool names to
+// switch off.
 type BackendUpdate struct {
-	Enabled   *bool                   `json:"enabled,omitempty"`
-	Sandbox   *config.SandboxConfig   `json:"sandbox,omitempty"`
-	Workspace *config.WorkspaceConfig `json:"workspace,omitempty"`
+	Enabled       *bool                   `json:"enabled,omitempty"`
+	Sandbox       *config.SandboxConfig   `json:"sandbox,omitempty"`
+	Workspace     *config.WorkspaceConfig `json:"workspace,omitempty"`
+	DisabledTools *[]string               `json:"disabled_tools,omitempty"`
 }
 
 // CredentialConfig specifies how to authenticate with a backend.

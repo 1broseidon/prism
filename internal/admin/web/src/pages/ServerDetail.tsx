@@ -1221,6 +1221,10 @@ function ToolsSection({ backend }: { backend: Backend }) {
   const [query, setQuery] = useState("");
   const tools = backend.tools || [];
   const ev = events.data.value || [];
+  const mutate = canMutate();
+  const [saving, setSaving] = useState<string | null>(null);
+  const prefix = `${backend.namespace || backend.id}__`;
+  const disabledCount = tools.filter((t) => t.disabled).length;
 
   // Per-tool call counts from the recent events buffer.
   const counts = useMemo(() => {
@@ -1242,10 +1246,78 @@ function ToolsSection({ backend }: { backend: Backend }) {
     );
   }, [tools, query]);
 
+  const sendDisabledList = async (next: string[]) => {
+    setSaving("__bulk__");
+    try {
+      await patchJSON<unknown>(
+        `/backends/${encodeURIComponent(backend.id)}`,
+        { disabled_tools: next } satisfies BackendUpdateBody,
+      );
+      await backends.refresh();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const currentDisabled = (): string[] =>
+    tools.filter((t) => t.disabled).map((t) => bareToolName(t.name, prefix));
+
+  const toggleTool = async (tool: BackendTool) => {
+    const bare = bareToolName(tool.name, prefix);
+    setSaving(tool.name);
+    const next = new Set(currentDisabled());
+    if (tool.disabled) {
+      next.delete(bare);
+    } else {
+      next.add(bare);
+    }
+    try {
+      await patchJSON<unknown>(
+        `/backends/${encodeURIComponent(backend.id)}`,
+        { disabled_tools: Array.from(next).sort() } satisfies BackendUpdateBody,
+      );
+      await backends.refresh();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const enableAll = () => sendDisabledList([]);
+  const disableAll = () =>
+    sendDisabledList(tools.map((t) => bareToolName(t.name, prefix)));
+
   return (
     <div class="section">
       <div class="section-header">
-        <span class="section-title">tools ({tools.length})</span>
+        <span class="section-title">
+          tools ({tools.length - disabledCount} of {tools.length} on)
+        </span>
+        {mutate && tools.length > 0 && (
+          <div class="section-actions">
+            {disabledCount > 0 && (
+              <button
+                class="section-btn"
+                disabled={saving !== null}
+                onClick={enableAll}
+              >
+                enable all
+              </button>
+            )}
+            {disabledCount < tools.length && (
+              <button
+                class="section-btn"
+                disabled={saving !== null}
+                onClick={disableAll}
+              >
+                disable all
+              </button>
+            )}
+          </div>
+        )}
         {tools.length > 0 && (
           <input
             type="search"
@@ -1270,6 +1342,9 @@ function ToolsSection({ backend }: { backend: Backend }) {
               key={t.name}
               tool={t}
               callCount={counts.get(t.name) ?? 0}
+              mutate={mutate}
+              busy={saving === t.name || saving === "__bulk__"}
+              onToggle={() => toggleTool(t)}
             />
           ))}
         </div>
@@ -1278,21 +1353,47 @@ function ToolsSection({ backend }: { backend: Backend }) {
   );
 }
 
+function bareToolName(namespaced: string, prefix: string): string {
+  return namespaced.startsWith(prefix)
+    ? namespaced.slice(prefix.length)
+    : namespaced;
+}
+
 function ToolRow({
   tool,
   callCount,
+  mutate,
+  busy,
+  onToggle,
 }: {
   tool: BackendTool;
   callCount: number;
+  mutate: boolean;
+  busy: boolean;
+  onToggle: () => void;
 }) {
+  const enabled = !tool.disabled;
   return (
-    <div class="tool-row">
+    <div class={enabled ? "tool-row" : "tool-row tool-row-disabled"}>
       <div class="tool-row-header">
         <div class="tool-name">{tool.name}</div>
         {callCount > 0 && (
           <span class="tool-count-value">
             {callCount} call{callCount === 1 ? "" : "s"}
           </span>
+        )}
+        {mutate && (
+          <label class="tool-toggle" title={enabled ? "disable" : "enable"}>
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={busy}
+              onChange={onToggle}
+            />
+            <span class="tool-toggle-track">
+              <span class="tool-toggle-thumb" />
+            </span>
+          </label>
         )}
       </div>
       {tool.description ? (
