@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,7 @@ type workspaceConnection struct {
 	root      string
 	version   string
 	lastSeen  time.Time
+	usedBytes int64
 	backends  []admin.WorkspaceBackendStatus
 	toolNames []string
 	queue     chan workspaceCallRequest
@@ -600,6 +602,11 @@ func (m *workspaceBridgeManager) handlePoll(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	conn.lastSeen = time.Now()
+	if raw := strings.TrimSpace(r.URL.Query().Get("used_bytes")); raw != "" {
+		if used, err := strconv.ParseInt(raw, 10, 64); err == nil && used >= 0 {
+			conn.usedBytes = used
+		}
+	}
 	queue := conn.queue
 	m.mu.Unlock()
 
@@ -672,6 +679,13 @@ func (g *Gateway) ListWorkspaces() []admin.WorkspaceStatus {
 	}
 	if g.kvStore != nil {
 		statuses = mergeWorkspaceRegistryStatuses(statuses, g.loadRegisteredWorkspaces())
+	}
+	for i := range statuses {
+		statuses[i].HealthStatus = workspaceHealth(
+			statuses[i].Connected,
+			statuses[i].UsedBytes,
+			statuses[i].QuotaBytes,
+		)
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ID < statuses[j].ID })
 	return statuses
@@ -833,6 +847,10 @@ func mergeWorkspaceRegistryStatuses(live, registered []admin.WorkspaceStatus) []
 }
 
 func workspaceStatusFromRegistry(entry *workspaceRegistryEntry) admin.WorkspaceStatus {
+	// Virtual workspaces are considered "connected" (gateway-resident storage
+	// that exists whether or not a bridge is actively polling). Ephemeral
+	// workspaces only exist while a bridge is attached.
+	connected := entry.Type == config.WorkspaceTypeVirtual
 	return admin.WorkspaceStatus{
 		ID:               entry.ID,
 		Type:             entry.Type,
@@ -842,7 +860,9 @@ func workspaceStatusFromRegistry(entry *workspaceRegistryEntry) admin.WorkspaceS
 		QuotaBytes:       entry.QuotaBytes,
 		RetentionSeconds: entry.RetentionSeconds,
 		CreatedAt:        entry.CreatedAt,
-		Connected:        entry.Type == config.WorkspaceTypeVirtual,
+		Connected:        connected,
+		// UsedBytes for virtual/ephemeral is a follow-up — requires docker
+		// volume inspection via the server-side bridge runtime.
 	}
 }
 
@@ -862,11 +882,29 @@ func (m *workspaceBridgeManager) list() []admin.WorkspaceStatus {
 			Version:   conn.version,
 			LastSeen:  conn.lastSeen,
 			Connected: now.Sub(conn.lastSeen) < 2*workspacePollTimeout,
+			UsedBytes: conn.usedBytes,
 			Backends:  backends,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// workspaceHealth maps a workspace's runtime state to one of the documented
+// health values: ok / quota_warn / quota_exceeded / stale.
+func workspaceHealth(connected bool, used, quota int64) string {
+	if !connected {
+		return admin.WorkspaceHealthStale
+	}
+	if quota > 0 {
+		if used >= quota {
+			return admin.WorkspaceHealthQuotaExceeded
+		}
+		if used*10 >= quota*9 { // >= 90% of quota
+			return admin.WorkspaceHealthQuotaWarn
+		}
+	}
+	return admin.WorkspaceHealthOK
 }
 
 // DisconnectWorkspace removes a workspace bridge and its registered tools.

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/1broseidon/prism/internal/admin"
 	"github.com/1broseidon/prism/internal/auth"
@@ -405,11 +406,112 @@ func TestWorkspaceRegistryCreatesListsDeletesRemoteWorkspaces(t *testing.T) {
 		list[0].RetentionSeconds != 3600 {
 		t.Fatalf("workspace policy metadata = %+v", list[0])
 	}
+	// Registered virtual without live usage reporting is healthy (UsedBytes 0,
+	// quota > 0 but well under).
+	if list[0].HealthStatus != admin.WorkspaceHealthOK {
+		t.Fatalf("expected health_status=ok for connected virtual under quota, got %q", list[0].HealthStatus)
+	}
 	if !gw.DisconnectWorkspace("team-a") {
 		t.Fatal("expected registry workspace delete to succeed")
 	}
 	if gw.DisconnectWorkspace("team-a") {
 		t.Fatal("second delete should report not found")
+	}
+}
+
+func TestWorkspaceBridgeRecordsUsedBytesFromPoll(t *testing.T) {
+	gw := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer gw.Close()
+	kv := store.NewMemoryStore()
+	gw.SetStore(kv)
+	if err := gw.InitWorkspaceBridge(kv, ""); err != nil {
+		t.Fatalf("init workspace bridge: %v", err)
+	}
+
+	handler := gw.WorkspaceBridgeHandler()
+
+	if _, err := gw.SetWorkspaceBridgeConfig(admin.WorkspaceBridgeUpdate{
+		Enabled: true,
+		Token:   "test-token-min-length-1234567",
+	}); err != nil {
+		t.Fatalf("enable workspace bridge: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	auth := func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer test-token-min-length-1234567")
+	}
+
+	// Register a proxied workspace with a single dummy backend.
+	regBody := `{"workspace_id":"repo-a","hostname":"laptop","root":"/tmp/r","version":"0.1","backends":[{"id":"Brainfile","namespace":"Brainfile","tools":[{"name":"hello","description":""}]}]}`
+	regReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/workspace/register", strings.NewReader(regBody))
+	regReq.Header.Set("Content-Type", "application/json")
+	auth(regReq)
+	regResp, err := http.DefaultClient.Do(regReq)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	regResp.Body.Close()
+	if regResp.StatusCode != http.StatusOK {
+		t.Fatalf("register status = %d", regResp.StatusCode)
+	}
+
+	// Poll with used_bytes=2048. Poll long-polls — send via a goroutine that
+	// closes the request once we have what we need (the gateway updates state
+	// before blocking on the request queue).
+	pollReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/workspace/poll?workspace_id=repo-a&used_bytes=2048", nil)
+	auth(pollReq)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	pollReq = pollReq.WithContext(ctx)
+	go func() {
+		// Cancel after a brief moment — the gateway has already cached
+		// used_bytes by the time it starts blocking on the queue.
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	resp, _ := http.DefaultClient.Do(pollReq)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	list := gw.ListWorkspaces()
+	if len(list) != 1 || list[0].ID != "repo-a" {
+		t.Fatalf("expected one workspace named repo-a, got %+v", list)
+	}
+	if list[0].UsedBytes != 2048 {
+		t.Errorf("UsedBytes = %d, want 2048", list[0].UsedBytes)
+	}
+	if list[0].HealthStatus != admin.WorkspaceHealthOK {
+		t.Errorf("HealthStatus = %q, want %q", list[0].HealthStatus, admin.WorkspaceHealthOK)
+	}
+}
+
+func TestWorkspaceHealth(t *testing.T) {
+	cases := []struct {
+		name      string
+		connected bool
+		used      int64
+		quota     int64
+		want      string
+	}{
+		{"disconnected is stale", false, 0, 0, admin.WorkspaceHealthStale},
+		{"disconnected wins over quota", false, 9999, 100, admin.WorkspaceHealthStale},
+		{"connected no quota is ok", true, 1024, 0, admin.WorkspaceHealthOK},
+		{"connected under 90%", true, 50, 100, admin.WorkspaceHealthOK},
+		{"connected at 90% is warn", true, 90, 100, admin.WorkspaceHealthQuotaWarn},
+		{"connected over quota is exceeded", true, 200, 100, admin.WorkspaceHealthQuotaExceeded},
+		{"connected at exactly quota is exceeded", true, 100, 100, admin.WorkspaceHealthQuotaExceeded},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := workspaceHealth(c.connected, c.used, c.quota)
+			if got != c.want {
+				t.Errorf("workspaceHealth(connected=%v, used=%d, quota=%d) = %q, want %q",
+					c.connected, c.used, c.quota, got, c.want)
+			}
+		})
 	}
 }
 

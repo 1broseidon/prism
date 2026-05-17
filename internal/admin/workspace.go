@@ -58,6 +58,7 @@ type WorkspaceStatus struct {
 	AllowedAgents    []string                 `json:"allowed_agents,omitempty"`
 	AllowedTemplates []string                 `json:"allowed_templates,omitempty"`
 	QuotaBytes       int64                    `json:"quota_bytes,omitempty"`
+	UsedBytes        int64                    `json:"used_bytes,omitempty"`
 	RetentionSeconds int64                    `json:"retention_seconds,omitempty"`
 	Hostname         string                   `json:"hostname,omitempty"`
 	Root             string                   `json:"root,omitempty"`
@@ -65,8 +66,17 @@ type WorkspaceStatus struct {
 	CreatedAt        time.Time                `json:"created_at,omitempty"`
 	LastSeen         time.Time                `json:"last_seen,omitempty"`
 	Connected        bool                     `json:"connected"`
+	HealthStatus     string                   `json:"health_status,omitempty"`
 	Backends         []WorkspaceBackendStatus `json:"backends,omitempty"`
 }
+
+// WorkspaceHealth* are the values reported in WorkspaceStatus.HealthStatus.
+const (
+	WorkspaceHealthOK            = "ok"
+	WorkspaceHealthQuotaWarn     = "quota_warn"
+	WorkspaceHealthQuotaExceeded = "quota_exceeded"
+	WorkspaceHealthStale         = "stale"
+)
 
 // WorkspaceBridgeManager is implemented by the gateway.
 type WorkspaceBridgeManager interface {

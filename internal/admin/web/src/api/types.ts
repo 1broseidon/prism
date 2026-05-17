@@ -246,6 +246,12 @@ export interface WorkspaceBackend {
   tools?: WorkspaceTool[];
 }
 
+export type WorkspaceHealth =
+  | "ok"
+  | "quota_warn"
+  | "quota_exceeded"
+  | "stale";
+
 export interface Workspace {
   id: string;
   type?: "proxied" | "virtual" | "ephemeral";
@@ -253,6 +259,7 @@ export interface Workspace {
   allowed_agents?: string[];
   allowed_templates?: string[];
   quota_bytes?: number;
+  used_bytes?: number;
   retention_seconds?: number;
   hostname?: string;
   root?: string;
@@ -260,5 +267,6 @@ export interface Workspace {
   created_at?: string;
   last_seen?: string;
   connected: boolean;
+  health_status?: WorkspaceHealth;
   backends?: WorkspaceBackend[];
 }

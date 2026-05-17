@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	iofs "io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -197,8 +198,21 @@ func runWorkspaceBridge(logger *slog.Logger, args []string) error { //nolint:goc
 
 	logger.Info("workspace bridge connected", "gateway", opts.gateway, "workspace", opts.id, "namespace", opts.namespace, "root", opts.root, "tools", len(toolList))
 	backoff := 500 * time.Millisecond
+	var (
+		cachedUsage    int64
+		usageRefreshed time.Time
+	)
+	const usageRefreshInterval = 60 * time.Second
 	for ctx.Err() == nil {
-		req, err := pollWorkspace(ctx, client, opts)
+		if time.Since(usageRefreshed) > usageRefreshInterval {
+			if used, err := computeWorkspaceUsage(opts.root); err != nil {
+				logger.Debug("workspace usage walk failed", "root", opts.root, "error", err)
+			} else {
+				cachedUsage = used
+			}
+			usageRefreshed = time.Now()
+		}
+		req, err := pollWorkspace(ctx, client, opts, cachedUsage)
 		if err != nil {
 			logger.Warn("workspace poll failed", "error", err)
 			if registerErr := registerWorkspace(ctx, client, opts, toolList); registerErr != nil {
@@ -312,15 +326,48 @@ func unregisterWorkspace(ctx context.Context, client *http.Client, opts *workspa
 	}, nil)
 }
 
-func pollWorkspace(ctx context.Context, client *http.Client, opts *workspaceOptions) (*workspaceCallRequest, error) {
+func pollWorkspace(ctx context.Context, client *http.Client, opts *workspaceOptions, usedBytes int64) (*workspaceCallRequest, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	url := opts.gateway + "/workspace/poll?workspace_id=" + opts.id
+	if usedBytes > 0 {
+		url += "&used_bytes=" + strconv.FormatInt(usedBytes, 10)
+	}
 	var response workspacePollResponse
 	if err := workspaceJSON(reqCtx, client, http.MethodGet, url, opts.token, nil, &response); err != nil {
 		return nil, err
 	}
 	return response.Request, nil
+}
+
+// computeWorkspaceUsage walks the workspace root and returns the total file
+// size in bytes. Errors are logged by the caller; this returns 0 on failure so
+// the bridge can keep polling.
+func computeWorkspaceUsage(root string) (int64, error) {
+	if strings.TrimSpace(root) == "" {
+		return 0, nil
+	}
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, d iofs.DirEntry, err error) error {
+		if err != nil {
+			// Skip unreadable entries (e.g. permission denied on a subtree)
+			// rather than aborting the whole walk.
+			if d != nil && d.IsDir() {
+				return iofs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
 }
 
 func postWorkspaceResult(ctx context.Context, client *http.Client, opts *workspaceOptions, result *workspaceCallResult) error {
