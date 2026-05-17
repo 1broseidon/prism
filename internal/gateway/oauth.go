@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
@@ -548,12 +549,32 @@ func uniqueStrings(values []string) []string {
 //  2. https://auth.example.com/.well-known/openid-configuration
 //
 // Returns the metadata, the URL that succeeded, and any error.
+
+// issuerDiscoveryMismatch is returned by validateDiscoveredIssuer when the
+// metadata's issuer disagrees with the URL we discovered it at. Per RFC 8414
+// §3 the issuer MUST match, but a long tail of real-world backends front a
+// vendor IdP (Clerk/Auth0/Cognito) at a brand domain — context7.com pointing
+// to clerk.context7.com is the canonical case. Other MCP clients (Claude Code,
+// Codex, Cursor) tolerate this; the trust anchor here is TLS to the discovery
+// URL, not string-equality of the issuer field.
+//
+// Callers should log and proceed: subsequent flows use asm.TokenEndpoint /
+// JwksURI / etc. from the metadata, and token validation uses the JWT's own
+// iss claim — so the mismatch never affects what actually gets trusted.
+type issuerDiscoveryMismatch struct {
+	expected, got, discoveredURL string
+}
+
+func (e *issuerDiscoveryMismatch) Error() string {
+	return fmt.Sprintf("issuer mismatch: expected %q, got %q from %q", e.expected, e.got, e.discoveredURL)
+}
+
 func validateDiscoveredIssuer(expected, got, discoveredURL string) error {
 	if got == "" {
 		return fmt.Errorf("metadata from %s missing issuer", discoveredURL)
 	}
 	if got != expected {
-		return fmt.Errorf("issuer mismatch: expected %q, got %q from %q", expected, got, discoveredURL)
+		return &issuerDiscoveryMismatch{expected: expected, got: got, discoveredURL: discoveredURL}
 	}
 	return nil
 }
@@ -598,6 +619,19 @@ func discoverAuthServerMeta(ctx context.Context, issuer string, logger *slog.Log
 		}
 		if asm != nil {
 			if err := validateDiscoveredIssuer(issuer, asm.Issuer, dURL); err != nil {
+				var mismatch *issuerDiscoveryMismatch
+				if errors.As(err, &mismatch) {
+					// Vendor-fronted IdPs (Clerk/Auth0/Cognito behind a brand
+					// domain) routinely break exact-match; the rest of the
+					// flow uses the metadata's endpoints regardless. Log and
+					// proceed — matches Claude Code / Codex / Cursor behavior.
+					logger.Warn("auth server issuer differs from discovery URL — proceeding",
+						"discovery_url", dURL,
+						"expected", issuer,
+						"got", asm.Issuer,
+					)
+					return asm, dURL, nil
+				}
 				return nil, "", err
 			}
 			return asm, dURL, nil

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -30,7 +29,10 @@ func (s *sequenceTokenSource) Token() (*oauth2.Token, error) {
 	return token, nil
 }
 
-func TestDiscoverAuthServerMetaRequiresExactIssuer(t *testing.T) {
+func TestDiscoverAuthServerMetaAcceptsIssuerMismatchWithWarning(t *testing.T) {
+	// Vendor-fronted IdPs (Clerk/Auth0/Cognito behind a brand domain) return
+	// the vendor's issuer URL even when discovered at the brand domain. Other
+	// MCP clients tolerate this, so we do too — log and proceed.
 	var issuer string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -42,12 +44,15 @@ func TestDiscoverAuthServerMetaRequiresExactIssuer(t *testing.T) {
 	defer srv.Close()
 	issuer = srv.URL
 
-	_, _, err := discoverAuthServerMeta(context.Background(), issuer, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err == nil {
-		t.Fatal("expected issuer mismatch error")
+	asm, _, err := discoverAuthServerMeta(context.Background(), issuer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("expected mismatch to be accepted, got error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "issuer mismatch") {
-		t.Fatalf("expected issuer mismatch error, got %v", err)
+	if asm == nil {
+		t.Fatal("expected metadata")
+	}
+	if asm.Issuer != issuer+"/alias" {
+		t.Fatalf("issuer = %q, want %q (discovered value, not the request URL)", asm.Issuer, issuer+"/alias")
 	}
 }
 
