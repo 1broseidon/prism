@@ -234,6 +234,11 @@ export function ReimportDiffModal({
               setMode(next);
               setError(null);
             }}
+            allowedModes={
+              initialSourceURL
+                ? (["url"] as ReimportSourceMode[])
+                : (["file", "inline"] as ReimportSourceMode[])
+            }
             url={url}
             setUrl={(v) => {
               setUrl(v);
@@ -267,6 +272,7 @@ export function ReimportDiffModal({
 function SourceStage({
   mode,
   onModeChange,
+  allowedModes,
   url,
   setUrl,
   fileName,
@@ -280,6 +286,7 @@ function SourceStage({
 }: {
   mode: ReimportSourceMode;
   onModeChange: (next: ReimportSourceMode) => void;
+  allowedModes: ReimportSourceMode[];
   url: string;
   setUrl: (v: string) => void;
   fileName: string;
@@ -291,11 +298,14 @@ function SourceStage({
   onPreview: () => void;
   onCancel: () => void;
 }) {
-  const tabs: { id: ReimportSourceMode; label: string }[] = [
+  // URL-sourced backends only allow URL re-fetch; file/inline-sourced expose
+  // the file + inline tabs (no URL fetch) so the spec stays operator-owned.
+  const allTabs: { id: ReimportSourceMode; label: string }[] = [
     { id: "url", label: "url" },
     { id: "file", label: "file" },
     { id: "inline", label: "inline" },
   ];
+  const tabs = allTabs.filter((t) => allowedModes.includes(t.id));
   return (
     <div class="modal-body">
       <div class="modal-section">
