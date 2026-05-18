@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "recoil session-evidence hook --agent claude-code",
+            "marker": "recoil-hook",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "recoil hook remind --format=claude-code",
+            "marker": "recoil-hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; if [ -n \"$f\" ] && [[ \"$f\" == *.go ]] && [ -f \"$f\" ]; then gofmt -s -w \"$f\"; fi; }",
+            "marker": "gofmt-on-edit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; if [[ \"$f\" == *internal/admin/web/dist/* ]]; then echo 'BLOCKED: do not edit build artifacts under internal/admin/web/dist/. Edit src/ and run npm run build instead.' >&2; exit 2; fi; }",
+            "marker": "block-dist-edits",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

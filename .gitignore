@@ -3,3 +3,18 @@ mcpgate
 config.json
 .env
 bin/
+
+# Local instance configs (may contain real secrets)
+auth.json
+
+# Per-machine agent runtime dirs
+.codex/
+.opencode/
+.recoil/
+opencode.json
+
+# Local-only Claude Code permissions (settings.json is team-shared)
+.claude/settings.local.json
+
+# Scratch / leftover dev scripts
+test_tool.sh
