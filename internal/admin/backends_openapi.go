@@ -258,7 +258,10 @@ func parseOpenAPISpecFromSource(ctx context.Context, src openAPISpecSource, fetc
 	if err != nil {
 		return nil, "", nil, err
 	}
-	spec, err = openapi.NewParser().Parse(raw)
+	// ParseWithSource resolves relative servers[].url against the source URL
+	// per OpenAPI 3 §4.7.5. For file-uploaded specs sourceURL is "" and this
+	// behaves identically to plain Parse.
+	spec, err = openapi.NewParser().ParseWithSource(raw, sourceURL)
 	if err != nil {
 		return nil, "", nil, err
 	}

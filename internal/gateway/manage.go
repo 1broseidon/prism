@@ -736,7 +736,9 @@ func (g *Gateway) reconnectPersistedOpenAPIBackend(ctx context.Context, id strin
 		return fmt.Errorf("backend %q is not an openapi backend", id)
 	}
 	parser := openapi.NewParser()
-	spec, err := parser.Parse(pb.OpenAPISpecRaw)
+	// Resolve relative servers[].url against the original source URL so a
+	// petstore-style "/api/v3" base reloads correctly after a restart.
+	spec, err := parser.ParseWithSource(pb.OpenAPISpecRaw, pb.OpenAPISourceURL)
 	if err != nil {
 		g.logger.Warn("failed to re-parse openapi spec; backend left disconnected",
 			"id", id,
@@ -744,7 +746,13 @@ func (g *Gateway) reconnectPersistedOpenAPIBackend(ctx context.Context, id strin
 		)
 		return fmt.Errorf("re-parse openapi spec: %w", err)
 	}
-	return g.ConnectOpenAPIBackend(ctx, id, spec, pb.OpenAPIBaseURL, pb.OpenAPISecurityScheme)
+	// Pick the base URL: operator override wins; otherwise resolved spec base;
+	// otherwise the source origin (handled inside resolveAgainstSource).
+	effectiveBase := pb.OpenAPIBaseURL
+	if effectiveBase == "" {
+		effectiveBase = spec.BaseURL
+	}
+	return g.ConnectOpenAPIBackend(ctx, id, spec, effectiveBase, pb.OpenAPISecurityScheme)
 }
 
 // PersistOpenAPIBackend writes an OpenAPI backend's KV record. The raw bytes

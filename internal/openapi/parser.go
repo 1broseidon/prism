@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -136,6 +137,47 @@ type Parser struct{}
 
 // NewParser constructs a Parser.
 func NewParser() *Parser { return &Parser{} }
+
+// ParseWithSource is Parse with a hint about where the spec was fetched from.
+// Per OpenAPI 3 §4.7.5, servers[].url may be relative — petstore3's
+// "/api/v3" is the canonical example. When sourceURL is non-empty and the
+// spec's base URL is relative, we resolve against the source so callers get
+// an absolute URL without an operator override.
+//
+// When sourceURL is empty (file-uploaded specs) and the base URL is relative,
+// the spec keeps its raw value and the operator must supply base_url_override.
+func (p *Parser) ParseWithSource(data []byte, sourceURL string) (*Spec, error) {
+	spec, err := p.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if sourceURL != "" {
+		spec.BaseURL = resolveAgainstSource(spec.BaseURL, sourceURL)
+	}
+	return spec, nil
+}
+
+func resolveAgainstSource(base, source string) string {
+	if base == "" {
+		// No server entries; fall back to the source URL's origin so the
+		// dispatcher has *something* to talk to. Strips any path so we don't
+		// concat /openapi.json onto every request.
+		src, err := url.Parse(source)
+		if err != nil || src.Scheme == "" || src.Host == "" {
+			return base
+		}
+		return src.Scheme + "://" + src.Host
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.IsAbs() {
+		return base
+	}
+	src, err := url.Parse(source)
+	if err != nil {
+		return base
+	}
+	return src.ResolveReference(parsed).String()
+}
 
 // Parse turns raw spec bytes (JSON or YAML, content-sniffed by kin-openapi)
 // into a normalized Spec. Spec-level violations (size, version, external
