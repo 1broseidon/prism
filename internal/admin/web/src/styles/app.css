@@ -3451,48 +3451,46 @@ tr:hover .remove-btn {
   color: var(--fg-emphasis);
 }
 
-/* Source-mode tab strip for add-openapi / re-import flows. Compact pill tabs
- * matching the rest of the admin UI's flat aesthetic.
+/* Source-mode tab strip for add-openapi / re-import flows. Mirrors the
+ * settings tab pattern (underline, flat) rather than a pill container so it
+ * sits inside form cards without competing visually.
  */
 .openapi-source-tabs {
-  display: inline-flex;
+  display: flex;
   gap: 4px;
-  padding: 4px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  width: fit-content;
-  margin: 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
 }
 .openapi-source-tab {
   appearance: none;
   background: transparent;
   border: none;
-  color: var(--muted);
-  font-size: 12px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 10px 18px;
+  font-size: 13px;
   font-weight: 500;
-  padding: 4px 10px;
-  border-radius: 4px;
+  color: var(--muted);
   cursor: pointer;
   font-family: inherit;
+  transition: color 0.2s ease, border-color 0.2s ease;
 }
 .openapi-source-tab:hover {
-  color: var(--fg);
+  color: var(--fg-emphasis);
 }
 .openapi-source-tab-active {
-  background: var(--bg);
   color: var(--fg-emphasis);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  border-bottom-color: var(--accent);
 }
 
-/* Inline spec editor: a monospaced textarea + supporting affordances for the
- * curl-scaffold sub-flow. Min-height keeps it usable on first paste; the
- * operator can drag-resize for longer specs.
+/* Inline spec editor: a monospaced textarea that shares chrome with the
+ * regular config-input controls so it doesn't read as a foreign element.
+ * Operator can drag-resize for longer specs.
  */
 .openapi-inline-editor {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .openapi-inline-head {
   display: flex;
@@ -3505,9 +3503,9 @@ tr:hover .remove-btn {
   min-height: 240px;
   max-height: 60vh;
   padding: 10px 12px;
-  background: var(--bg-elev);
+  background: var(--bg-input, rgba(255, 255, 255, 0.02));
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -3517,19 +3515,27 @@ tr:hover .remove-btn {
   overflow: auto;
   tab-size: 2;
 }
-.openapi-inline-textarea:focus-visible {
-  border-color: var(--accent);
+.openapi-inline-textarea:focus {
   outline: none;
+  border-color: var(--accent);
+}
+.openapi-inline-textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
+/* Curl scaffold sub-panel. Visually nested inside the inline-editor flow
+ * (subtle elevated background) so the operator sees "tool that fills the
+ * editor above" rather than a separate form.
+ */
 .openapi-curl-panel {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 12px;
   background: var(--bg-elev);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
 }
 .openapi-curl-head {
   display: flex;
@@ -3542,7 +3548,7 @@ tr:hover .remove-btn {
   min-height: 120px;
   max-height: 320px;
   padding: 8px 10px;
-  background: var(--bg);
+  background: var(--bg-input, rgba(255, 255, 255, 0.02));
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--fg);
@@ -3552,6 +3558,14 @@ tr:hover .remove-btn {
   resize: vertical;
   white-space: pre;
   overflow: auto;
+}
+.openapi-curl-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.openapi-curl-textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .openapi-curl-textarea:focus-visible {
   border-color: var(--accent);
