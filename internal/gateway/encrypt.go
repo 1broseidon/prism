@@ -22,7 +22,7 @@ const kvEncKeyFile = "kv-encryption.key"
 //
 // If no usable key path can be determined (no home dir AND no override),
 // the function returns an error rather than falling back to a deterministic
-// host-derived key — that previous behaviour generated a key any attacker
+// host-derived key — that previous behavior generated a key any attacker
 // with the binary could reproduce offline, breaking encryption-at-rest for
 // OAuth refresh tokens.
 //
@@ -35,7 +35,7 @@ func kvEncryptionKey() ([]byte, error) {
 	}
 
 	// Try to read existing key.
-	if data, readErr := os.ReadFile(keyPath); readErr == nil && len(data) == 64 {
+	if data, readErr := os.ReadFile(keyPath); readErr == nil && len(data) == 64 { //nolint:gosec // G304: path is operator config, not user input
 		key, decErr := hex.DecodeString(string(data))
 		if decErr == nil && len(key) == 32 {
 			return key, nil
@@ -57,7 +57,7 @@ func kvEncryptionKey() ([]byte, error) {
 	return key, nil
 }
 
-// keyFilePath resolves the encryption-key file location. Honours an explicit
+// keyFilePath resolves the encryption-key file location. Honors an explicit
 // PRISM_KV_KEY_FILE override (useful for containers that mount a secret
 // volume); otherwise uses ~/.prism/kv-encryption.key. Returns an error when
 // neither is available — refusing to start beats silently using a derivable

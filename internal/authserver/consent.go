@@ -45,7 +45,7 @@ func (s *Server) renderConsent(w http.ResponseWriter, data *consentData) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure intentionally omitted for http://*.localhost dev; SameSite=Strict is the loopback safeguard, Caddy adds Secure in production
 		Name:     consentCSRFCookie,
 		Value:    token,
 		Path:     "/authorize",

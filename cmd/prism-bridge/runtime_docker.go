@@ -1169,16 +1169,15 @@ func (d *DockerRuntime) newProxyHandler(endpoint string) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse endpoint: %w", err)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(target) //nolint:gosec // target is bridge-managed container address
-	originalDirector := proxy.Director
+	proxy := &httputil.ReverseProxy{} //nolint:gosec // target is bridge-managed container address
 	basePath := target.Path
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = joinURLPath(basePath, req.URL.Path)
-		if target.RawQuery == "" || req.URL.RawQuery == "" {
-			req.URL.RawQuery = strings.Trim(strings.TrimSpace(target.RawQuery)+"&"+strings.TrimSpace(req.URL.RawQuery), "&")
+	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+		pr.SetURL(target)
+		pr.Out.URL.Path = joinURLPath(basePath, pr.In.URL.Path)
+		if target.RawQuery == "" || pr.In.URL.RawQuery == "" {
+			pr.Out.URL.RawQuery = strings.Trim(strings.TrimSpace(target.RawQuery)+"&"+strings.TrimSpace(pr.In.URL.RawQuery), "&")
 		} else {
-			req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
+			pr.Out.URL.RawQuery = target.RawQuery + "&" + pr.In.URL.RawQuery
 		}
 	}
 	return proxy, nil

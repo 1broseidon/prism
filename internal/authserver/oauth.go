@@ -309,7 +309,7 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, p *author
 	}
 	redirectURL.RawQuery = rq.Encode()
 
-	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
+	http.Redirect(w, r, redirectURL.String(), http.StatusFound) //nolint:gosec // G710: redirect_uri is validated against the client's registered RedirectURIs (exact match) in validateAuthorizeParams per OAuth 2.1 §4.1.3
 }
 
 // handleAuthorize handles GET /authorize.

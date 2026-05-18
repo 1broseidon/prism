@@ -271,7 +271,7 @@ func isSafeReturn(target string) bool {
 }
 
 func (s *Service) setSessionCookie(w http.ResponseWriter, sess *Session) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is operator-controlled via CookieSecure config — dev runs against http://localhost where Secure=true would break login
 		Name:     sessionCookieName,
 		Value:    sess.ID,
 		Path:     "/",
@@ -285,7 +285,7 @@ func (s *Service) setSessionCookie(w http.ResponseWriter, sess *Session) {
 }
 
 func (s *Service) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: see setSessionCookie — Secure is operator-controlled
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",

@@ -83,8 +83,8 @@ func (a *API) handleBinaryUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "binary store not configured"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, binaryUploadLimit+1024) // small slack for multipart framing
-	if err := r.ParseMultipartForm(binaryUploadLimit + 1024); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, binaryUploadLimit+1024)        // small slack for multipart framing
+	if err := r.ParseMultipartForm(binaryUploadLimit + 1024); err != nil { //nolint:gosec // G120: body is already capped above via MaxBytesReader; gosec's heuristic doesn't see the prior cap
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid multipart body: " + err.Error()})
 		return
 	}

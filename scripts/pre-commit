@@ -1,6 +1,11 @@
 #!/bin/sh
-# Prism pre-commit hook: format, vet, lint, test
+# Prism pre-commit hook: format, vet, lint, mod-tidy, race tests
 # Install: make hooks
+#
+# Vulnerability scanning is NOT in this hook because govulncheck has no
+# suppression mechanism and our docker SDK has 2 findings with no upstream
+# fix that don't apply to our usage. Run `make vuln` periodically or wire
+# it into CI with a curated allowlist.
 
 set -e
 
@@ -21,7 +26,22 @@ else
     echo "WARN: golangci-lint not installed, skipping"
 fi
 
-echo "pre-commit: running tests..."
-go test -count=1 -tags mcp_go_client_oauth ./...
+echo "pre-commit: checking go.mod is tidy..."
+cp go.mod go.mod.precommit-bak
+cp go.sum go.sum.precommit-bak
+trap 'rm -f go.mod.precommit-bak go.sum.precommit-bak' EXIT
+go mod tidy
+if ! diff -q go.mod go.mod.precommit-bak >/dev/null 2>&1 || ! diff -q go.sum go.sum.precommit-bak >/dev/null 2>&1; then
+    echo "ERROR: go.mod/go.sum is not tidy. Stage the changes from 'go mod tidy' before committing."
+    diff -u go.mod.precommit-bak go.mod || true
+    mv go.mod.precommit-bak go.mod
+    mv go.sum.precommit-bak go.sum
+    exit 1
+fi
+rm -f go.mod.precommit-bak go.sum.precommit-bak
+trap - EXIT
+
+echo "pre-commit: running tests (with -race)..."
+go test -race -count=1 -tags mcp_go_client_oauth ./...
 
 echo "pre-commit: all checks passed"

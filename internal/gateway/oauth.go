@@ -88,9 +88,6 @@ func codeChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
-// ProbeBackendAuth probes a URL and initiates an OAuth flow if 401 is returned.
-// Returns a PendingAuthFlow with the auth URL the operator should visit, or nil
-// if the backend does not require OAuth authentication.
 // ProbeAuthOptions carries per-request inputs to ProbeBackendAuth.
 type ProbeAuthOptions struct {
 	// CallbackOverride is the externally-reachable base URL the provider
@@ -103,20 +100,50 @@ type ProbeAuthOptions struct {
 	ManualClientSecret string
 }
 
-// ProbeBackendAuth detects whether backendURL requires OAuth and, if so,
-// kicks off DCR + auth flow. If DCR isn't supported by the auth server and
-// no manual credentials are provided, returns an admin.DCRUnsupportedError
-// so the UI can prompt the operator.
-func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL string, opts ProbeAuthOptions) (*PendingAuthFlow, error) {
-	afm := g.getAuthFlows()
-	if afm == nil {
-		return nil, fmt.Errorf("OAuth flow manager not initialized")
+// buildOAuthConfig constructs the oauth2.Config for a flow.
+// Gap 3 (MCP auth spec §170-175): challengedScopes take priority over prmScopes.
+// Confidential clients (non-empty secret) use AuthStyleAutoDetect; public
+// clients (PKCE-only) use AuthStyleInParams.
+func buildOAuthConfig(clientID, clientSecret, callbackURL string, asm *oauthex.AuthServerMeta, challengedScopes, prmScopes []string) *oauth2.Config {
+	scopes := challengedScopes
+	if len(scopes) == 0 {
+		scopes = prmScopes
 	}
+	authStyle := oauth2.AuthStyleInParams
+	if clientSecret != "" {
+		authStyle = oauth2.AuthStyleAutoDetect
+	}
+	return &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:   asm.AuthorizationEndpoint,
+			TokenURL:  asm.TokenEndpoint,
+			AuthStyle: authStyle,
+		},
+		RedirectURL: callbackURL,
+		Scopes:      scopes,
+	}
+}
 
-	// Probe the backend URL for 401.
-	// MCP Streamable HTTP servers respond to POST, not GET. Some return 405 on
-	// GET even if they require OAuth on POST. Send a minimal MCP initialize
-	// request so the server's auth behavior is accurately detected.
+// parseWWWAuthChallenges extracts the challenged scopes and resource_metadata
+// URL from a set of parsed WWW-Authenticate challenges.
+func parseWWWAuthChallenges(challenges []oauthex.Challenge) (scopes []string, metadataURL string) {
+	for _, c := range challenges {
+		if s := c.Params["scope"]; s != "" && len(scopes) == 0 {
+			scopes = strings.Fields(s)
+		}
+		if u := c.Params["resource_metadata"]; u != "" && metadataURL == "" {
+			metadataURL = u
+		}
+	}
+	return scopes, metadataURL
+}
+
+// probeFor401 sends an MCP initialize probe to backendURL and returns the
+// parsed WWW-Authenticate challenges when the server responds 401.
+// Returns nil challenges (no error) when the server does not require OAuth.
+func probeFor401(ctx context.Context, backendURL string) ([]oauthex.Challenge, error) {
 	probeBody := strings.NewReader(`{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"prism-probe","version":"0.1.0"}},"id":1}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, backendURL, probeBody)
 	if err != nil {
@@ -129,14 +156,12 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	if err != nil {
 		return nil, fmt.Errorf("probe %s: %w", backendURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusUnauthorized {
-		// Not an OAuth-protected resource. Return nil to indicate normal flow.
 		return nil, nil
 	}
 
-	// Parse WWW-Authenticate header for resource_metadata URL and scope.
 	wwwAuth := resp.Header[http.CanonicalHeaderKey("WWW-Authenticate")]
 	if len(wwwAuth) == 0 {
 		return nil, fmt.Errorf("401 from %s but no WWW-Authenticate header", backendURL)
@@ -146,25 +171,79 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	if err != nil {
 		return nil, fmt.Errorf("parse WWW-Authenticate: %w", err)
 	}
+	return challenges, nil
+}
 
-	// Gap 3 (MCP auth spec §170-175): Extract scope from WWW-Authenticate challenge.
-	// Prefer challenged scopes over scopes_supported from Protected Resource Metadata.
-	var challengedScopes []string
-	for _, c := range challenges {
-		if s := c.Params["scope"]; s != "" {
-			challengedScopes = strings.Fields(s)
-			break
+// resolveCallbackURL returns the OAuth redirect_uri to use for this flow.
+// Precedence (high → low): runtime admin_public_url, config admin_public_url,
+// operator-supplied CallbackOverride, error.
+func (g *Gateway) resolveCallbackURL(afm *authFlowManager, opts ProbeAuthOptions) (string, error) {
+	switch {
+	case g.network != nil && g.network.AdminCallbackURL() != "":
+		return g.network.AdminCallbackURL(), nil
+	case afm.callbackURL != "":
+		return afm.callbackURL, nil
+	case opts.CallbackOverride != "":
+		return strings.TrimRight(opts.CallbackOverride, "/") + "/oauth/callback", nil
+	default:
+		return "", fmt.Errorf("no callback URL available: set admin_public_url in the Settings page or config file")
+	}
+}
+
+// resolveClientCredentials returns (clientID, clientSecret) either from
+// operator-supplied manual credentials or via Dynamic Client Registration.
+// Returns an admin.DCRUnsupportedError when the auth server lacks a
+// registration endpoint and no manual credentials were given.
+func resolveClientCredentials(ctx context.Context, opts ProbeAuthOptions, asm *oauthex.AuthServerMeta, callbackURL, backendID, authServerIssuer string, logger *slog.Logger) (clientID, clientSecret string, err error) {
+	switch {
+	case opts.ManualClientID != "":
+		logger.Info("using operator-supplied OAuth client credentials",
+			"backend", backendID, "auth_server", authServerIssuer)
+		return opts.ManualClientID, opts.ManualClientSecret, nil
+	case asm.RegistrationEndpoint == "":
+		return "", "", &admin.DCRUnsupportedError{
+			AuthServer:  authServerIssuer,
+			CallbackURL: callbackURL,
 		}
+	default:
+		regResp, err := oauthex.RegisterClient(ctx, asm.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
+			ClientName:              "Prism Gateway",
+			RedirectURIs:            []string{callbackURL},
+			GrantTypes:              []string{"authorization_code"},
+			ResponseTypes:           []string{"code"},
+			TokenEndpointAuthMethod: "none",
+		}, nil)
+		if err != nil {
+			return "", "", fmt.Errorf("dynamic client registration: %w", err)
+		}
+		return regResp.ClientID, regResp.ClientSecret, nil
+	}
+}
+
+// ProbeBackendAuth detects whether backendURL requires OAuth and, if so,
+// kicks off DCR + auth flow. If DCR isn't supported by the auth server and
+// no manual credentials are provided, returns an admin.DCRUnsupportedError
+// so the UI can prompt the operator.
+func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL string, opts ProbeAuthOptions) (*PendingAuthFlow, error) {
+	afm := g.getAuthFlows()
+	if afm == nil {
+		return nil, fmt.Errorf("OAuth flow manager not initialized")
 	}
 
-	// Find the resource_metadata URL from challenges.
-	var metadataURL string
-	for _, c := range challenges {
-		if u := c.Params["resource_metadata"]; u != "" {
-			metadataURL = u
-			break
-		}
+	// Probe the backend URL for 401. MCP Streamable HTTP servers respond to
+	// POST, not GET — send a minimal MCP initialize so auth behavior is
+	// accurately detected. Returns nil challenges when OAuth is not required.
+	challenges, err := probeFor401(ctx, backendURL)
+	if err != nil {
+		return nil, err
 	}
+	if challenges == nil {
+		return nil, nil
+	}
+
+	// Gap 3 (MCP auth spec §170-175): Extract scope and resource_metadata from
+	// WWW-Authenticate. Challenged scopes take priority over PRM scopes_supported.
+	challengedScopes, metadataURL := parseWWWAuthChallenges(challenges)
 	if metadataURL == "" {
 		return nil, fmt.Errorf("401 from %s: no resource_metadata in WWW-Authenticate", backendURL)
 	}
@@ -210,81 +289,18 @@ func (g *Gateway) ProbeBackendAuth(ctx context.Context, backendID, backendURL st
 	}
 
 	// Resolve the redirect URI for this flow.
-	// Precedence (high → low):
-	//   1. Operator-pinned admin_public_url from the Settings page (runtime KV).
-	//   2. Operator-pinned admin_public_url from the file config (static).
-	//   3. Request-derived host (covers ad-hoc access).
-	//   4. Fail — there's no sensible default once the operator runs prism
-	//      from a non-loopback address.
-	var callbackURL string
-	switch {
-	case g.network != nil && g.network.AdminCallbackURL() != "":
-		callbackURL = g.network.AdminCallbackURL()
-	case afm.callbackURL != "":
-		callbackURL = afm.callbackURL
-	case opts.CallbackOverride != "":
-		callbackURL = strings.TrimRight(opts.CallbackOverride, "/") + "/oauth/callback"
-	default:
-		return nil, fmt.Errorf("no callback URL available: set admin_public_url in the Settings page or config file")
+	callbackURL, err := g.resolveCallbackURL(afm, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	// Obtain client credentials: prefer manual when supplied, otherwise DCR.
-	var clientID, clientSecret string
-	switch {
-	case opts.ManualClientID != "":
-		clientID = opts.ManualClientID
-		clientSecret = opts.ManualClientSecret
-		g.logger.Info("using operator-supplied OAuth client credentials",
-			"backend", backendID, "auth_server", authServerIssuer)
-	case asm.RegistrationEndpoint == "":
-		// Provider doesn't support DCR and operator didn't supply manual creds.
-		// Surface a typed error so the admin handler can prompt for them.
-		return nil, &admin.DCRUnsupportedError{
-			AuthServer:  authServerIssuer,
-			CallbackURL: callbackURL,
-		}
-	default:
-		regResp, err := oauthex.RegisterClient(ctx, asm.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
-			ClientName:              "Prism Gateway",
-			RedirectURIs:            []string{callbackURL},
-			GrantTypes:              []string{"authorization_code"},
-			ResponseTypes:           []string{"code"},
-			TokenEndpointAuthMethod: "none",
-		}, nil)
-		if err != nil {
-			return nil, fmt.Errorf("dynamic client registration: %w", err)
-		}
-		clientID = regResp.ClientID
-		clientSecret = regResp.ClientSecret
+	clientID, clientSecret, err := resolveClientCredentials(ctx, opts, asm, callbackURL, backendID, authServerIssuer, g.logger)
+	if err != nil {
+		return nil, err
 	}
 
-	// Gap 3 (MCP auth spec §170-175): Scope priority —
-	// 1. scope from WWW-Authenticate challenge (parsed above)
-	// 2. scopes_supported from Protected Resource Metadata
-	scopes := challengedScopes
-	if len(scopes) == 0 {
-		scopes = prm.ScopesSupported
-	}
-
-	// Build the oauth2.Config.
-	authStyle := oauth2.AuthStyleInParams
-	if clientSecret != "" {
-		// Confidential clients (manual creds with a real secret) typically use
-		// HTTP Basic at the token endpoint. AuthStyleAutoDetect lets the lib
-		// fall back if the server rejects it.
-		authStyle = oauth2.AuthStyleAutoDetect
-	}
-	oauthCfg := &oauth2.Config{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:   asm.AuthorizationEndpoint,
-			TokenURL:  asm.TokenEndpoint,
-			AuthStyle: authStyle,
-		},
-		RedirectURL: callbackURL,
-		Scopes:      scopes,
-	}
+	oauthCfg := buildOAuthConfig(clientID, clientSecret, callbackURL, asm, challengedScopes, prm.ScopesSupported)
 
 	// Generate PKCE and state.
 	state, err := generateState()
@@ -458,8 +474,8 @@ func (g *Gateway) AuthFlowStatus(backendID string) string {
 // 401 with WWW-Authenticate + resource_metadata, initiates the OAuth flow and
 // returns the authorization URL and state. Returns ("", "", nil) if no OAuth needed.
 // Satisfies the admin.OAuthProber interface.
-func (g *Gateway) ProbeBackendOAuth(ctx context.Context, backendID, url string, opts admin.OAuthProberOptions) (authURL, state string, err error) {
-	flow, err := g.ProbeBackendAuth(ctx, backendID, url, ProbeAuthOptions{
+func (g *Gateway) ProbeBackendOAuth(ctx context.Context, backendID, backendURL string, opts admin.OAuthProberOptions) (authURL, state string, err error) {
+	flow, err := g.ProbeBackendAuth(ctx, backendID, backendURL, ProbeAuthOptions{
 		CallbackOverride:   opts.CallbackBase,
 		ManualClientID:     opts.ClientID,
 		ManualClientSecret: opts.ClientSecret,
@@ -592,22 +608,21 @@ func discoverAuthServerMeta(ctx context.Context, issuer string, logger *slog.Log
 	if issuerPath != "" && issuerPath != "/" {
 		// Issuer has a path component.
 		// 1. RFC 8414: /.well-known/oauth-authorization-server/<path>
-		discoveryURLs = append(discoveryURLs,
-			fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server%s", issuerURL.Scheme, issuerURL.Host, issuerPath))
 		// 2. OIDC Discovery: /.well-known/openid-configuration/<path>
-		discoveryURLs = append(discoveryURLs,
-			fmt.Sprintf("%s://%s/.well-known/openid-configuration%s", issuerURL.Scheme, issuerURL.Host, issuerPath))
 		// 3. OIDC Discovery (legacy): <path>/.well-known/openid-configuration
 		discoveryURLs = append(discoveryURLs,
-			fmt.Sprintf("%s://%s%s/.well-known/openid-configuration", issuerURL.Scheme, issuerURL.Host, issuerPath))
+			fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server%s", issuerURL.Scheme, issuerURL.Host, issuerPath),
+			fmt.Sprintf("%s://%s/.well-known/openid-configuration%s", issuerURL.Scheme, issuerURL.Host, issuerPath),
+			fmt.Sprintf("%s://%s%s/.well-known/openid-configuration", issuerURL.Scheme, issuerURL.Host, issuerPath),
+		)
 	} else {
 		// No path component.
 		// 1. RFC 8414: /.well-known/oauth-authorization-server
-		discoveryURLs = append(discoveryURLs,
-			fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server", issuerURL.Scheme, issuerURL.Host))
 		// 2. OIDC Discovery: /.well-known/openid-configuration
 		discoveryURLs = append(discoveryURLs,
-			fmt.Sprintf("%s://%s/.well-known/openid-configuration", issuerURL.Scheme, issuerURL.Host))
+			fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server", issuerURL.Scheme, issuerURL.Host),
+			fmt.Sprintf("%s://%s/.well-known/openid-configuration", issuerURL.Scheme, issuerURL.Host),
+		)
 	}
 
 	for _, dURL := range discoveryURLs {
@@ -648,7 +663,7 @@ func discoverAuthServerMeta(ctx context.Context, issuer string, logger *slog.Log
 // Issuer matching is enforced by discoverAuthServerMeta. Returns nil if the
 // server returns 4xx.
 func fetchAuthServerMeta(ctx context.Context, metadataURL string) (*oauthex.AuthServerMeta, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -658,7 +673,7 @@ func fetchAuthServerMeta(ctx context.Context, metadataURL string) (*oauthex.Auth
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", metadataURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		return nil, nil
@@ -679,9 +694,8 @@ func fetchAuthServerMeta(ctx context.Context, metadataURL string) (*oauthex.Auth
 	return &asm, nil
 }
 
-// adminPublicURL is the operator-configured admin public URL, or empty.
-// When non-empty it pins the OAuth redirect_uri for every flow; when empty,
-// each flow uses the inbound admin request's Host header instead.
+// InitAuthFlows initializes the OAuth flow manager with the operator-configured
+// admin public URL (empty means use request Host header for redirect URIs).
 func (g *Gateway) InitAuthFlows(adminPublicURL string) {
 	callbackURL := ""
 	if adminPublicURL != "" {
@@ -765,7 +779,7 @@ func (g *Gateway) OAuthCallbackHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<html><body style="font-family:system-ui;padding:24px;background:#050505;color:#ebebeb"><h3>Authenticated</h3><p>You can close this window.</p><script>window.close()</script></body></html>`)
+		_, _ = fmt.Fprint(w, `<html><body style="font-family:system-ui;padding:24px;background:#050505;color:#ebebeb"><h3>Authenticated</h3><p>You can close this window.</p><script>window.close()</script></body></html>`)
 	}
 }
 
@@ -792,7 +806,7 @@ func renderCallbackError(w http.ResponseWriter, code, desc, hint string) {
 	if hint != "" {
 		hintHTML = `<p style="background:#1a1a1a;border-left:3px solid #6366f1;padding:12px 14px;border-radius:4px;line-height:1.5">` + html.EscapeString(hint) + `</p>`
 	}
-	fmt.Fprintf(w, `<!doctype html><html><body style="font-family:system-ui;padding:24px;background:#050505;color:#ebebeb;max-width:640px;margin:32px auto">
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><body style="font-family:system-ui;padding:24px;background:#050505;color:#ebebeb;max-width:640px;margin:32px auto">
 <h3 style="margin:0 0 8px">Authentication failed</h3>
 <p style="font-family:monospace;font-size:11px;text-transform:uppercase;letter-spacing:0.15em;color:#888;margin:0 0 16px">%s</p>
 <p style="line-height:1.6;margin:0 0 16px">%s</p>
@@ -894,7 +908,7 @@ func (g *Gateway) persistOAuthTokens(backendID string, cfg *oauth2.Config, token
 		Scopes:       cfg.Scopes,
 	}
 
-	data, err := json.Marshal(pt)
+	data, err := json.Marshal(pt) //nolint:gosec // G117: RFC 6749 token response field name, not a leaked credential
 	if err != nil {
 		g.logger.Warn("failed to marshal OAuth tokens for persistence", "id", backendID, "error", err)
 		return
