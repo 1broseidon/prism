@@ -21,6 +21,10 @@ import { MethodPill } from "./OperationPicker";
 interface Props {
   backendId: string;
   initialSourceURL?: string;
+  // initialInlineSpec is the raw persisted spec bytes (UTF-8). When supplied
+  // the modal defaults to inline-edit mode, pre-filled with this text. The
+  // operator can switch to URL refetch via the source-mode tabs.
+  initialInlineSpec?: string;
   onClose: () => void;
   onApplied: () => void | Promise<void>;
 }
@@ -29,6 +33,8 @@ interface DiffState {
   source: OpenAPISpecSource;
   diff: OpenAPIDiffResponse;
 }
+
+type ReimportSourceMode = "url" | "file" | "inline";
 
 async function readFileAsBase64(file: File): Promise<string> {
   // FileReader is the most compatible base64 path; manually building the
@@ -53,12 +59,25 @@ async function readFileAsBase64(file: File): Promise<string> {
 export function ReimportDiffModal({
   backendId,
   initialSourceURL,
+  initialInlineSpec,
   onClose,
   onApplied,
 }: Props) {
+  // Default source mode: URL when the backend was URL-sourced, inline when
+  // we have a persisted spec we can pre-fill (file or inline-sourced). The
+  // operator can flip tabs to use any of the three.
+  const initialMode: ReimportSourceMode = initialSourceURL
+    ? "url"
+    : initialInlineSpec
+      ? "inline"
+      : "url";
+  const [mode, setMode] = useState<ReimportSourceMode>(initialMode);
   const [url, setUrl] = useState(initialSourceURL || "");
   const [fileBase64, setFileBase64] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>("");
+  const [inlineText, setInlineText] = useState<string>(
+    initialInlineSpec || "",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<"source" | "diff">("source");
@@ -102,10 +121,14 @@ export function ReimportDiffModal({
   };
 
   const buildSource = (): OpenAPISpecSource | null => {
-    const trimmed = url.trim();
-    if (trimmed) return { url: trimmed };
-    if (fileBase64) return { file: fileBase64 };
-    return null;
+    if (mode === "url") {
+      const trimmed = url.trim();
+      return trimmed ? { url: trimmed } : null;
+    }
+    if (mode === "file") {
+      return fileBase64 ? { file: fileBase64 } : null;
+    }
+    return inlineText ? { inline: inlineText } : null;
   };
 
   const previewDiff = async () => {
@@ -206,6 +229,11 @@ export function ReimportDiffModal({
 
         {stage === "source" ? (
           <SourceStage
+            mode={mode}
+            onModeChange={(next) => {
+              setMode(next);
+              setError(null);
+            }}
             url={url}
             setUrl={(v) => {
               setUrl(v);
@@ -213,6 +241,8 @@ export function ReimportDiffModal({
             }}
             fileName={fileName}
             onFileChange={onFileChange}
+            inlineText={inlineText}
+            setInlineText={setInlineText}
             busy={busy}
             error={error}
             onPreview={previewDiff}
@@ -235,51 +265,107 @@ export function ReimportDiffModal({
 }
 
 function SourceStage({
+  mode,
+  onModeChange,
   url,
   setUrl,
   fileName,
   onFileChange,
+  inlineText,
+  setInlineText,
   busy,
   error,
   onPreview,
   onCancel,
 }: {
+  mode: ReimportSourceMode;
+  onModeChange: (next: ReimportSourceMode) => void;
   url: string;
   setUrl: (v: string) => void;
   fileName: string;
   onFileChange: (e: Event) => void | Promise<void>;
+  inlineText: string;
+  setInlineText: (v: string) => void;
   busy: boolean;
   error: string | null;
   onPreview: () => void;
   onCancel: () => void;
 }) {
+  const tabs: { id: ReimportSourceMode; label: string }[] = [
+    { id: "url", label: "url" },
+    { id: "file", label: "file" },
+    { id: "inline", label: "inline" },
+  ];
   return (
     <div class="modal-body">
       <div class="modal-section">
-        <label class="config-label">spec url</label>
-        <input
-          type="text"
-          class="config-input"
-          value={url}
-          autoFocus
-          spellcheck={false}
-          placeholder="https://example.com/openapi.yaml"
-          onInput={(e) => setUrl((e.target as HTMLInputElement).value)}
-        />
-      </div>
-      <div class="modal-section">
-        <label class="config-label">or upload file</label>
-        <div class="inline-form">
-          <input
-            type="file"
-            accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml,text/x-yaml"
-            onChange={onFileChange}
-          />
-          {fileName && (
-            <span class="hint-text">selected: {fileName}</span>
-          )}
+        <div class="openapi-source-tabs" role="tablist">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={mode === t.id}
+              class={
+                mode === t.id
+                  ? "openapi-source-tab openapi-source-tab-active"
+                  : "openapi-source-tab"
+              }
+              onClick={() => onModeChange(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
       </div>
+      {mode === "url" && (
+        <div class="modal-section">
+          <label class="config-label">spec url</label>
+          <input
+            type="text"
+            class="config-input"
+            value={url}
+            autoFocus
+            spellcheck={false}
+            placeholder="https://example.com/openapi.yaml"
+            onInput={(e) => setUrl((e.target as HTMLInputElement).value)}
+          />
+        </div>
+      )}
+      {mode === "file" && (
+        <div class="modal-section">
+          <label class="config-label">upload file</label>
+          <div class="inline-form">
+            <input
+              type="file"
+              accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml,text/x-yaml"
+              onChange={onFileChange}
+            />
+            {fileName && (
+              <span class="hint-text">selected: {fileName}</span>
+            )}
+          </div>
+        </div>
+      )}
+      {mode === "inline" && (
+        <div class="modal-section openapi-inline-editor">
+          <label class="config-label">edit spec</label>
+          <textarea
+            class="openapi-inline-textarea"
+            value={inlineText}
+            spellcheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            placeholder={
+              "openapi: 3.1.0\ninfo:\n  title: My API\n  version: \"1.0\"\n…"
+            }
+            onInput={(e) =>
+              setInlineText((e.target as HTMLTextAreaElement).value)
+            }
+          />
+        </div>
+      )}
       <div class="modal-actions">
         <button
           type="button"

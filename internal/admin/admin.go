@@ -229,6 +229,10 @@ func (a *API) registerAPIRoutes(mux *http.ServeMux) {
 	// through handleBackendPost suffix dispatch since they share the
 	// /backends/{id}/ prefix with reconnect/workspace-changes.
 	mux.Handle("POST /backends/preview-openapi", a.admin(http.HandlerFunc(a.handlePreviewOpenAPI)))
+	// Curl scaffold: stateless helper that turns a curl command into a
+	// starter OpenAPI 3.1 YAML spec. Lives outside /backends/ because it
+	// doesn't bind to a particular backend id.
+	mux.Handle("POST /openapi/scaffold-from-curl", a.admin(http.HandlerFunc(a.handleOpenAPIScaffold)))
 	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
 	mux.Handle("PATCH /backends/", a.admin(http.HandlerFunc(a.handlePatchBackend)))
 	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
@@ -353,7 +357,8 @@ func (a *API) handleInfo(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// handleBackendSub dispatches GET /backends/{id}/auth-status.
+// handleBackendSub dispatches GET /backends/{id}/auth-status,
+// GET /backends/{id}/workspace-changes, GET /backends/{id}/openapi-source.
 func (a *API) handleBackendSub(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/auth-status") {
 		a.handleAuthStatus(w, r)
@@ -361,6 +366,10 @@ func (a *API) handleBackendSub(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(r.URL.Path, "/workspace-changes") {
 		a.handleBackendWorkspaceChanges(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/openapi-source") {
+		a.handleOpenAPISource(w, r)
 		return
 	}
 	http.NotFound(w, r)

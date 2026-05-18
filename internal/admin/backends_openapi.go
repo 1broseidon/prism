@@ -21,8 +21,8 @@ import (
 const openAPIRequestBodyLimit = 16 * 1024 * 1024
 
 // openAPISpecSource is the polymorphic input accepted on every OpenAPI admin
-// endpoint that needs to materialize a spec. Exactly one of File or URL must
-// be non-empty.
+// endpoint that needs to materialize a spec. Exactly one of File, URL, or
+// Inline must be non-empty.
 //
 // File is the base64-encoded raw spec bytes (JSON or YAML). The handler
 // decodes and feeds the raw bytes into the parser, so the parser's size cap
@@ -32,9 +32,17 @@ const openAPIRequestBodyLimit = 16 * 1024 * 1024
 // fetcher refuses loopback, link-local, RFC1918, and unspecified destinations
 // unless explicitly allow-listed (operators wire the allowlist at startup, not
 // per-request).
+//
+// Inline carries raw YAML/JSON spec text typed/pasted directly by the
+// operator. No SSRF guard, no base64 — the bytes are fed verbatim to the
+// parser (so the same 5MB cap applies via openapi.MaxSpecBytes). Sourcing
+// inline keeps sourceURL empty just like file uploads, so relative
+// servers[].url values stay as-is and the operator can supply
+// base_url_override if needed.
 type openAPISpecSource struct {
-	File string `json:"file,omitempty"`
-	URL  string `json:"url,omitempty"`
+	File   string `json:"file,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Inline string `json:"inline,omitempty"`
 }
 
 // openAPIPreviewRequest is the body for POST /backends/preview-openapi.
@@ -220,33 +228,52 @@ func defaultFetcherFactory() *openapi.Fetcher {
 }
 
 // resolveOpenAPISource turns the polymorphic source into raw spec bytes plus
-// the source URL (empty when File was supplied). Exactly one of File or URL
-// must be provided.
+// the source URL (empty when File or Inline was supplied). Exactly one of
+// File, URL, or Inline must be provided.
 func resolveOpenAPISource(ctx context.Context, src openAPISpecSource, fetch fetcherFactory) (raw []byte, sourceURL string, err error) {
 	hasFile := strings.TrimSpace(src.File) != ""
 	hasURL := strings.TrimSpace(src.URL) != ""
-	if hasFile == hasURL {
-		if hasFile {
-			return nil, "", errors.New("source must specify exactly one of file or url")
-		}
-		return nil, "", errors.New("source.file or source.url is required")
-	}
+	hasInline := src.Inline != "" // do not trim — leading/trailing whitespace is part of the verbatim spec
+	count := 0
 	if hasFile {
+		count++
+	}
+	if hasURL {
+		count++
+	}
+	if hasInline {
+		count++
+	}
+	if count == 0 {
+		return nil, "", errors.New("source.file, source.url, or source.inline is required")
+	}
+	if count > 1 {
+		return nil, "", errors.New("source must specify exactly one of file, url, or inline")
+	}
+	switch {
+	case hasFile:
 		raw, err = base64.StdEncoding.DecodeString(src.File)
 		if err != nil {
 			return nil, "", fmt.Errorf("decode base64 file: %w", err)
 		}
 		return raw, "", nil
+	case hasInline:
+		// Inline bytes go through the parser's size cap (openapi.MaxSpecBytes)
+		// — no separate length check here keeps the cap definition in one
+		// place. SourceURL stays empty so relative servers[].url values are
+		// preserved verbatim (operator can supply base_url_override).
+		return []byte(src.Inline), "", nil
+	default:
+		if fetch == nil {
+			fetch = defaultFetcherFactory
+		}
+		f := fetch()
+		raw, err = f.Fetch(ctx, src.URL)
+		if err != nil {
+			return nil, "", err
+		}
+		return raw, src.URL, nil
 	}
-	if fetch == nil {
-		fetch = defaultFetcherFactory
-	}
-	f := fetch()
-	raw, err = f.Fetch(ctx, src.URL)
-	if err != nil {
-		return nil, "", err
-	}
-	return raw, src.URL, nil
 }
 
 // parseOpenAPISpecFromSource handles both fetch and parse with consistent
@@ -413,6 +440,44 @@ func (a *API) handleSaveOpenAPIBackend(w http.ResponseWriter, r *http.Request, i
 		"id":         id,
 		"operations": len(spec.Operations),
 		"skipped":    len(spec.Skipped),
+	})
+}
+
+// openAPISourceResponse is the shape returned by GET
+// /backends/{id}/openapi-source. The frontend uses it to pre-fill the inline
+// editor on re-import when the original source was file or inline-typed; for
+// URL-sourced backends the URL alone is enough to refetch.
+type openAPISourceResponse struct {
+	SourceURL string `json:"source_url"`
+	// Spec is the raw persisted spec bytes as UTF-8. Returned for every
+	// backend (URL-sourced too) so the operator can switch to inline-edit
+	// even when the original source was a URL.
+	Spec string `json:"spec"`
+}
+
+// handleOpenAPISource implements GET /backends/{id}/openapi-source. Returns
+// the persisted spec bytes and source URL. Admin-gated like all the other
+// /backends mutation routes — the persisted spec may contain operator-
+// authored notes that aren't safe to expose to viewer sessions.
+func (a *API) handleOpenAPISource(w http.ResponseWriter, r *http.Request) {
+	mgr, ok := a.backendMgr.(OpenAPIBackendManager)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "openapi backends not available"})
+		return
+	}
+	id, ok := extractBackendIDFromSuffix(r.URL.Path, "/openapi-source")
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid backend id"})
+		return
+	}
+	current, err := mgr.LoadOpenAPIBackend(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, openAPISourceResponse{
+		SourceURL: current.SourceURL,
+		Spec:      string(current.SpecRaw),
 	})
 }
 

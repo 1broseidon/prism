@@ -12,6 +12,7 @@ import type {
   BackendUpdateBody,
   BackendTool,
   CredentialInput,
+  OpenAPISourceResponse,
   SandboxConfig,
   SandboxMount,
   Workspace,
@@ -248,6 +249,28 @@ function MetaRow({ backend }: { backend: Backend }) {
 
 function ReimportSection({ backend }: { backend: Backend }) {
   const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [source, setSource] = useState<OpenAPISourceResponse | null>(null);
+
+  const openModal = async () => {
+    setLoading(true);
+    try {
+      // Fetch the persisted spec so the modal can pre-fill the inline editor
+      // for file/inline-sourced backends. URL-sourced specs also benefit:
+      // the operator can switch to inline-edit instead of refetching.
+      const resp = await getJSON<OpenAPISourceResponse>(
+        `/backends/${encodeURIComponent(backend.id)}/openapi-source`,
+      );
+      setSource(resp);
+    } catch {
+      // Pre-fill is best-effort — the modal still works without it.
+      setSource({ source_url: "", spec: "" });
+    } finally {
+      setLoading(false);
+      setOpen(true);
+    }
+  };
+
   return (
     <div class="section">
       <div class="section-header">
@@ -258,14 +281,17 @@ function ReimportSection({ backend }: { backend: Backend }) {
         </span>
         <button
           class="section-btn section-btn-primary"
-          onClick={() => setOpen(true)}
+          onClick={openModal}
+          disabled={loading}
         >
-          re-import spec
+          {loading ? "loading…" : "re-import spec"}
         </button>
       </div>
       {open && (
         <ReimportDiffModal
           backendId={backend.id}
+          initialSourceURL={source?.source_url || undefined}
+          initialInlineSpec={source?.spec || undefined}
           onClose={() => setOpen(false)}
           onApplied={async () => {
             setOpen(false);

@@ -13,7 +13,10 @@ export function Overview() {
   const be = backends.data.value || [];
   const ev = events.data.value || [];
 
-  const totalTools = be.reduce((acc, b) => acc + (b.tools?.length ?? 0), 0);
+  const totalTools = be.reduce(
+    (acc, b) => acc + (b.tools?.filter((t) => !t.disabled).length ?? 0),
+    0,
+  );
   const connectedBackends = be.filter((b) => (b.tools?.length ?? 0) > 0).length;
   const errorBackends = be.filter(
     (b) => b.circuit_breaker === "open",

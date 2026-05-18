@@ -13,6 +13,8 @@ import type {
   OpenAPIPreviewResponse,
   OpenAPISaveBody,
   OpenAPISaveResponse,
+  OpenAPIScaffoldRequest,
+  OpenAPIScaffoldResponse,
   OpenAPISecurityScheme,
   OpenAPISpecSource,
   Workspace,
@@ -77,7 +79,7 @@ export function Servers() {
   }, [ev]);
 
   const totalTools = list.reduce(
-    (acc, b) => acc + (b.tools?.length ?? 0),
+    (acc, b) => acc + (b.tools?.filter((t) => !t.disabled).length ?? 0),
     0,
   );
 
@@ -270,7 +272,7 @@ function ServerRow({
   // talks to them over HTTP internally — the user sees a command, not a URL.
   const transport =
     backend.bridge_managed || !backend.url ? "stdio" : "http";
-  const toolCount = backend.tools?.length ?? 0;
+  const toolCount = backend.tools?.filter((t) => !t.disabled).length ?? 0;
   const statusKind: "ok" | "warn" | "error" | "neutral" = (() => {
     const cb = backend.circuit_breaker;
     if (backend.enabled === false) return "neutral";
@@ -1004,6 +1006,8 @@ async function readFileAsBase64(file: File): Promise<string> {
   });
 }
 
+type OpenAPISourceMode = "url" | "file" | "inline";
+
 function AddOpenAPI({
   onConnecting,
   onDone,
@@ -1016,9 +1020,11 @@ function AddOpenAPI({
   onBack: () => void;
 }) {
   const [id, setId] = useState("");
+  const [sourceMode, setSourceMode] = useState<OpenAPISourceMode>("url");
   const [url, setUrl] = useState("");
   const [fileBase64, setFileBase64] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
+  const [inlineText, setInlineText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<OpenAPIPreviewResponse | null>(
@@ -1034,6 +1040,11 @@ function AddOpenAPI({
     header: "Authorization",
     value: "",
   });
+  // Curl scaffold sub-flow state — only visible when sourceMode === "inline".
+  const [showCurlScaffold, setShowCurlScaffold] = useState(false);
+  const [curlInput, setCurlInput] = useState("");
+  const [scaffoldBusy, setScaffoldBusy] = useState(false);
+  const [scaffoldWarnings, setScaffoldWarnings] = useState<string[]>([]);
   // enabled is the curated set of operation names. Defaults to "all enabled"
   // every time a fresh preview lands — the operator opts OUT of operations
   // they don't want.
@@ -1049,16 +1060,50 @@ function AddOpenAPI({
       setFileBase64(data);
       setFileName(f.name);
       setUrl("");
+      setInlineText("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
 
   const buildSource = (): OpenAPISpecSource | null => {
-    const trimmed = url.trim();
-    if (trimmed) return { url: trimmed };
-    if (fileBase64) return { file: fileBase64 };
-    return null;
+    if (sourceMode === "url") {
+      const trimmed = url.trim();
+      return trimmed ? { url: trimmed } : null;
+    }
+    if (sourceMode === "file") {
+      return fileBase64 ? { file: fileBase64 } : null;
+    }
+    // inline mode — accept the spec as-is (no trimming so leading/trailing
+    // bytes are preserved verbatim).
+    return inlineText ? { inline: inlineText } : null;
+  };
+
+  const generateFromCurl = async () => {
+    if (!curlInput.trim()) {
+      setError("paste a curl command first");
+      return;
+    }
+    setError(null);
+    setScaffoldBusy(true);
+    setScaffoldWarnings([]);
+    try {
+      const req: OpenAPIScaffoldRequest = { curl: curlInput };
+      const resp = await postJSON<OpenAPIScaffoldResponse>(
+        "/openapi/scaffold-from-curl",
+        req,
+      );
+      setInlineText(resp.spec);
+      setScaffoldWarnings(resp.warnings || []);
+      // Collapse the curl panel once the spec lands; warnings stay visible
+      // alongside the inline editor so the operator can review and edit.
+      setShowCurlScaffold(false);
+      setCurlInput("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setScaffoldBusy(false);
+    }
   };
 
   const runPreview = async () => {
@@ -1130,7 +1175,13 @@ function AddOpenAPI({
         `/backends/${encodeURIComponent(trimmedID)}`,
         body,
       );
-      onConnecting(res.id, url.trim() || `openapi: ${fileName}`);
+      const sourceLabel =
+        sourceMode === "url"
+          ? url.trim()
+          : sourceMode === "file"
+            ? `openapi: ${fileName}`
+            : `openapi: inline spec`;
+      onConnecting(res.id, sourceLabel);
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1153,36 +1204,100 @@ function AddOpenAPI({
             ← back
           </button>
         </div>
-        <div class="modal-section">
-          <label class="config-label">spec url</label>
-          <input
-            type="text"
-            class="config-input"
-            value={url}
-            spellcheck={false}
-            placeholder="https://petstore3.swagger.io/api/v3/openapi.json"
-            onInput={(e) => {
-              setUrl((e.target as HTMLInputElement).value);
-              if ((e.target as HTMLInputElement).value) {
-                setFileBase64(null);
-                setFileName("");
-              }
-            }}
-          />
-        </div>
-        <div class="modal-section">
-          <label class="config-label">or upload file</label>
-          <div class="inline-form">
+        <SourceModeTabs
+          mode={sourceMode}
+          onChange={(next) => {
+            setSourceMode(next);
+            setError(null);
+          }}
+        />
+        {sourceMode === "url" && (
+          <div class="modal-section">
+            <label class="config-label">spec url</label>
             <input
-              type="file"
-              accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml,text/x-yaml"
-              onChange={onFile}
+              type="text"
+              class="config-input"
+              value={url}
+              spellcheck={false}
+              placeholder="https://petstore3.swagger.io/api/v3/openapi.json"
+              onInput={(e) =>
+                setUrl((e.target as HTMLInputElement).value)
+              }
             />
-            {fileName && (
-              <span class="hint-text">selected: {fileName}</span>
-            )}
           </div>
-        </div>
+        )}
+        {sourceMode === "file" && (
+          <div class="modal-section">
+            <label class="config-label">upload file</label>
+            <div class="inline-form">
+              <input
+                type="file"
+                accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml,text/x-yaml"
+                onChange={onFile}
+              />
+              {fileName && (
+                <span class="hint-text">selected: {fileName}</span>
+              )}
+            </div>
+          </div>
+        )}
+        {sourceMode === "inline" && (
+          <div class="modal-section openapi-inline-editor">
+            <div class="openapi-inline-head">
+              <label class="config-label">paste yaml or json spec</label>
+              {!showCurlScaffold && (
+                <button
+                  type="button"
+                  class="section-btn"
+                  onClick={() => {
+                    setShowCurlScaffold(true);
+                    setError(null);
+                  }}
+                >
+                  generate from curl
+                </button>
+              )}
+            </div>
+            {showCurlScaffold && (
+              <CurlScaffoldPanel
+                value={curlInput}
+                onChange={setCurlInput}
+                busy={scaffoldBusy}
+                onGenerate={generateFromCurl}
+                onCancel={() => {
+                  setShowCurlScaffold(false);
+                  setCurlInput("");
+                }}
+              />
+            )}
+            {scaffoldWarnings.length > 0 && (
+              <div class="openapi-scaffold-warnings">
+                <div class="openapi-scaffold-warnings-title">
+                  scaffold warnings
+                </div>
+                <ul>
+                  {scaffoldWarnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <textarea
+              class="openapi-inline-textarea"
+              value={inlineText}
+              spellcheck={false}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              placeholder={
+                "openapi: 3.1.0\ninfo:\n  title: My API\n  version: \"1.0\"\n…"
+              }
+              onInput={(e) =>
+                setInlineText((e.target as HTMLTextAreaElement).value)
+              }
+            />
+          </div>
+        )}
         <div class="form-actions">
           <button class="save-btn" onClick={runPreview} disabled={busy}>
             {busy ? "fetching…" : "preview"}
@@ -1410,6 +1525,94 @@ function OpenAPICredFields({
             scheme <code>{scheme.type}</code> is not credential-eligible.
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+function SourceModeTabs({
+  mode,
+  onChange,
+}: {
+  mode: OpenAPISourceMode;
+  onChange: (next: OpenAPISourceMode) => void;
+}) {
+  const tabs: { id: OpenAPISourceMode; label: string }[] = [
+    { id: "url", label: "url" },
+    { id: "file", label: "file" },
+    { id: "inline", label: "inline" },
+  ];
+  return (
+    <div class="openapi-source-tabs" role="tablist">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          role="tab"
+          aria-selected={mode === t.id}
+          class={
+            mode === t.id
+              ? "openapi-source-tab openapi-source-tab-active"
+              : "openapi-source-tab"
+          }
+          onClick={() => onChange(t.id)}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CurlScaffoldPanel({
+  value,
+  onChange,
+  busy,
+  onGenerate,
+  onCancel,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  busy: boolean;
+  onGenerate: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div class="openapi-curl-panel">
+      <div class="openapi-curl-head">
+        <span class="hint-text">
+          paste a curl command — we'll convert it to a starter spec.
+        </span>
+        <button
+          type="button"
+          class="section-btn"
+          onClick={onCancel}
+          disabled={busy}
+        >
+          dismiss
+        </button>
+      </div>
+      <textarea
+        class="openapi-curl-textarea"
+        value={value}
+        spellcheck={false}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        placeholder={
+          "curl -X POST \\\n  -H 'Authorization: Bearer xyz' \\\n  -d '{\"name\":\"alice\"}' \\\n  https://api.example.com/v1/users"
+        }
+        onInput={(e) => onChange((e.target as HTMLTextAreaElement).value)}
+      />
+      <div class="inline-form">
+        <button
+          type="button"
+          class="save-btn"
+          onClick={onGenerate}
+          disabled={busy || !value.trim()}
+        >
+          {busy ? "generating…" : "generate"}
+        </button>
       </div>
     </div>
   );

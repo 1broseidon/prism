@@ -348,11 +348,24 @@ export interface Workspace {
 // ---------------------------------------------------------------------------
 
 // Polymorphic input accepted on every OpenAPI endpoint that needs to
-// materialize a spec. Exactly one of file or url must be supplied; file is
-// base64-encoded raw spec bytes.
+// materialize a spec. Exactly one of file, url, or inline must be supplied;
+// file is base64-encoded raw spec bytes, inline is the raw YAML/JSON text.
 export type OpenAPISpecSource =
-  | { file: string; url?: undefined }
-  | { url: string; file?: undefined };
+  | { file: string; url?: undefined; inline?: undefined }
+  | { url: string; file?: undefined; inline?: undefined }
+  | { inline: string; file?: undefined; url?: undefined };
+
+// Request/response for POST /openapi/scaffold-from-curl. The server parses
+// the curl command and returns an OpenAPI 3.1 YAML stub that the operator
+// reviews/edits in the inline editor before saving.
+export interface OpenAPIScaffoldRequest {
+  curl: string;
+}
+
+export interface OpenAPIScaffoldResponse {
+  spec: string;
+  warnings?: string[];
+}
 
 // Bearer schemes surface as type:"bearer" so the UI can pick the right
 // credential form without parsing scheme + type both; named header schemes
@@ -439,4 +452,12 @@ export interface OpenAPISaveResponse {
   id: string;
   operations: number;
   skipped: number;
+}
+
+// Persisted spec source for an existing OpenAPI backend. Returned by
+// GET /backends/{id}/openapi-source. Spec is the raw YAML/JSON the operator
+// imported (UTF-8); source_url is empty for file- and inline-sourced specs.
+export interface OpenAPISourceResponse {
+  source_url: string;
+  spec: string;
 }

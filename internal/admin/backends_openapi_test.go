@@ -422,3 +422,167 @@ func mustEncodeBody(t *testing.T, v any) []byte {
 	}
 	return out
 }
+
+// inlineSource is a convenience for tests that need to construct the new
+// {inline: ...} source variant directly.
+func inlineSource(s string) openAPISpecSource {
+	return openAPISpecSource{Inline: s}
+}
+
+// TestHandlePreviewOpenAPIAcceptsInlineSource verifies the preview endpoint
+// accepts a raw YAML/JSON string under source.inline and returns the same
+// projection it would for a file/URL source.
+func TestHandlePreviewOpenAPIAcceptsInlineSource(t *testing.T) {
+	api := &API{backendMgr: &fakeOpenAPIBackendManager{}}
+	body := mustEncodeBody(t, openAPIPreviewRequest{Source: inlineSource(inlineOpenAPISpec(t))})
+	req := httptest.NewRequest(http.MethodPost, "/backends/preview-openapi", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handlePreviewOpenAPI(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var resp openAPIPreviewResponse
+	decodeJSON(t, rec.Body.Bytes(), &resp)
+	if resp.Title != "Things" || len(resp.Operations) != 2 {
+		t.Fatalf("unexpected preview response: %+v", resp)
+	}
+}
+
+// TestHandleSaveOpenAPIBackendInlineSourcePersistsVerbatim asserts inline
+// source bytes reach the gateway without any normalization round-trip — the
+// same constraint file-uploaded specs already obey.
+func TestHandleSaveOpenAPIBackendInlineSourcePersistsVerbatim(t *testing.T) {
+	mgr := &fakeOpenAPIBackendManager{}
+	api := &API{backendMgr: mgr}
+	raw := inlineOpenAPISpec(t)
+	save := openAPISaveRequest{
+		Type:           "openapi",
+		Source:         inlineSource(raw),
+		SecurityScheme: "bearerAuth",
+		Credential:     &CredentialConfig{Type: "static", Header: "Authorization", Value: "Bearer x"},
+	}
+	body := mustEncodeBody(t, save)
+	req := httptest.NewRequest(http.MethodPost, "/backends/things", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleAddBackend(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if string(mgr.saveParams.SpecRaw) != raw {
+		t.Fatalf("inline raw bytes mismatch:\nwant: %s\n got: %s", raw, mgr.saveParams.SpecRaw)
+	}
+	if mgr.saveParams.SourceURL != "" {
+		t.Fatalf("expected empty sourceURL for inline source, got %q", mgr.saveParams.SourceURL)
+	}
+}
+
+// TestHandleOpenAPIDiffAcceptsInlineSource asserts the diff endpoint accepts
+// inline source and diffs against the persisted spec.
+func TestHandleOpenAPIDiffAcceptsInlineSource(t *testing.T) {
+	mgr := &fakeOpenAPIBackendManager{
+		loadResult: &PersistedOpenAPIBackend{
+			SpecRaw: []byte(inlineOpenAPISpec(t)),
+		},
+	}
+	api := &API{backendMgr: mgr}
+	body := mustEncodeBody(t, openAPIDiffRequest{Source: inlineSource(inlineOpenAPISpecRenamed(t))})
+	req := httptest.NewRequest(http.MethodPost, "/backends/things/openapi-diff", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleOpenAPIDiff(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var resp openAPIDiffResponse
+	decodeJSON(t, rec.Body.Bytes(), &resp)
+	if len(resp.Renamed) != 1 {
+		t.Fatalf("expected one rename, got %+v", resp.Renamed)
+	}
+}
+
+// TestHandleOpenAPIReimportAcceptsInlineSource verifies reimport accepts
+// inline source and forwards the parsed spec to the manager.
+func TestHandleOpenAPIReimportAcceptsInlineSource(t *testing.T) {
+	mgr := &fakeOpenAPIBackendManager{}
+	api := &API{backendMgr: mgr}
+	rb := openAPIReimportRequest{
+		Source:                  inlineSource(inlineOpenAPISpecRenamed(t)),
+		DisabledToolsResolution: "preserve",
+	}
+	body := mustEncodeBody(t, rb)
+	req := httptest.NewRequest(http.MethodPost, "/backends/things/reimport", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleOpenAPIReimport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if mgr.reimportID != "things" {
+		t.Fatalf("reimport id = %q", mgr.reimportID)
+	}
+	if mgr.reimportParams.SourceURL != "" {
+		t.Fatalf("expected empty SourceURL for inline reimport, got %q", mgr.reimportParams.SourceURL)
+	}
+	if mgr.reimportParams.Spec == nil {
+		t.Fatal("expected parsed spec to be forwarded")
+	}
+}
+
+// TestResolveOpenAPISourceRejectsMultipleVariants verifies the polymorphic
+// guard refuses simultaneous variants instead of silently preferring one.
+func TestResolveOpenAPISourceRejectsMultipleVariants(t *testing.T) {
+	_, _, err := resolveOpenAPISource(t.Context(), openAPISpecSource{
+		Inline: "openapi: 3.0.0\n",
+		URL:    "https://example.com/spec.yaml",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error when both inline and url are set")
+	}
+	if !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("error = %q, want exclusivity message", err.Error())
+	}
+}
+
+// TestHandleOpenAPISourceReturnsPersistedSpec asserts the endpoint surfaces
+// the persisted spec bytes and source URL for an OpenAPI backend so the
+// reimport modal can pre-fill its inline editor.
+func TestHandleOpenAPISourceReturnsPersistedSpec(t *testing.T) {
+	raw := inlineOpenAPISpec(t)
+	mgr := &fakeOpenAPIBackendManager{
+		loadResult: &PersistedOpenAPIBackend{
+			SpecRaw:   []byte(raw),
+			SourceURL: "https://api.example.com/openapi.json",
+		},
+	}
+	api := &API{backendMgr: mgr}
+	req := httptest.NewRequest(http.MethodGet, "/backends/things/openapi-source", nil)
+	rec := httptest.NewRecorder()
+	api.handleOpenAPISource(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var resp openAPISourceResponse
+	decodeJSON(t, rec.Body.Bytes(), &resp)
+	if resp.Spec != raw {
+		t.Fatalf("spec mismatch:\nwant:%s\n got:%s", raw, resp.Spec)
+	}
+	if resp.SourceURL != "https://api.example.com/openapi.json" {
+		t.Fatalf("source url = %q", resp.SourceURL)
+	}
+}
+
+// TestHandlePreviewOpenAPIInlineRejectsOversize ensures the parser's size cap
+// applies to inline payloads.
+func TestHandlePreviewOpenAPIInlineRejectsOversize(t *testing.T) {
+	api := &API{backendMgr: &fakeOpenAPIBackendManager{}}
+	pad := strings.Repeat(" ", openapi.MaxSpecBytes+1024)
+	oversize := fmt.Sprintf(`{"openapi":"3.0.0","info":{"title":"x","version":"1","description":%q},"paths":{}}`, pad)
+	body := mustEncodeBody(t, openAPIPreviewRequest{Source: inlineSource(oversize)})
+	req := httptest.NewRequest(http.MethodPost, "/backends/preview-openapi", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handlePreviewOpenAPI(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "byte limit") {
+		t.Fatalf("expected size-limit error, got %s", rec.Body.String())
+	}
+}
