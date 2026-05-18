@@ -10,10 +10,16 @@ import type {
   AuthStatus,
   Backend,
   CredentialInput,
+  OpenAPIPreviewResponse,
+  OpenAPISaveBody,
+  OpenAPISaveResponse,
+  OpenAPISecurityScheme,
+  OpenAPISpecSource,
   Workspace,
   WorkspaceConfig,
 } from "../api/types";
 import { fmtAge } from "../util/time";
+import { OperationPicker } from "../components/OperationPicker";
 
 type CredType = "none" | "static" | "env" | "command";
 
@@ -322,6 +328,8 @@ function ServerRow({
   );
 }
 
+type AddMode = "choose" | "command" | "openapi";
+
 function AddBackend({
   onConnecting,
   onDone,
@@ -331,6 +339,12 @@ function AddBackend({
   onDone: () => void;
   onCancel: () => void;
 }) {
+  // The connect flow lets the operator pick between the existing
+  // command/URL path and the new OpenAPI-spec path. We default to the
+  // "choose" tile picker so neither path is privileged; the existing keyboard
+  // muscle memory still works because pressing Enter on the command field is
+  // unchanged once they pick "command".
+  const [mode, setMode] = useState<AddMode>("choose");
   const [name, setName] = useState("");
   const [cmd, setCmd] = useState("");
   const [cred, setCred] = useState<CredFormState>(emptyCred());
@@ -477,9 +491,39 @@ function AddBackend({
     );
   }
 
+  if (mode === "choose") {
+    return (
+      <AddBackendChooser
+        onPick={(next) => setMode(next)}
+        onCancel={onCancel}
+      />
+    );
+  }
+
+  if (mode === "openapi") {
+    return (
+      <AddOpenAPI
+        onConnecting={onConnecting}
+        onDone={onDone}
+        onCancel={onCancel}
+        onBack={() => setMode("choose")}
+      />
+    );
+  }
+
   return (
     <div class="card form-card">
-      <div class="form-card-title">connect a backend</div>
+      <div class="form-card-title">
+        <span>connect a backend</span>
+        <button
+          type="button"
+          class="section-btn"
+          style="margin-left:auto"
+          onClick={() => setMode("choose")}
+        >
+          ← back
+        </button>
+      </div>
       <div class="inline-form">
         <input
           type="text"
@@ -885,4 +929,510 @@ function ManualOAuthForm({
       </div>
     </div>
   );
+}
+
+function AddBackendChooser({
+  onPick,
+  onCancel,
+}: {
+  onPick: (mode: "command" | "openapi") => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div class="card form-card">
+      <div class="form-card-title">connect a backend</div>
+      <div class="connect-tiles">
+        <button
+          type="button"
+          class="connect-tile"
+          onClick={() => onPick("command")}
+        >
+          <div class="connect-tile-title">command or http url</div>
+          <div class="connect-tile-desc">
+            stdio process (e.g. <code>npx server-github</code>) or
+            an existing MCP-over-HTTP endpoint.
+          </div>
+        </button>
+        <button
+          type="button"
+          class="connect-tile"
+          onClick={() => onPick("openapi")}
+        >
+          <div class="connect-tile-title">openapi spec</div>
+          <div class="connect-tile-desc">
+            paste a spec URL or upload a file. prism imports operations
+            as MCP tools — pick which ones go live before saving.
+          </div>
+        </button>
+      </div>
+      <div class="form-actions">
+        <button class="cancel-btn" onClick={onCancel}>
+          cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OpenAPI add flow
+// ---------------------------------------------------------------------------
+
+type OpenAPICredType = "none" | "bearer" | "apiKey";
+
+interface OpenAPICredState {
+  type: OpenAPICredType;
+  header: string;
+  value: string;
+}
+
+async function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("file read failed"));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("unexpected file reader result"));
+        return;
+      }
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function AddOpenAPI({
+  onConnecting,
+  onDone,
+  onCancel,
+  onBack,
+}: {
+  onConnecting: (id: string, command: string) => void;
+  onDone: () => void;
+  onCancel: () => void;
+  onBack: () => void;
+}) {
+  const [id, setId] = useState("");
+  const [url, setUrl] = useState("");
+  const [fileBase64, setFileBase64] = useState<string | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<OpenAPIPreviewResponse | null>(
+    null,
+  );
+  const [previewSource, setPreviewSource] = useState<OpenAPISpecSource | null>(
+    null,
+  );
+  const [baseURLOverride, setBaseURLOverride] = useState("");
+  const [securityScheme, setSecurityScheme] = useState<string>("");
+  const [cred, setCred] = useState<OpenAPICredState>({
+    type: "none",
+    header: "Authorization",
+    value: "",
+  });
+  // enabled is the curated set of operation names. Defaults to "all enabled"
+  // every time a fresh preview lands — the operator opts OUT of operations
+  // they don't want.
+  const [enabled, setEnabled] = useState<Set<string>>(new Set());
+
+  const onFile = async (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    const f = input.files && input.files[0];
+    if (!f) return;
+    setError(null);
+    try {
+      const data = await readFileAsBase64(f);
+      setFileBase64(data);
+      setFileName(f.name);
+      setUrl("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const buildSource = (): OpenAPISpecSource | null => {
+    const trimmed = url.trim();
+    if (trimmed) return { url: trimmed };
+    if (fileBase64) return { file: fileBase64 };
+    return null;
+  };
+
+  const runPreview = async () => {
+    setError(null);
+    const source = buildSource();
+    if (!source) {
+      setError("provide a spec URL or upload a file");
+      return;
+    }
+    setBusy(true);
+    try {
+      const resp = await postJSON<OpenAPIPreviewResponse>(
+        "/backends/preview-openapi",
+        { source },
+      );
+      setPreview(resp);
+      setPreviewSource(source);
+      setBaseURLOverride("");
+      // Auto-select the only scheme if there's exactly one; otherwise force
+      // the operator to pick before save.
+      setSecurityScheme(
+        resp.security_schemes.length === 1
+          ? resp.security_schemes[0].name
+          : "",
+      );
+      setEnabled(new Set(resp.operations.map((op) => op.name)));
+      setCred({ type: "none", header: "Authorization", value: "" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async () => {
+    if (!preview || !previewSource) {
+      setError("run a preview first");
+      return;
+    }
+    const trimmedID = id.trim();
+    if (!trimmedID) {
+      setError("backend id is required");
+      return;
+    }
+    if (preview.security_schemes.length > 0 && !securityScheme) {
+      setError("pick a security scheme");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const disabled = preview.operations
+      .map((op) => op.name)
+      .filter((name) => !enabled.has(name));
+    const body: OpenAPISaveBody = {
+      type: "openapi",
+      source: previewSource,
+      // empty string for base_url_override matches "leave it alone"; the
+      // gateway only applies it when non-empty.
+      base_url_override: baseURLOverride.trim() || undefined,
+      security_scheme: securityScheme || undefined,
+      credential: buildOpenAPICredential(cred, preview, securityScheme),
+      // Always send disabled_tools explicitly. Empty array means "enable
+      // every operation" per the API contract; omitting it would mean "leave
+      // the current curation alone", which has no meaning on a fresh create.
+      disabled_tools: disabled,
+    };
+    try {
+      const res = await postJSON<OpenAPISaveResponse>(
+        `/backends/${encodeURIComponent(trimmedID)}`,
+        body,
+      );
+      onConnecting(res.id, url.trim() || `openapi: ${fileName}`);
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!preview) {
+    return (
+      <div class="card form-card">
+        <div class="form-card-title">
+          <span>connect an openapi server</span>
+          <button
+            type="button"
+            class="section-btn"
+            style="margin-left:auto"
+            onClick={onBack}
+          >
+            ← back
+          </button>
+        </div>
+        <div class="modal-section">
+          <label class="config-label">spec url</label>
+          <input
+            type="text"
+            class="config-input"
+            value={url}
+            spellcheck={false}
+            placeholder="https://petstore3.swagger.io/api/v3/openapi.json"
+            onInput={(e) => {
+              setUrl((e.target as HTMLInputElement).value);
+              if ((e.target as HTMLInputElement).value) {
+                setFileBase64(null);
+                setFileName("");
+              }
+            }}
+          />
+        </div>
+        <div class="modal-section">
+          <label class="config-label">or upload file</label>
+          <div class="inline-form">
+            <input
+              type="file"
+              accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml,text/x-yaml"
+              onChange={onFile}
+            />
+            {fileName && (
+              <span class="hint-text">selected: {fileName}</span>
+            )}
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="save-btn" onClick={runPreview} disabled={busy}>
+            {busy ? "fetching…" : "preview"}
+          </button>
+          <button class="cancel-btn" onClick={onCancel} disabled={busy}>
+            cancel
+          </button>
+          {error && <span class="error-text">{error}</span>}
+        </div>
+      </div>
+    );
+  }
+
+  const scheme =
+    preview.security_schemes.find((s) => s.name === securityScheme) ||
+    null;
+
+  return (
+    <div class="card form-card openapi-preview-card">
+      <div class="form-card-title">
+        <span>preview · {preview.title}</span>
+        <button
+          type="button"
+          class="section-btn"
+          style="margin-left:auto"
+          onClick={() => {
+            setPreview(null);
+            setPreviewSource(null);
+          }}
+        >
+          ← change source
+        </button>
+      </div>
+
+      <div class="openapi-preview-meta">
+        <MetaPair label="title" value={preview.title} />
+        <MetaPair label="version" value={preview.version} />
+        <MetaPair label="base url" value={preview.base_url || "—"} mono />
+      </div>
+
+      <div class="modal-section">
+        <label class="config-label">backend id</label>
+        <input
+          type="text"
+          class="config-input"
+          value={id}
+          spellcheck={false}
+          placeholder="e.g. petstore"
+          onInput={(e) => setId((e.target as HTMLInputElement).value)}
+        />
+      </div>
+
+      <div class="modal-section">
+        <label class="config-label">
+          base url override <span class="hint-text">(optional)</span>
+        </label>
+        <input
+          type="text"
+          class="config-input"
+          value={baseURLOverride}
+          spellcheck={false}
+          placeholder={preview.base_url || "https://api.example.com"}
+          onInput={(e) =>
+            setBaseURLOverride((e.target as HTMLInputElement).value)
+          }
+        />
+      </div>
+
+      {preview.security_schemes.length > 0 && (
+        <div class="modal-section">
+          <label class="config-label">security scheme</label>
+          {preview.security_schemes.length === 1 ? (
+            <div class="hint-text">
+              auto-selected:{" "}
+              <code>{preview.security_schemes[0].name}</code> (
+              {preview.security_schemes[0].type})
+            </div>
+          ) : (
+            <div class="openapi-scheme-radios">
+              {preview.security_schemes.map((s) => (
+                <label class="openapi-scheme-radio" key={s.name}>
+                  <input
+                    type="radio"
+                    name="openapi-scheme"
+                    checked={securityScheme === s.name}
+                    onChange={() => setSecurityScheme(s.name)}
+                  />
+                  <span class="openapi-scheme-name">{s.name}</span>
+                  <span class="hint-text">({s.type})</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {scheme && (
+        <OpenAPICredFields
+          scheme={scheme}
+          cred={cred}
+          onChange={setCred}
+        />
+      )}
+
+      <div class="openapi-preview-picker">
+        <OperationPicker
+          operations={preview.operations}
+          enabled={enabled}
+          onChange={setEnabled}
+          skipped={preview.skipped}
+          specWarnings={preview.spec_warnings}
+          title="operations"
+          description="every checked operation becomes an MCP tool. uncheck the ones you want hidden — bulk-toggle per tag for big specs."
+        />
+      </div>
+
+      <div class="form-actions">
+        <button class="save-btn" onClick={save} disabled={busy}>
+          {busy ? "saving…" : "save backend"}
+        </button>
+        <button class="cancel-btn" onClick={onCancel} disabled={busy}>
+          cancel
+        </button>
+        {error && <span class="error-text">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function MetaPair({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div class="meta-item">
+      <div class="meta-label">{label}</div>
+      <div class={mono ? "meta-value meta-value-mono" : "meta-value"}>
+        {value || "—"}
+      </div>
+    </div>
+  );
+}
+
+function OpenAPICredFields({
+  scheme,
+  cred,
+  onChange,
+}: {
+  scheme: OpenAPISecurityScheme;
+  cred: OpenAPICredState;
+  onChange: (next: OpenAPICredState) => void;
+}) {
+  // bearer schemes: just a token; the gateway always uses Authorization. For
+  // apiKey we surface both the header name (pre-filled from the spec) and the
+  // value so the operator can override if their gateway has been reverse-
+  // proxied behind something with a different header.
+  const isBearer = scheme.type === "bearer";
+  const isAPIKey = scheme.type === "apiKey";
+  return (
+    <div class="modal-section">
+      <label class="config-label">credential</label>
+      <div class="inline-form" style="flex-wrap:wrap;gap:8px">
+        {isBearer && (
+          <>
+            <span class="hint-text">bearer token →</span>
+            <input
+              type="password"
+              class="config-input"
+              placeholder="token (write-only)"
+              autoComplete="new-password"
+              style="flex:1;min-width:240px"
+              value={cred.value}
+              onInput={(e) =>
+                onChange({
+                  ...cred,
+                  type: "bearer",
+                  header: "Authorization",
+                  value: (e.target as HTMLInputElement).value,
+                })
+              }
+            />
+          </>
+        )}
+        {isAPIKey && (
+          <>
+            <input
+              type="text"
+              class="config-input"
+              placeholder="header"
+              style="width:160px"
+              value={cred.header || scheme.header || ""}
+              onInput={(e) =>
+                onChange({
+                  ...cred,
+                  type: "apiKey",
+                  header: (e.target as HTMLInputElement).value,
+                })
+              }
+            />
+            <input
+              type="password"
+              class="config-input"
+              placeholder="value (write-only)"
+              autoComplete="new-password"
+              style="flex:1;min-width:240px"
+              value={cred.value}
+              onInput={(e) =>
+                onChange({
+                  ...cred,
+                  type: "apiKey",
+                  header: cred.header || scheme.header || "",
+                  value: (e.target as HTMLInputElement).value,
+                })
+              }
+            />
+          </>
+        )}
+        {!isBearer && !isAPIKey && (
+          <span class="hint-text">
+            scheme <code>{scheme.type}</code> is not credential-eligible.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function buildOpenAPICredential(
+  state: OpenAPICredState,
+  preview: OpenAPIPreviewResponse,
+  schemeName: string,
+): CredentialInput | undefined {
+  const scheme = preview.security_schemes.find((s) => s.name === schemeName);
+  if (!scheme) return undefined;
+  if (scheme.type === "bearer") {
+    if (!state.value) return undefined;
+    return { type: "static", header: "Authorization", value: state.value };
+  }
+  if (scheme.type === "apiKey") {
+    if (!state.value) return undefined;
+    return {
+      type: "static",
+      header: state.header || scheme.header || "X-API-Key",
+      value: state.value,
+    };
+  }
+  return undefined;
 }

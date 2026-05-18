@@ -92,6 +92,10 @@ export interface Backend {
   sandbox?: SandboxConfig;
   workspace?: WorkspaceConfig;
   disconnected?: boolean;
+  // Transport is "openapi" for OpenAPI-spec-backed servers, empty/"stdio"/"http"
+  // otherwise. The admin layer doesn't surface a separate source URL on the
+  // backend list, so the UI re-prompts for a URL or file on re-import.
+  transport?: string;
 }
 
 export interface BackendRateLimit {
@@ -337,4 +341,102 @@ export interface Workspace {
   connected: boolean;
   health_status?: WorkspaceHealth;
   backends?: WorkspaceBackend[];
+}
+
+// ---------------------------------------------------------------------------
+// OpenAPI preview / save / diff / reimport.
+// ---------------------------------------------------------------------------
+
+// Polymorphic input accepted on every OpenAPI endpoint that needs to
+// materialize a spec. Exactly one of file or url must be supplied; file is
+// base64-encoded raw spec bytes.
+export type OpenAPISpecSource =
+  | { file: string; url?: undefined }
+  | { url: string; file?: undefined };
+
+// Bearer schemes surface as type:"bearer" so the UI can pick the right
+// credential form without parsing scheme + type both; named header schemes
+// come through as type:"apiKey" with the header name attached.
+export interface OpenAPISecurityScheme {
+  name: string;
+  type: "bearer" | "apiKey" | string;
+  header?: string;
+}
+
+export interface OpenAPIOperationView {
+  name: string;
+  method: string;
+  path: string;
+  summary?: string;
+  tags?: string[];
+  deprecated?: boolean;
+  security?: string[];
+  fingerprint: string;
+}
+
+export interface OpenAPISkippedOperation {
+  name: string;
+  method?: string;
+  path?: string;
+  reason: string;
+  detail?: string;
+}
+
+export interface OpenAPIPreviewResponse {
+  title: string;
+  version: string;
+  base_url: string;
+  security_schemes: OpenAPISecurityScheme[];
+  operations: OpenAPIOperationView[];
+  skipped: OpenAPISkippedOperation[];
+  spec_warnings?: string[];
+}
+
+export interface OpenAPISaveBody {
+  type: "openapi";
+  source: OpenAPISpecSource;
+  base_url_override?: string;
+  security_scheme?: string;
+  credential?: CredentialInput | null;
+  // disabled_tools is the bare list of operation names switched off at save
+  // time. Empty array = every operation enabled; omitted = same as empty.
+  disabled_tools?: string[];
+}
+
+export interface OpenAPIDiffEntry {
+  name: string;
+  method?: string;
+  path?: string;
+}
+
+export interface OpenAPIRenameEntry {
+  from: string;
+  to: string;
+}
+
+export interface OpenAPISignatureChange {
+  name: string;
+  old_fingerprint: string;
+  new_fingerprint: string;
+}
+
+export interface OpenAPIDiffResponse {
+  added: OpenAPIDiffEntry[];
+  removed: OpenAPIDiffEntry[];
+  renamed: OpenAPIRenameEntry[];
+  signature_changed: OpenAPISignatureChange[];
+  unchanged_count: number;
+  newly_skipped: OpenAPISkippedOperation[];
+}
+
+export interface OpenAPIReimportBody {
+  source: OpenAPISpecSource;
+  disabled_tools_resolution: "preserve" | "default_enabled";
+}
+
+export interface OpenAPISaveResponse {
+  status: "ok";
+  id: string;
+  operations: number;
+  skipped: number;
 }

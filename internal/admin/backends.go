@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -11,6 +13,47 @@ import (
 
 	"github.com/1broseidon/prism/internal/config"
 )
+
+// readAddBackendBody buffers the POST /backends/{id} body so the handler can
+// peek for an openapi-typed payload before deciding which schema to decode.
+// The cap stays at 64KB for the conventional shape; once we know the payload
+// declares type=="openapi" we re-arm the reader with the larger OpenAPI cap.
+func readAddBackendBody(r *http.Request) ([]byte, error) {
+	// First pass: small cap, enough to inspect type. If the body actually
+	// fits we go straight to decode; otherwise we re-buffer with the bigger
+	// cap and confirm it's openapi-typed before allowing the larger payload
+	// through.
+	smallLimit := int64(64 * 1024)
+	probe, err := io.ReadAll(io.LimitReader(r.Body, smallLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(probe)) <= smallLimit {
+		return probe, nil
+	}
+	// Quick sniff: only openapi-typed bodies are allowed past the 64KB cap.
+	// Trailing bytes past smallLimit may not yet be valid JSON, but the
+	// peek window already includes the document head, so the "type"
+	// keyword (if present near the top of the JSON object) is visible.
+	if !bytes.Contains(probe, []byte(`"type"`)) || !bytes.Contains(probe, []byte(`"openapi"`)) {
+		return nil, errors.New("request body exceeds 64KB limit")
+	}
+	// Re-arm with the larger limit, then drain the rest.
+	rest, err := io.ReadAll(io.LimitReader(r.Body, openAPIRequestBodyLimit-smallLimit))
+	if err != nil {
+		return nil, err
+	}
+	// Use a fresh slice rather than appending onto probe; gocritic flags the
+	// in-place append here as appendAssign because probe is otherwise unused
+	// after this point, and the explicit allocation is clearer.
+	full := make([]byte, 0, len(probe)+len(rest))
+	full = append(full, probe...)
+	full = append(full, rest...)
+	if int64(len(full)) > openAPIRequestBodyLimit {
+		return nil, errors.New("request body exceeds openapi limit")
+	}
+	return full, nil
+}
 
 // BackendConfig is the JSON body for adding a backend at runtime.
 type BackendConfig struct {
@@ -193,8 +236,8 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) { //nolin
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
-
+	// Body cap is widened in readAddBackendBody when the payload turns out to
+	// be openapi-typed; stdio/HTTP backends stay on the original 64KB ceiling.
 	// Extract backend ID from path: POST /backends/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/backends/")
 	if !isValidID(id) {
@@ -209,8 +252,30 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) { //nolin
 		return
 	}
 
+	bodyBytes, err := readAddBackendBody(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	// Peek for an openapi-typed payload before falling through to the legacy
+	// (stdio/HTTP) handling. The peek lets us share the route without
+	// breaking existing AddBackend behavior: when "type" is absent the
+	// payload is treated as a BackendConfig exactly like before.
+	var peek struct {
+		Type string `json:"type,omitempty"`
+	}
+	if err := json.Unmarshal(bodyBytes, &peek); err == nil && strings.EqualFold(peek.Type, "openapi") {
+		var oreq openAPISaveRequest
+		if err := json.Unmarshal(bodyBytes, &oreq); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		a.handleSaveOpenAPIBackend(w, r, id, oreq)
+		return
+	}
+
 	var cfg BackendConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	if err := json.Unmarshal(bodyBytes, &cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 		return
 	}

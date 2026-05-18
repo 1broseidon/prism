@@ -21,6 +21,8 @@ import type {
 } from "../api/types";
 import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
 import { fmtBytes } from "../util/bytes";
+import { MethodPill } from "../components/OperationPicker";
+import { ReimportDiffModal } from "../components/ReimportDiffModal";
 
 type CredType = "none" | "static" | "env" | "command";
 const BACKEND_REBUILD_TIMEOUT_MS = 60_000;
@@ -110,6 +112,9 @@ export function ServerDetail() {
       </div>
 
       <MetaRow backend={backend} />
+      {isOpenAPI(backend) && canMutate() && (
+        <ReimportSection backend={backend} />
+      )}
       {canMutate() && <BackendSettingsSection backend={backend} />}
       {isStdio(backend) && canMutate() && <StorageSection backend={backend} />}
       {backend.workspace && <WorkspaceChangesSection backend={backend} />}
@@ -180,20 +185,53 @@ function StatusPill({ backend }: { backend: Backend }) {
 // Bridge-managed backends are stdio even though the gateway reaches them over
 // HTTP internally — the user thinks of them as commands, not URLs.
 function isStdio(backend: Backend): boolean {
+  if (isOpenAPI(backend)) return false;
   return backend.bridge_managed === true || !backend.url;
+}
+
+// OpenAPI backends carry transport: "openapi" from the gateway. We treat them
+// as their own surface — they aren't stdio, but they also aren't a plain
+// HTTP MCP backend; the URL is the spec's base URL.
+function isOpenAPI(backend: Backend): boolean {
+  return backend.transport === "openapi";
+}
+
+// METHOD_FROM_TOOL extracts an HTTP method from a tool name when an
+// operationId starts with one (e.g. "getPet", "POST__petStore"). Pure
+// best-effort visual cue — the backend doesn't surface per-tool method on
+// the live tool list, so falling back to "?" keeps the layout stable.
+const METHOD_RE = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE)/i;
+function methodFromToolName(namespacedName: string, prefix: string): string {
+  const bare = namespacedName.startsWith(prefix)
+    ? namespacedName.slice(prefix.length)
+    : namespacedName;
+  const match = bare.match(METHOD_RE);
+  return match ? match[1].toUpperCase() : "";
 }
 
 function MetaRow({ backend }: { backend: Backend }) {
   const stdio = isStdio(backend);
+  const openapi = isOpenAPI(backend);
   const toolCount = backend.tools?.length ?? 0;
   const credType = backend.credential?.configured
     ? backend.credential.type
     : "none";
+  const transportLabel = openapi ? "openapi" : stdio ? "stdio" : "http";
 
   return (
     <div class="meta-row">
-      <MetaItem label="transport" value={stdio ? "stdio" : "http"} />
-      {!stdio && backend.url && (
+      <MetaItem label="transport" value={transportLabel} />
+      {openapi && backend.url && (
+        <MetaItem label="base url" value={backend.url} mono />
+      )}
+      {openapi && (
+        // The admin layer doesn't surface the spec source on the backend
+        // list — only the persisted base URL. We label it as "uploaded"
+        // when the operator must re-supply on re-import; a future API
+        // extension can carry the original URL through.
+        <MetaItem label="spec source" value="file (uploaded)" />
+      )}
+      {!openapi && !stdio && backend.url && (
         <MetaItem label="endpoint" value={backend.url} mono />
       )}
       {stdio && backend.runtime && (
@@ -208,8 +246,41 @@ function MetaRow({ backend }: { backend: Backend }) {
   );
 }
 
+function ReimportSection({ backend }: { backend: Backend }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">openapi spec</span>
+        <span class="section-sub">
+          re-import to pick up new operations, renames, or signature
+          changes. existing per-tool toggles are preserved.
+        </span>
+        <button
+          class="section-btn section-btn-primary"
+          onClick={() => setOpen(true)}
+        >
+          re-import spec
+        </button>
+      </div>
+      {open && (
+        <ReimportDiffModal
+          backendId={backend.id}
+          onClose={() => setOpen(false)}
+          onApplied={async () => {
+            setOpen(false);
+            await backends.refresh();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function AdvancedSection({ backend }: { backend: Backend }) {
   const [open, setOpen] = useState(false);
+  const openapi = isOpenAPI(backend);
+  const operationCount = backend.tools?.length ?? 0;
   return (
     <div class="section">
       <div class="section-header">
@@ -226,17 +297,42 @@ function AdvancedSection({ backend }: { backend: Backend }) {
       </div>
       {open && (
         <div class="card">
-          <div class="card-row">
-            <span class="meta-label">internal endpoint</span>
-            <span class="meta-value-mono">{backend.url || "—"}</span>
-          </div>
-          {backend.bridge_managed && (
-            <div class="card-row">
-              <span class="meta-label">bridge runtime</span>
-              <span class="meta-value-mono">
-                {backend.runtime || "managed"}
-              </span>
-            </div>
+          {openapi ? (
+            <>
+              <div class="card-row">
+                <span class="meta-label">base url</span>
+                <span class="meta-value-mono">{backend.url || "—"}</span>
+              </div>
+              <div class="card-row">
+                <span class="meta-label">security scheme</span>
+                <span class="meta-value-mono">
+                  {backend.credential?.configured
+                    ? `${backend.credential.type} (header: ${backend.credential.header || "Authorization"})`
+                    : "none"}
+                </span>
+              </div>
+              <div class="card-row">
+                <span class="meta-label">operations</span>
+                <span class="meta-value-mono">
+                  {operationCount} imported
+                </span>
+              </div>
+            </>
+          ) : (
+            <>
+              <div class="card-row">
+                <span class="meta-label">internal endpoint</span>
+                <span class="meta-value-mono">{backend.url || "—"}</span>
+              </div>
+              {backend.bridge_managed && (
+                <div class="card-row">
+                  <span class="meta-label">bridge runtime</span>
+                  <span class="meta-value-mono">
+                    {backend.runtime || "managed"}
+                  </span>
+                </div>
+              )}
+            </>
           )}
           <div class="card-row">
             <span class="meta-label">namespace</span>
@@ -1225,6 +1321,7 @@ function ToolsSection({ backend }: { backend: Backend }) {
   const [saving, setSaving] = useState<string | null>(null);
   const prefix = `${backend.namespace || backend.id}__`;
   const disabledCount = tools.filter((t) => t.disabled).length;
+  const showMethod = isOpenAPI(backend);
 
   // Per-tool call counts from the recent events buffer.
   const counts = useMemo(() => {
@@ -1344,6 +1441,9 @@ function ToolsSection({ backend }: { backend: Backend }) {
               callCount={counts.get(t.name) ?? 0}
               mutate={mutate}
               busy={saving === t.name || saving === "__bulk__"}
+              method={
+                showMethod ? methodFromToolName(t.name, prefix) : ""
+              }
               onToggle={() => toggleTool(t)}
             />
           ))}
@@ -1364,18 +1464,21 @@ function ToolRow({
   callCount,
   mutate,
   busy,
+  method,
   onToggle,
 }: {
   tool: BackendTool;
   callCount: number;
   mutate: boolean;
   busy: boolean;
+  method: string;
   onToggle: () => void;
 }) {
   const enabled = !tool.disabled;
   return (
     <div class={enabled ? "tool-row" : "tool-row tool-row-disabled"}>
       <div class="tool-row-header">
+        {method && <MethodPill method={method} />}
         <div class="tool-name">{tool.name}</div>
         {callCount > 0 && (
           <span class="tool-count-value">

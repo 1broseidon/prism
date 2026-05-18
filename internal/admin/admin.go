@@ -75,6 +75,10 @@ type API struct {
 	workspaceLookup      WorkspaceReversePolicyLookup
 	adminProbeLimiter    *adminProbeRateLimiter
 	startedAt            time.Time
+	// openAPIFetcher is overridable by tests so they can substitute a non-SSRF
+	// HTTP client. Nil in production — handlers fall back to the default
+	// SSRF-guarded fetcher.
+	openAPIFetcher fetcherFactory
 }
 
 // SetBackendPolicyTraceProvider wires the per-agent resolution trace provider
@@ -221,6 +225,10 @@ func (a *API) registerAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /defaults", a.admin(http.HandlerFunc(a.handleSetDefaults)))
 	mux.Handle("POST /workspaces", a.admin(http.HandlerFunc(a.handleCreateWorkspace)))
 	mux.Handle("DELETE /workspaces/", a.admin(http.HandlerFunc(a.handleDeleteWorkspace)))
+	// OpenAPI: preview is stateless (no {id}); diff and reimport are routed
+	// through handleBackendPost suffix dispatch since they share the
+	// /backends/{id}/ prefix with reconnect/workspace-changes.
+	mux.Handle("POST /backends/preview-openapi", a.admin(http.HandlerFunc(a.handlePreviewOpenAPI)))
 	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
 	mux.Handle("PATCH /backends/", a.admin(http.HandlerFunc(a.handlePatchBackend)))
 	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
@@ -243,6 +251,14 @@ func (a *API) handleBackendPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(r.URL.Path, "/workspace-changes/discard") {
 		a.handleBackendWorkspaceDiscard(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/openapi-diff") {
+		a.handleOpenAPIDiff(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/reimport") {
+		a.handleOpenAPIReimport(w, r)
 		return
 	}
 	a.handleAddBackend(w, r)

@@ -37,14 +37,24 @@ import (
 
 const namespaceSeparator = "__"
 
-// Backend represents a connected backend MCP server.
+// Backend represents a connected backend. Most backends speak MCP through a
+// Session; OpenAPI backends use a synthetic HTTP Dispatcher and leave
+// Session nil. The Dispatcher field is the post-task-16 unified call boundary
+// and is always non-nil for connected backends — Session == nil is only
+// legal when Dispatcher != nil.
 type Backend struct {
-	Config    *config.ServerConfig
-	Client    *mcp.Client
-	Session   *mcp.ClientSession
-	CB        *middleware.CircuitBreaker
-	ToolNames []string          // namespaced tool names registered on the gateway
-	Tools     []BackendToolInfo // tool metadata captured at registration
+	Config     *config.ServerConfig
+	Client     *mcp.Client
+	Session    *mcp.ClientSession
+	Dispatcher ToolDispatcher     // unified leaf call path (MCP, OpenAPI, ...)
+	OpenAPI    *OpenAPIDispatcher // typed handle when transport == "openapi"
+	CB         *middleware.CircuitBreaker
+	ToolNames  []string          // namespaced tool names registered on the gateway
+	Tools      []BackendToolInfo // tool metadata captured at registration
+	// Transport identifies how this backend dispatches calls. "mcp" or "stdio"
+	// or "openapi" — used by Status() so the admin UI can label backends
+	// without re-deriving the type from URL shape.
+	Transport string
 	// DisabledTools is the set of bare (un-namespaced) tool names the
 	// operator has switched off on this backend. tools/list filters them out
 	// for callers; tools/call rejects them with a "method not found" style
@@ -328,6 +338,18 @@ type persistedBackend struct {
 	// DisabledTools persists the operator's per-tool toggles across restarts.
 	// Bare tool names (no namespace prefix).
 	DisabledTools []string `json:"disabled_tools,omitempty"`
+	// OpenAPI backend fields. When OpenAPISpecRaw is non-empty the gateway
+	// treats this entry as an OpenAPI-typed backend and re-parses on restart;
+	// the stdio/HTTP fields above are ignored in that mode.
+	OpenAPISpecRaw        []byte `json:"openapi_spec,omitempty"`
+	OpenAPISourceURL      string `json:"openapi_source_url,omitempty"`
+	OpenAPIBaseURL        string `json:"openapi_base_url,omitempty"`
+	OpenAPISecurityScheme string `json:"openapi_security_scheme,omitempty"`
+}
+
+// isOpenAPI reports whether this entry is an OpenAPI-typed backend.
+func (pb *persistedBackend) isOpenAPI() bool {
+	return pb != nil && len(pb.OpenAPISpecRaw) > 0
 }
 
 func boolPtr(v bool) *bool { return &v }
@@ -565,6 +587,14 @@ func (g *Gateway) ReconnectBackend(ctx context.Context, backendID string) error 
 }
 
 func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string, pb *persistedBackend) error {
+	if pb.isOpenAPI() {
+		if err := g.reconnectPersistedOpenAPIBackend(ctx, backendID, pb); err != nil {
+			return err
+		}
+		g.applyDisabledTools(backendID, pb.DisabledTools)
+		g.persistBackend(backendID, pb)
+		return nil
+	}
 	sc := &config.ServerConfig{
 		ID:            backendID,
 		Namespace:     backendID,
@@ -884,11 +914,19 @@ func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) 
 		})
 	}
 
+	ttype := "http"
+	if cfg.IsStdio() {
+		ttype = "stdio"
+	}
+
+	dispatcher := NewMCPSessionDispatcher(session, cfg.Namespace, nil)
 	backend := &Backend{
-		Config:  cfg,
-		Client:  client,
-		Session: session,
-		CB:      cb,
+		Config:     cfg,
+		Client:     client,
+		Session:    session,
+		Dispatcher: dispatcher,
+		CB:         cb,
+		Transport:  ttype,
 	}
 
 	g.mu.Lock()
@@ -898,11 +936,8 @@ func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) 
 	if err := g.registerBackendTools(ctx, backend); err != nil {
 		g.logger.Warn("failed to register tools", "id", cfg.ID, "error", err)
 	}
+	dispatcher.setTools(backend.Tools)
 
-	ttype := "http"
-	if cfg.IsStdio() {
-		ttype = "stdio"
-	}
 	g.logger.Info("connected to backend", "id", cfg.ID, "transport", ttype, "namespace", cfg.Namespace)
 	metrics.IncActiveBackends()
 	return nil
@@ -1298,11 +1333,22 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 		}, nil
 	}
 
+	dispatcher := target.Dispatcher
+	if dispatcher == nil {
+		// Backward-compat safety net: a backend with no dispatcher should
+		// never be in g.backends after task-16, but we surface the bug as a
+		// soft error instead of panicking the gateway.
+		span.SetStatus(codes.Error, "backend missing dispatcher")
+		return &mcp.CallToolResult{
+			IsError: true,
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: fmt.Sprintf("backend %q has no dispatcher", backendID)},
+			},
+		}, nil
+	}
+
 	start := time.Now()
-	result, err := target.Session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      toolName,
-		Arguments: forwardedReq.Params.Arguments,
-	})
+	result, err := dispatcher.Dispatch(ctx, toolName, forwardedReq.Params.Arguments)
 	elapsed := time.Since(start)
 	latencyMS := elapsed.Milliseconds()
 
@@ -1381,9 +1427,11 @@ func (g *Gateway) ensureWorkspaceBackendInstance(ctx context.Context, template *
 	cfg.BridgeManaged = true
 	cfg.OriginalCommand = append([]string(nil), template.Config.OriginalCommand...)
 	instance := &Backend{
-		Config:  &cfg,
-		Client:  client,
-		Session: session,
+		Config:     &cfg,
+		Client:     client,
+		Session:    session,
+		Dispatcher: NewMCPSessionDispatcher(session, cfg.Namespace, nil),
+		Transport:  template.Transport,
 	}
 
 	g.mu.Lock()
@@ -1996,6 +2044,7 @@ type BackendStatus struct {
 	Namespace      string                  `json:"namespace"`
 	URL            string                  `json:"url"`
 	Enabled        bool                    `json:"enabled"`
+	Transport      string                  `json:"transport,omitempty"`
 	CircuitBreaker string                  `json:"circuit_breaker,omitempty"`
 	Credential     *BackendCredentialInfo  `json:"credential,omitempty"`
 	Tools          []BackendToolInfo       `json:"tools,omitempty"`
@@ -2070,6 +2119,7 @@ func (g *Gateway) Status() []BackendStatus {
 			Namespace:     b.Config.Namespace,
 			URL:           b.Config.URL,
 			Enabled:       true,
+			Transport:     b.Transport,
 			Tools:         annotateDisabledTools(b.Tools, b.Config.Namespace, b.DisabledTools),
 			BridgeManaged: b.Config.BridgeManaged,
 			Runtime:       b.Config.BridgeRuntime,
@@ -2107,6 +2157,12 @@ func (g *Gateway) Status() []BackendStatus {
 						orphan.Runtime = pb.Runtime
 						orphan.Sandbox = pb.sandboxConfig()
 						orphan.Workspace = pb.workspaceConfig()
+						if pb.isOpenAPI() {
+							orphan.Transport = "openapi"
+							if pb.OpenAPIBaseURL != "" {
+								orphan.URL = pb.OpenAPIBaseURL
+							}
+						}
 					}
 				}
 				if orphan.Enabled {

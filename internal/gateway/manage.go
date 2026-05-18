@@ -15,7 +15,10 @@ import (
 	"github.com/1broseidon/prism/internal/admin"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/credentials"
+	"github.com/1broseidon/prism/internal/metrics"
+	"github.com/1broseidon/prism/internal/openapi"
 	"github.com/1broseidon/prism/internal/store"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type bridgeSpawnResponse struct {
@@ -652,4 +655,438 @@ func (g *Gateway) removeBridgeBackend(id string) error {
 		_ = resp.Body.Close()
 	}
 	return firstErr
+}
+
+// ConnectOpenAPIBackend registers an OpenAPI-typed backend. Each non-skipped
+// operation in spec becomes a tool under the backend's namespace; calls funnel
+// through routeToolCall like every other backend so auth, workspace, rate
+// limits, and audit run unchanged.
+//
+// The caller is responsible for storing the raw spec bytes (and source URL,
+// if any) ahead of time via PersistOpenAPIBackend when the backend should
+// survive restarts. ConnectOpenAPIBackend itself does not persist.
+func (g *Gateway) ConnectOpenAPIBackend(ctx context.Context, id string, spec *openapi.Spec, baseURL, securityScheme string) error {
+	if id == "" {
+		return errors.New("backend id is required")
+	}
+	if spec == nil {
+		return errors.New("openapi spec is required")
+	}
+
+	g.mu.RLock()
+	_, exists := g.backends[id]
+	g.mu.RUnlock()
+	if exists {
+		return fmt.Errorf("backend %q already exists", id)
+	}
+
+	dispatcher, err := NewOpenAPIDispatcher(spec, baseURL, securityScheme, OpenAPIDispatcherOptions{
+		CredResolver: g.openAPICredResolver(id, securityScheme, spec),
+		Logger:       g.logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	sc := &config.ServerConfig{
+		ID:        id,
+		Namespace: id,
+		URL:       dispatcher.BaseURL(),
+		Enabled:   true,
+		Timeout:   config.Duration(openapiDefaultTimeout),
+	}
+	backend := &Backend{
+		Config:     sc,
+		Session:    nil,
+		Dispatcher: dispatcher,
+		OpenAPI:    dispatcher,
+		Transport:  "openapi",
+	}
+
+	g.mu.Lock()
+	g.backends[id] = backend
+	g.mu.Unlock()
+
+	// Register one MCP tool per operation. The handler funnels through
+	// routeToolCall so the dispatcher boundary sits on the same hot path as
+	// every other backend transport.
+	tools := registerOpenAPITools(g, backend, spec, securityScheme)
+	backend.ToolNames = openapiToolNames(tools)
+	backend.Tools = tools
+	dispatcher.SetTools(tools)
+
+	g.logger.Info("connected openapi backend",
+		"id", id,
+		"transport", "openapi",
+		"base_url", dispatcher.BaseURL(),
+		"operations", len(spec.Operations),
+		"skipped", len(spec.Skipped),
+	)
+	metrics.IncActiveBackends()
+	_ = ctx // ctx reserved for future async hooks (no upstream call needed at connect time)
+	return nil
+}
+
+// reconnectPersistedOpenAPIBackend rebuilds an OpenAPI backend from its
+// persisted bytes. Parse failures are non-fatal — the gateway logs the
+// reason and leaves the backend listed as disconnected so the operator can
+// re-import via the admin UI.
+func (g *Gateway) reconnectPersistedOpenAPIBackend(ctx context.Context, id string, pb *persistedBackend) error {
+	if !pb.isOpenAPI() {
+		return fmt.Errorf("backend %q is not an openapi backend", id)
+	}
+	parser := openapi.NewParser()
+	spec, err := parser.Parse(pb.OpenAPISpecRaw)
+	if err != nil {
+		g.logger.Warn("failed to re-parse openapi spec; backend left disconnected",
+			"id", id,
+			"error", err,
+		)
+		return fmt.Errorf("re-parse openapi spec: %w", err)
+	}
+	return g.ConnectOpenAPIBackend(ctx, id, spec, pb.OpenAPIBaseURL, pb.OpenAPISecurityScheme)
+}
+
+// PersistOpenAPIBackend writes an OpenAPI backend's KV record. The raw bytes
+// are stored verbatim so the gateway can reproduce the same Spec across
+// restarts (and so re-parses see exactly what the operator imported).
+func (g *Gateway) PersistOpenAPIBackend(id string, rawSpec []byte, sourceURL, baseURL, securityScheme string) {
+	pb := &persistedBackend{
+		Enabled:               boolPtr(true),
+		OpenAPISpecRaw:        append([]byte(nil), rawSpec...),
+		OpenAPISourceURL:      sourceURL,
+		OpenAPIBaseURL:        baseURL,
+		OpenAPISecurityScheme: securityScheme,
+	}
+	g.persistBackend(id, pb)
+}
+
+// openAPICredResolver returns a closure that injects the right header for the
+// chosen security scheme on every dispatch. Bearer schemes always emit
+// Authorization: Bearer <value>; apiKey-in-header schemes emit the named
+// header verbatim. Backends without a configured scheme (or with no
+// credential registered) yield an empty header so the request goes
+// unauthenticated.
+func (g *Gateway) openAPICredResolver(backendID, scheme string, spec *openapi.Spec) OpenAPICredResolver {
+	if scheme == "" || spec == nil {
+		return nil
+	}
+	def, ok := spec.SecuritySchemes[scheme]
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context) (string, string) {
+		_, value, err := g.credStore.Resolve(ctx, backendID)
+		if err != nil || value == "" {
+			return "", ""
+		}
+		switch {
+		case strings.EqualFold(def.Type, "http") && strings.EqualFold(def.Scheme, "bearer"):
+			return "Authorization", "Bearer " + value
+		case strings.EqualFold(def.Type, "apiKey") && strings.EqualFold(def.In, "header"):
+			header := def.HeaderName
+			if header == "" {
+				header = "Authorization"
+			}
+			return header, value
+		default:
+			return "", ""
+		}
+	}
+}
+
+// registerOpenAPITools wires each accepted operation in spec into the
+// gateway's MCP server. The returned slice is the namespaced tool metadata
+// captured at registration time, mirroring registerBackendTools.
+func registerOpenAPITools(g *Gateway, b *Backend, spec *openapi.Spec, scheme string) []BackendToolInfo {
+	infos := make([]BackendToolInfo, 0, len(spec.Operations))
+	for i := range spec.Operations {
+		op := &spec.Operations[i]
+		namespacedName := b.Config.Namespace + namespaceSeparator + op.Name
+		description := op.Summary
+		if description == "" {
+			description = op.Description
+		}
+		description = fmt.Sprintf("[%s] %s", b.Config.Namespace, description)
+
+		var schema any
+		if len(op.InputSchema) > 0 {
+			schema = op.InputSchema
+		} else {
+			schema = map[string]any{"type": "object"}
+		}
+
+		tool := &mcp.Tool{
+			Name:        namespacedName,
+			Description: description,
+			InputSchema: schema,
+		}
+
+		backendID := b.Config.ID
+		originalName := op.Name
+		handler := func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return g.routeToolCall(ctx, backendID, originalName, req)
+		}
+		g.server.AddTool(tool, handler)
+		infos = append(infos, BackendToolInfo{
+			Name:        namespacedName,
+			Description: op.Summary,
+		})
+	}
+	g.logger.Info("registered tools from openapi backend",
+		"id", b.Config.ID,
+		"count", len(infos),
+		"scheme", scheme,
+	)
+	return infos
+}
+
+// openapiToolNames extracts the namespaced names from a tool info slice.
+func openapiToolNames(infos []BackendToolInfo) []string {
+	out := make([]string, len(infos))
+	for i, info := range infos {
+		out[i] = info.Name
+	}
+	return out
+}
+
+// SaveOpenAPIBackend creates a brand-new OpenAPI-typed backend, persists the
+// raw spec bytes, registers credentials/disabled-tools, and connects the
+// dispatcher in a single transaction. Implements
+// admin.OpenAPIBackendManager.
+//
+// On any error after persistence has begun the function unwinds the partial
+// state (credential, KV entry, in-memory backend) so the operator can retry
+// without first DELETE'ing the half-attached backend.
+//
+// would force every caller through &OpenAPISaveParams{...}.
+//
+//nolint:gocritic // params is the interface payload; pointer indirection
+func (g *Gateway) SaveOpenAPIBackend(ctx context.Context, id string, params admin.OpenAPISaveParams) error {
+	if id == "" {
+		return errors.New("backend id is required")
+	}
+	if params.Spec == nil {
+		return errors.New("openapi spec is required")
+	}
+	g.mu.RLock()
+	_, exists := g.backends[id]
+	g.mu.RUnlock()
+	if exists {
+		return fmt.Errorf("backend %q already exists", id)
+	}
+
+	// Re-validate scheme against the parsed spec; admin already does this but
+	// the gateway is the trust boundary for persistence, so re-check rather
+	// than rely on the caller. Empty scheme means "no auth" — permitted.
+	if params.SecurityScheme != "" {
+		if _, ok := params.Spec.SecuritySchemes[params.SecurityScheme]; !ok {
+			return fmt.Errorf("openapi security scheme %q is not defined in the spec", params.SecurityScheme)
+		}
+	}
+
+	// Register credential before connect so the dispatcher's first call sees
+	// it. registerAndPersistAdminCredential is a no-op for nil or type=="none".
+	g.registerAndPersistAdminCredential(id, params.Credential)
+
+	if err := g.ConnectOpenAPIBackend(ctx, id, params.Spec, params.BaseURLOverride, params.SecurityScheme); err != nil {
+		// Unwind credential so a retry doesn't end up with an orphan secret.
+		g.credStore.Unregister(id)
+		g.deletePersistedCredential(id)
+		return err
+	}
+
+	disabled := normalizeDisabledToolList(params.DisabledTools)
+	if len(disabled) > 0 {
+		g.applyDisabledTools(id, disabled)
+	}
+
+	// Persist last so a connect failure leaves no orphan KV entry. Raw bytes
+	// are stored verbatim per epic-1 lock: a future restart must re-parse the
+	// exact source the operator imported.
+	pb := &persistedBackend{
+		Enabled:               boolPtr(true),
+		OpenAPISpecRaw:        append([]byte(nil), params.SpecRaw...),
+		OpenAPISourceURL:      params.SourceURL,
+		OpenAPIBaseURL:        params.BaseURLOverride,
+		OpenAPISecurityScheme: params.SecurityScheme,
+		DisabledTools:         disabled,
+	}
+	g.persistBackend(id, pb)
+
+	g.NotifyToolsChanged()
+	return nil
+}
+
+// LoadOpenAPIBackend returns the persisted snapshot for an OpenAPI-typed
+// backend. Implements admin.OpenAPIBackendManager.
+func (g *Gateway) LoadOpenAPIBackend(id string) (*admin.PersistedOpenAPIBackend, error) {
+	if g.kvStore == nil {
+		return nil, errors.New("backend persistence is not configured")
+	}
+	data, err := g.kvStore.Get(backendKVPrefix + id)
+	if err != nil {
+		return nil, fmt.Errorf("backend %q not found", id)
+	}
+	var pb persistedBackend
+	if err := json.Unmarshal(data, &pb); err != nil {
+		return nil, fmt.Errorf("decode persisted backend %q: %w", id, err)
+	}
+	if !pb.isOpenAPI() {
+		return nil, fmt.Errorf("backend %q is not an openapi backend", id)
+	}
+	return &admin.PersistedOpenAPIBackend{
+		SpecRaw:        append([]byte(nil), pb.OpenAPISpecRaw...),
+		BaseURL:        pb.OpenAPIBaseURL,
+		SecurityScheme: pb.OpenAPISecurityScheme,
+		SourceURL:      pb.OpenAPISourceURL,
+		DisabledTools:  append([]string(nil), pb.DisabledTools...),
+	}, nil
+}
+
+// ReimportOpenAPIBackend swaps the persisted spec for an existing OpenAPI
+// backend in place. Credentials, security scheme, and base URL override are
+// kept from the previously-persisted entry; the disabled-tools list is
+// recomputed per the requested resolution strategy.
+//
+// On reimport failure the previous spec is restored so the operator's tools
+// keep working — a half-attached reimport would be worse than rejecting the
+// new spec outright.
+func (g *Gateway) ReimportOpenAPIBackend(ctx context.Context, id string, params admin.OpenAPIReimportParams) error { //nolint:gocyclo // reimport is the transaction boundary.
+	if id == "" {
+		return errors.New("backend id is required")
+	}
+	if params.Spec == nil {
+		return errors.New("openapi spec is required")
+	}
+	if g.kvStore == nil {
+		return errors.New("backend persistence is not configured")
+	}
+
+	data, err := g.kvStore.Get(backendKVPrefix + id)
+	if err != nil {
+		return fmt.Errorf("backend %q not found", id)
+	}
+	var pb persistedBackend
+	if uerr := json.Unmarshal(data, &pb); uerr != nil {
+		return fmt.Errorf("decode persisted backend %q: %w", id, uerr)
+	}
+	if !pb.isOpenAPI() {
+		return fmt.Errorf("backend %q is not an openapi backend", id)
+	}
+
+	prevSpec, err := openapi.NewParser().Parse(pb.OpenAPISpecRaw)
+	if err != nil {
+		return fmt.Errorf("re-parse previous spec: %w", err)
+	}
+
+	// Compute the new disabled-tools list (and surface removed-and-enabled
+	// operations as a warning) before mutating any state, so a logic bug
+	// can't end up with persistence ahead of the running backend.
+	prevDisabled := append([]string(nil), pb.DisabledTools...)
+	newDisabled := admin.ResolveReimportDisabledTools(prevSpec, params.Spec, prevDisabled, params.PreserveDisabled)
+	warnRemovedEnabledTools(g.logger, id, prevSpec, params.Spec, prevDisabled)
+
+	// Snapshot the previous persisted entry so we can roll back if connect
+	// fails. Cloning is cheap (small struct + a byte slice copy already done
+	// when we read it from KV).
+	previous := pb
+
+	// Disconnect in-place while preserving credentials and OAuth state. On
+	// stdio backends this would also stop a bridge container; OpenAPI
+	// backends never spawn one so the call is a tools+session teardown only.
+	if err := g.stopConnectedBackendPreservingState(id); err != nil {
+		return fmt.Errorf("stop running backend: %w", err)
+	}
+
+	// Connect using the new spec. Base URL override and security scheme are
+	// preserved from the prior entry — reimport is a spec swap, not a
+	// reconfiguration of the connection target.
+	if err := g.ConnectOpenAPIBackend(ctx, id, params.Spec, pb.OpenAPIBaseURL, pb.OpenAPISecurityScheme); err != nil {
+		// Try to bring the previous spec back so the operator isn't stranded
+		// without their tools.
+		if prevSpec != nil {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			if rollbackErr := g.ConnectOpenAPIBackend(rollbackCtx, id, prevSpec, previous.OpenAPIBaseURL, previous.OpenAPISecurityScheme); rollbackErr != nil {
+				g.logger.Warn("openapi reimport failed and rollback also failed",
+					"id", id,
+					"apply_error", err,
+					"rollback_error", rollbackErr,
+				)
+			} else {
+				g.applyDisabledTools(id, previous.DisabledTools)
+				g.logger.Warn("openapi reimport failed; restored previous spec",
+					"id", id,
+					"error", err,
+				)
+			}
+			cancel()
+		}
+		return err
+	}
+
+	if len(newDisabled) > 0 {
+		g.applyDisabledTools(id, newDisabled)
+	}
+
+	// Persist after a successful connect. Keep the prior source URL when the
+	// new params don't carry one — operators reimporting from a file shouldn't
+	// lose the URL pin on the entry.
+	sourceURL := params.SourceURL
+	if sourceURL == "" {
+		sourceURL = previous.OpenAPISourceURL
+	}
+	next := &persistedBackend{
+		Enabled:               boolPtr(true),
+		OpenAPISpecRaw:        append([]byte(nil), params.SpecRaw...),
+		OpenAPISourceURL:      sourceURL,
+		OpenAPIBaseURL:        previous.OpenAPIBaseURL,
+		OpenAPISecurityScheme: previous.OpenAPISecurityScheme,
+		DisabledTools:         newDisabled,
+	}
+	g.persistBackend(id, next)
+	g.NotifyToolsChanged()
+	return nil
+}
+
+// warnRemovedEnabledTools logs a warning for each operation that was enabled
+// on the prior spec but no longer present in the new one — the operator may
+// have intended to disable them earlier and might want to chase the upstream
+// removal as a quality-of-service signal.
+func warnRemovedEnabledTools(logger interface {
+	Warn(string, ...any)
+}, id string, prev, next *openapi.Spec, prevDisabled []string) {
+	if prev == nil || next == nil {
+		return
+	}
+	disabled := make(map[string]struct{}, len(prevDisabled))
+	for _, name := range prevDisabled {
+		disabled[name] = struct{}{}
+	}
+	nextNames := make(map[string]struct{}, len(next.Operations))
+	for i := range next.Operations {
+		nextNames[next.Operations[i].Name] = struct{}{}
+	}
+	nextByFingerprint := make(map[string]struct{}, len(next.Operations))
+	for i := range next.Operations {
+		nextByFingerprint[next.Operations[i].Fingerprint] = struct{}{}
+	}
+	for i := range prev.Operations {
+		op := &prev.Operations[i]
+		if _, isDisabled := disabled[op.Name]; isDisabled {
+			continue
+		}
+		if _, stillThere := nextNames[op.Name]; stillThere {
+			continue
+		}
+		if _, renamed := nextByFingerprint[op.Fingerprint]; renamed {
+			continue
+		}
+		logger.Warn("openapi reimport removed an enabled tool",
+			"id", id,
+			"tool", op.Name,
+			"method", op.Method,
+			"path", op.Path,
+		)
+	}
 }
