@@ -414,8 +414,8 @@ func (a *API) handlePatchBackend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 		return
 	}
-	if update.Enabled == nil && update.Sandbox == nil && update.Workspace == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled, sandbox, or workspace is required"})
+	if update.Enabled == nil && update.Sandbox == nil && update.Workspace == nil && update.DisabledTools == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at least one of enabled, sandbox, workspace, or disabled_tools is required"})
 		return
 	}
 	if err := config.ValidateSandboxConfig(update.Sandbox); err != nil {
