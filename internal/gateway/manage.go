@@ -78,6 +78,16 @@ func (g *Gateway) AddBackend(ctx context.Context, id string, cfg admin.BackendCo
 		return fmt.Errorf("backend %q already exists", id)
 	}
 
+	// Binary backend: hash-discriminated. We persist a binary-typed entry,
+	// register the credential (rarely used for binary backends but the
+	// machinery is harmless), and dispatch through the bridge with the
+	// binstore mount synthesized. The flow mirrors the stdio path below
+	// except the command is the in-container binary path, never an
+	// arbitrary host command.
+	if cfg.BinaryHash != "" {
+		return g.addBinaryBackend(ctx, id, cfg)
+	}
+
 	sc := &config.ServerConfig{
 		ID:        id,
 		Namespace: id,
@@ -159,6 +169,68 @@ func (g *Gateway) AddBackend(ctx context.Context, id string, cfg admin.BackendCo
 	// Persist backend config for restart survival.
 	g.persistBackend(id, persisted)
 
+	return nil
+}
+
+// addBinaryBackend handles the BinaryHash-discriminated AddBackend path. It
+// validates the hash against the configured binstore, builds the persisted
+// entry (with all the metadata the admin UI surfaced — args, source URL,
+// archive path), and dispatches through the same bridge path the
+// reconnect-on-restart code uses, so a freshly created backend and a
+// post-restart one go through exactly one spawn implementation.
+func (g *Gateway) addBinaryBackend(ctx context.Context, id string, cfg admin.BackendConfig) error { //nolint:gocritic // value receiver matches AddBackend
+	if g.binaryStore == nil {
+		return fmt.Errorf("binary backend %q: binary store is not configured", id)
+	}
+	entry, err := g.binaryStore.Stat(cfg.BinaryHash)
+	if err != nil {
+		return fmt.Errorf("binary backend %q: hash not found in binstore (upload or fetch first): %w", id, err)
+	}
+	name := strings.TrimSpace(cfg.BinaryName)
+	if name == "" {
+		name = entry.Name
+	}
+	sandbox := config.NormalizeSandboxConfig(cfg.Sandbox, config.SandboxProfileDefault)
+
+	// Build the persisted record up front. We persist before connecting so
+	// a crash mid-spawn leaves a recoverable entry the operator can re-try
+	// without re-uploading; on connect failure we tear it down.
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	pb := &persistedBackend{
+		Env:               cfg.Env,
+		Enabled:           boolPtr(enabled),
+		Sandbox:           &sandbox,
+		Workspace:         config.NormalizeWorkspaceConfig(cfg.Workspace),
+		BinaryHash:        cfg.BinaryHash,
+		BinaryName:        name,
+		BinarySource:      cfg.BinarySource,
+		BinarySourceURL:   cfg.BinarySourceURL,
+		BinaryArchivePath: "",
+		BinaryArgs:        append([]string(nil), cfg.BinaryArgs...),
+		Runtime:           cfg.Runtime,
+	}
+	if err := g.validateBackendWorkspaceBinding(pb.Workspace); err != nil {
+		return err
+	}
+
+	g.registerAndPersistAdminCredential(id, cfg.Credential)
+
+	if !enabled {
+		g.persistBackend(id, pb)
+		g.logger.Info("persisted disabled binary backend", "id", id, "hash", entry.Hash)
+		return nil
+	}
+
+	if err := g.reconnectPersistedBinaryBackend(ctx, id, pb); err != nil {
+		g.credStore.Unregister(id)
+		g.deletePersistedCredential(id)
+		return err
+	}
+	g.persistBackend(id, pb)
+	g.NotifyToolsChanged()
 	return nil
 }
 
@@ -725,6 +797,122 @@ func (g *Gateway) ConnectOpenAPIBackend(ctx context.Context, id string, spec *op
 	metrics.IncActiveBackends()
 	_ = ctx // ctx reserved for future async hooks (no upstream call needed at connect time)
 	return nil
+}
+
+// reconnectPersistedBinaryBackend re-spawns a binary backend on gateway
+// startup or admin reconnect. The binstore is asked to resolve the persisted
+// hash to a host path; we then synthesize the SandboxMount and dispatch
+// through the existing bridge-spawn path so all the stdio plumbing
+// (workspace, scopes, audit) runs unchanged.
+//
+// Missing hash is a recoverable error: we log a clear message and return an
+// error rather than crashing, so the gateway keeps booting and the operator
+// can re-upload to recover. The backend stays listed as disconnected in
+// Status() because the entry is still in KV but never made it into
+// g.backends.
+//
+// Re-fetch / replace-upload flow (mirror of OpenAPI reimport): out of scope
+// for v1; the persisted BinarySource/SourceURL/ArchivePath fields carry the
+// information a later task will need to implement it.
+func (g *Gateway) reconnectPersistedBinaryBackend(ctx context.Context, id string, pb *persistedBackend) error {
+	if !pb.isBinary() {
+		return fmt.Errorf("backend %q is not a binary backend", id)
+	}
+	if g.binaryStore == nil {
+		return fmt.Errorf("binary backend %q cannot start: binary store is not configured", id)
+	}
+	entry, err := g.binaryStore.Stat(pb.BinaryHash)
+	if err != nil {
+		g.logger.Warn("binary backend hash missing from store; leaving disconnected",
+			"id", id,
+			"hash", pb.BinaryHash,
+			"error", err,
+		)
+		return fmt.Errorf("binary backend %q: hash %s not in binstore (re-upload to recover)", id, pb.BinaryHash)
+	}
+
+	mountTarget := g.BinaryMount()
+	containerPath := joinContainerPath(mountTarget, entry.Hash, entry.Name)
+
+	// Sandbox carries the persisted profile + the synthesized read-only
+	// mount of the binstore root. Operator-supplied mounts are preserved;
+	// the binstore mount is appended last so a caller-supplied mount with
+	// the same target (rare) takes precedence.
+	sandbox := pb.sandboxConfig()
+	sandbox.Mounts = appendBinaryMount(sandbox.Mounts, g.binaryStore.Root(), mountTarget)
+
+	sc := &config.ServerConfig{
+		ID:            id,
+		Namespace:     id,
+		Env:           pb.Env,
+		BridgeManaged: pb.BridgeManaged,
+		BridgeRuntime: pb.Runtime,
+		Enabled:       pb.isEnabled(),
+		Sandbox:       sandbox,
+		Workspace:     pb.workspaceConfig(),
+		Timeout:       config.Duration(30 * time.Second),
+	}
+	sc.OriginalCommand = append([]string{containerPath}, pb.BinaryArgs...)
+	var connectErr error
+	if g.bridgeURL != "" {
+		spawned, spawnErr := g.spawnBridgeBackend(ctx, id, containerPath, pb.BinaryArgs, pb.Env, pb.Runtime, &sc.Sandbox, sc.Workspace)
+		if spawnErr != nil {
+			return fmt.Errorf("spawn binary backend %q via bridge: %w", id, spawnErr)
+		}
+		sc.URL = spawned.Endpoint
+		sc.BridgeManaged = true
+		pb.URL = sc.URL
+		pb.BridgeManaged = true
+		connectErr = g.connectBackendWithBridgeRetry(ctx, sc, &spawned, id, containerPath, pb.BinaryArgs, pb.Env, pb.Runtime, &sc.Sandbox, sc.Workspace)
+	} else {
+		if err := g.stdioUnavailableError(); err != nil {
+			return err
+		}
+		sc.Command = append([]string{containerPath}, pb.BinaryArgs...)
+		connectErr = g.ConnectBackend(ctx, sc)
+	}
+	if connectErr != nil {
+		return connectErr
+	}
+	// Stamp transport + metadata on the live backend record so Status()
+	// can render the binary surface without re-reading KV. The ConnectBackend
+	// path already set Transport to "mcp"/"stdio"; the override here is
+	// load-bearing.
+	g.mu.Lock()
+	if b, ok := g.backends[id]; ok {
+		b.Transport = "binary"
+		b.BinaryHash = entry.Hash
+		b.BinaryName = entry.Name
+		b.BinarySize = entry.Size
+		b.BinarySource = pb.BinarySource
+		b.BinarySourceURL = pb.BinarySourceURL
+	}
+	g.mu.Unlock()
+	return nil
+}
+
+// joinContainerPath assembles the in-sandbox path of a binstore entry.
+// Container paths are forward-slash regardless of host OS — the sandbox
+// container runs Linux.
+func joinContainerPath(mountTarget, hash, name string) string {
+	target := strings.TrimRight(mountTarget, "/")
+	return target + "/" + hash + "/" + name
+}
+
+// appendBinaryMount adds the read-only binstore mount to the sandbox mount
+// list. The mount is appended (rather than prepended) so an operator-supplied
+// mount with the same target — should one ever exist — wins; we already
+// reject docker.sock and /proc style targets via ValidateSandboxConfig.
+func appendBinaryMount(existing []config.SandboxMount, source, target string) []config.SandboxMount {
+	readOnly := true
+	mount := config.SandboxMount{Source: source, Target: target, ReadOnly: &readOnly}
+	for _, m := range existing {
+		if m.Target == target && m.Source == source {
+			// Already present; preserve existing list to keep idempotent.
+			return existing
+		}
+	}
+	return append(append([]config.SandboxMount(nil), existing...), mount)
 }
 
 // reconnectPersistedOpenAPIBackend rebuilds an OpenAPI backend from its

@@ -9,6 +9,9 @@ import type {
   AddBackendResponse,
   AuthStatus,
   Backend,
+  BinaryFetchRequest,
+  BinaryFetchResponse,
+  BinaryUploadResponse,
   CredentialInput,
   OpenAPIPreviewResponse,
   OpenAPISaveBody,
@@ -330,7 +333,7 @@ function ServerRow({
   );
 }
 
-type AddMode = "choose" | "command" | "openapi";
+type AddMode = "choose" | "command" | "openapi" | "binary";
 
 function AddBackend({
   onConnecting,
@@ -505,6 +508,17 @@ function AddBackend({
   if (mode === "openapi") {
     return (
       <AddOpenAPI
+        onConnecting={onConnecting}
+        onDone={onDone}
+        onCancel={onCancel}
+        onBack={() => setMode("choose")}
+      />
+    );
+  }
+
+  if (mode === "binary") {
+    return (
+      <AddBinary
         onConnecting={onConnecting}
         onDone={onDone}
         onCancel={onCancel}
@@ -937,7 +951,7 @@ function AddBackendChooser({
   onPick,
   onCancel,
 }: {
-  onPick: (mode: "command" | "openapi") => void;
+  onPick: (mode: "command" | "openapi" | "binary") => void;
   onCancel: () => void;
 }) {
   return (
@@ -964,6 +978,18 @@ function AddBackendChooser({
           <div class="connect-tile-desc">
             paste a spec URL or upload a file. prism imports operations
             as MCP tools — pick which ones go live before saving.
+          </div>
+        </button>
+        <button
+          type="button"
+          class="connect-tile"
+          onClick={() => onPick("binary")}
+        >
+          <div class="connect-tile-title">prism-managed binary</div>
+          <div class="connect-tile-desc">
+            upload a Linux x86_64 binary or fetch one from a URL. prism
+            owns the artifact and runs it inside the existing sandbox —
+            no host install required.
           </div>
         </button>
       </div>
@@ -1638,4 +1664,416 @@ function buildOpenAPICredential(
     };
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Binary add flow
+// ---------------------------------------------------------------------------
+
+type BinarySourceMode = "upload" | "url";
+
+// uploadBinary posts the file to /binaries/upload as multipart. We bypass
+// postJSON because the helper sets Content-Type: application/json which would
+// break multipart form encoding.
+async function uploadBinary(
+  file: File,
+  archiveBinaryPath: string,
+): Promise<BinaryUploadResponse> {
+  const form = new FormData();
+  form.append("file", file);
+  if (archiveBinaryPath.trim()) {
+    form.append("archive_binary_path", archiveBinaryPath.trim());
+  }
+  const res = await fetch("/api/v1/binaries/upload", {
+    method: "POST",
+    body: form,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && "error" in parsed) {
+        msg = String((parsed as { error: unknown }).error);
+      }
+    } catch {
+      if (text.trim()) msg = text.trim();
+    }
+    throw new Error(msg);
+  }
+  return JSON.parse(text) as BinaryUploadResponse;
+}
+
+function AddBinary({
+  onConnecting,
+  onDone,
+  onCancel,
+  onBack,
+}: {
+  onConnecting: (id: string, command: string) => void;
+  onDone: () => void;
+  onCancel: () => void;
+  onBack: () => void;
+}) {
+  const [sourceMode, setSourceMode] = useState<BinarySourceMode>("upload");
+  const [id, setId] = useState("");
+  const [command, setCommand] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [url, setUrl] = useState("");
+  const [archivePath, setArchivePath] = useState("");
+  const [staged, setStaged] = useState<BinaryUploadResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = () => {
+    setStaged(null);
+    setError(null);
+  };
+
+  const stage = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      if (sourceMode === "upload") {
+        if (!file) {
+          setError("pick a binary or archive file");
+          return;
+        }
+        const resp = await uploadBinary(file, archivePath);
+        setStaged(resp);
+      } else {
+        const trimmed = url.trim();
+        if (!trimmed) {
+          setError("paste a download URL");
+          return;
+        }
+        const req: BinaryFetchRequest = { url: trimmed };
+        if (archivePath.trim()) {
+          req.archive_binary_path = archivePath.trim();
+        }
+        const resp = await postJSON<BinaryFetchResponse>(
+          "/binaries/fetch",
+          req,
+        );
+        setStaged(resp);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async () => {
+    if (!staged) {
+      setError("upload or fetch a binary first");
+      return;
+    }
+    const trimmedID = id.trim();
+    if (!trimmedID) {
+      setError("backend id is required");
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      // The "MCP command" field is parsed shell-style on save; first token
+      // is the display/name (informational only — the gateway always runs
+      // /opt/prism/bin/<hash>/<name>) and the rest become argv.
+      const tokens = splitCommandTokens(command);
+      const args = tokens.length > 1 ? tokens.slice(1) : tokens.length === 1 ? tokens : [];
+      const body: AddBackendBody = {
+        binary_hash: staged.hash,
+        binary_args: args,
+        binary_name: staged.name,
+        binary_source: staged.source,
+      };
+      if (staged.source_url) {
+        body.binary_source_url = staged.source_url;
+      }
+      const res = await postJSON<AddBackendResponse>(
+        `/backends/${encodeURIComponent(trimmedID)}`,
+        body,
+      );
+      const displayCmd = `binary: ${staged.name} (${staged.hash.slice(0, 12)}…)`;
+      if (res.status === "connecting") {
+        onConnecting(trimmedID, displayCmd);
+        onDone();
+        return;
+      }
+      onConnecting(trimmedID, displayCmd);
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!staged) {
+    return (
+      <div class="card form-card">
+        <div class="form-card-title">
+          <span>connect a prism-managed binary</span>
+          <button
+            type="button"
+            class="section-btn"
+            style="margin-left:auto"
+            onClick={onBack}
+          >
+            ← back
+          </button>
+        </div>
+        <BinarySourceTabs
+          mode={sourceMode}
+          onChange={(next) => {
+            setSourceMode(next);
+            setError(null);
+            setFile(null);
+            setUrl("");
+          }}
+        />
+        <div class="modal-section">
+          <span class="hint-text">
+            Linux x86_64 binary required. Static builds recommended
+            (CGO_ENABLED=0). Archives: .zip, .tar.gz.
+          </span>
+        </div>
+        {sourceMode === "upload" && (
+          <div class="modal-section">
+            <label class="config-label">upload binary or archive</label>
+            <div class="inline-form">
+              <input
+                type="file"
+                accept=".zip,.tar,.tar.gz,.tgz,application/zip,application/gzip,application/x-tar,application/octet-stream"
+                onChange={(e) => {
+                  const target = e.target as HTMLInputElement;
+                  setFile(target.files && target.files[0] ? target.files[0] : null);
+                }}
+              />
+              {file && <span class="hint-text">selected: {file.name}</span>}
+            </div>
+          </div>
+        )}
+        {sourceMode === "url" && (
+          <div class="modal-section">
+            <label class="config-label">download URL</label>
+            <input
+              type="text"
+              class="config-input"
+              value={url}
+              spellcheck={false}
+              placeholder="https://github.com/owner/repo/releases/download/v1.0/cymbal-linux-amd64.tar.gz"
+              onInput={(e) => setUrl((e.target as HTMLInputElement).value)}
+            />
+          </div>
+        )}
+        <div class="modal-section">
+          <label class="config-label">
+            archive binary path <span class="hint-text">(optional)</span>
+          </label>
+          <input
+            type="text"
+            class="config-input"
+            value={archivePath}
+            spellcheck={false}
+            placeholder="bin/cymbal — required only for archives with multiple ELF binaries"
+            onInput={(e) => setArchivePath((e.target as HTMLInputElement).value)}
+          />
+        </div>
+        <div class="form-actions">
+          <button class="save-btn" onClick={stage} disabled={busy}>
+            {busy
+              ? sourceMode === "upload"
+                ? "uploading…"
+                : "fetching…"
+              : sourceMode === "upload"
+                ? "upload"
+                : "fetch"}
+          </button>
+          <button class="cancel-btn" onClick={onCancel} disabled={busy}>
+            cancel
+          </button>
+          {error && <span class="error-text">{error}</span>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div class="card form-card">
+      <div class="form-card-title">
+        <span>review binary · {staged.name}</span>
+        <button
+          type="button"
+          class="section-btn"
+          style="margin-left:auto"
+          onClick={reset}
+        >
+          ← change source
+        </button>
+      </div>
+      <div class="openapi-preview-meta">
+        <MetaPair label="name" value={staged.name} mono />
+        <MetaPair label="sha256" value={staged.hash.slice(0, 16) + "…"} mono />
+        <MetaPair label="size" value={formatBytes(staged.size)} />
+        <MetaPair
+          label="source"
+          value={staged.source === "url" ? "url" : "upload"}
+        />
+        {staged.detected_binary_path && (
+          <MetaPair
+            label="archive entry"
+            value={staged.detected_binary_path}
+            mono
+          />
+        )}
+      </div>
+      <div class="modal-section">
+        <label class="config-label">backend id</label>
+        <input
+          type="text"
+          class="config-input"
+          value={id}
+          spellcheck={false}
+          placeholder="e.g. cymbal"
+          onInput={(e) => setId((e.target as HTMLInputElement).value)}
+        />
+      </div>
+      <div class="modal-section">
+        <label class="config-label">
+          MCP command <span class="hint-text">(optional)</span>
+        </label>
+        <input
+          type="text"
+          class="config-input"
+          value={command}
+          spellcheck={false}
+          placeholder="recoil mcp"
+          onInput={(e) => setCommand((e.target as HTMLInputElement).value)}
+        />
+        <span class="hint-text">
+          Parsed shell-style. First token (when 2+ supplied) is treated as the
+          informational binary name; the rest become argv. The actual
+          executable is always{" "}
+          <code>/opt/prism/bin/{staged.hash.slice(0, 8)}…/{staged.name}</code>.
+        </span>
+      </div>
+      <div class="form-actions">
+        <button class="save-btn" onClick={save} disabled={busy}>
+          {busy ? "saving…" : "save backend"}
+        </button>
+        <button class="cancel-btn" onClick={onCancel} disabled={busy}>
+          cancel
+        </button>
+        {error && <span class="error-text">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function BinarySourceTabs({
+  mode,
+  onChange,
+}: {
+  mode: BinarySourceMode;
+  onChange: (next: BinarySourceMode) => void;
+}) {
+  const tabs: { id: BinarySourceMode; label: string }[] = [
+    { id: "upload", label: "upload" },
+    { id: "url", label: "url" },
+  ];
+  return (
+    <div class="openapi-source-tabs" role="tablist">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          role="tab"
+          aria-selected={mode === t.id}
+          class={
+            mode === t.id
+              ? "openapi-source-tab openapi-source-tab-active"
+              : "openapi-source-tab"
+          }
+          onClick={() => onChange(t.id)}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// splitCommandTokens is a small shell-style tokenizer mirroring the Go
+// admin.ParseBinaryCommand helper. It handles whitespace splitting and basic
+// single/double-quote literals; backslash escapes within double quotes are
+// supported. The server re-tokenizes the same input as a defense-in-depth
+// check, so the client-side split is just for UX (preview/display).
+function splitCommandTokens(input: string): string[] {
+  const trimmed = input.trim();
+  if (!trimmed) return [];
+  const out: string[] = [];
+  let cur = "";
+  let inSingle = false;
+  let inDouble = false;
+  let escape = false;
+  let started = false;
+  const flush = () => {
+    if (started) {
+      out.push(cur);
+      cur = "";
+      started = false;
+    }
+  };
+  for (const ch of trimmed) {
+    if (escape) {
+      cur += ch;
+      escape = false;
+      started = true;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") {
+        inSingle = false;
+      } else {
+        cur += ch;
+      }
+      continue;
+    }
+    if (inDouble) {
+      if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inDouble = false;
+      } else {
+        cur += ch;
+      }
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      started = true;
+    } else if (ch === '"') {
+      inDouble = true;
+      started = true;
+    } else if (ch === "\\") {
+      escape = true;
+      started = true;
+    } else if (ch === " " || ch === "\t") {
+      flush();
+    } else {
+      cur += ch;
+      started = true;
+    }
+  }
+  flush();
+  return out;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }

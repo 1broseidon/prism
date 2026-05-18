@@ -25,6 +25,7 @@ import (
 	"github.com/1broseidon/prism/internal/audit"
 	"github.com/1broseidon/prism/internal/auth"
 	"github.com/1broseidon/prism/internal/authserver"
+	"github.com/1broseidon/prism/internal/binstore"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/gateway"
 	"github.com/1broseidon/prism/internal/metrics"
@@ -90,6 +91,8 @@ func runServe() {
 	// Give the gateway access to the KV store for persisting runtime configs.
 	gw.SetStore(kvStore)
 	initWorkspaceBridge(gw, kvStore, logger)
+	binStore := setupBinaryStore(logger)
+	gw.SetBinaryStore(gatewayBinaryStore(binStore))
 	localBridge, err := configureStdioSpawning(ctx, cfg, gw, logger)
 	if err != nil {
 		logger.Error("failed to configure stdio spawning", "error", err)
@@ -206,6 +209,7 @@ func runServe() {
 	adminAPI := admin.NewAPI(func() any { return gw.Status() }, gw, agentsFn, removeFn, removeStaleFn, eventsFn, agentMgr, groupMgr, oauthCallback, adminAuthHolder)
 	adminAPI.SetBackendPolicyTraceProvider(&backendPolicyTraceProvider{gw: gw, srv: authSrv})
 	adminAPI.SetWorkspaceReversePolicyLookup(&workspaceReverseLookup{srv: authSrv})
+	adminAPI.SetBinaryStore(adminBinaryStore(binStore))
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -294,6 +298,69 @@ func syncAdminAuthRedirectFromNetwork(kv store.Store, cfg *config.AdminAuthConfi
 // Audit logger is wired separately in main() so it can be shared with the admin API.
 func setupGateway(logger *slog.Logger) *gateway.Gateway {
 	return gateway.New(logger)
+}
+
+// setupBinaryStore initializes the binstore under $PRISM_DATA_DIR/binaries
+// (or ~/.prism/binaries when PRISM_DATA_DIR is unset). Returns nil — and
+// logs — if the store can't be created; the gateway treats nil as "binary
+// backends unavailable" and the admin endpoints return 503.
+func setupBinaryStore(logger *slog.Logger) *binstore.Store {
+	root := strings.TrimSpace(os.Getenv("PRISM_BINSTORE_DIR"))
+	if root == "" {
+		if dataDir := strings.TrimSpace(os.Getenv("PRISM_DATA_DIR")); dataDir != "" {
+			root = filepath.Join(dataDir, "binaries")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				logger.Warn("cannot determine home dir for binstore — binary backends disabled", "error", err)
+				return nil
+			}
+			root = filepath.Join(home, ".prism", "binaries")
+		}
+	}
+	s, err := binstore.New(root, binstore.Config{})
+	if err != nil {
+		logger.Warn("failed to initialize binstore", "root", root, "error", err)
+		return nil
+	}
+	logger.Info("binary store ready", "root", root)
+	return s
+}
+
+// binaryStoreAdapter bridges the binstore.Store concrete type to the
+// gateway.BinaryStore interface. The gateway uses a narrow interface so it
+// doesn't pull in binstore as a transitive dependency (the test path mocks
+// the interface directly).
+type binaryStoreAdapter struct{ inner *binstore.Store }
+
+func (a binaryStoreAdapter) Root() string { return a.inner.Root() }
+
+func (a binaryStoreAdapter) Stat(hash string) (gateway.BinaryEntry, error) {
+	entry, err := a.inner.Stat(hash)
+	if err != nil {
+		return gateway.BinaryEntry{}, err
+	}
+	return gateway.BinaryEntry{Hash: entry.Hash, Name: entry.Name, Size: entry.Size}, nil
+}
+
+func (a binaryStoreAdapter) Exists(hash string) bool { return a.inner.Exists(hash) }
+
+// gatewayBinaryStore returns the gateway-side store interface, or nil when no
+// store is available. Keeps runServe linear (no nil-check branch).
+func gatewayBinaryStore(s *binstore.Store) gateway.BinaryStore {
+	if s == nil {
+		return nil
+	}
+	return binaryStoreAdapter{inner: s}
+}
+
+// adminBinaryStore returns the admin-side store interface, or nil when no
+// store is available. Admin handlers gate on nil internally and return 503.
+func adminBinaryStore(s *binstore.Store) admin.BinaryStore {
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 func connectConfigBackends(ctx context.Context, gw *gateway.Gateway, cfg *config.Loaded, logger *slog.Logger) {

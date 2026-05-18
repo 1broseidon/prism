@@ -96,6 +96,15 @@ export interface Backend {
   // otherwise. The admin layer doesn't surface a separate source URL on the
   // backend list, so the UI re-prompts for a URL or file on re-import.
   transport?: string;
+  // Binary backend metadata (only present when this entry was added as a
+  // prism-managed binary). The hash uniquely identifies the artifact in the
+  // binstore; name is the leaf filename; source records "upload" or "url"
+  // so the UI can render the right re-fetch affordance later.
+  binary_hash?: string;
+  binary_name?: string;
+  binary_size?: number;
+  binary_source?: "upload" | "url" | string;
+  binary_source_url?: string;
 }
 
 export interface BackendRateLimit {
@@ -189,7 +198,34 @@ export interface AddBackendBody {
   // required for providers without DCR (GitHub, most IdPs).
   oauth_client_id?: string;
   oauth_client_secret?: string;
+  // Binary backend fields. binary_hash is the discriminator; the admin
+  // backend resolves it through the binstore on add. binary_args is the
+  // parsed argv from the operator's MCP-command field; binary_name is the
+  // display name used to build /opt/prism/bin/<hash>/<name>.
+  binary_hash?: string;
+  binary_args?: string[];
+  binary_name?: string;
+  binary_source?: "upload" | "url";
+  binary_source_url?: string;
 }
+
+// POST /binaries/upload response and POST /binaries/fetch request/response.
+export interface BinaryUploadResponse {
+  hash: string;
+  name: string;
+  size: number;
+  detected_binary_path?: string;
+  source: "upload" | "url";
+  source_url?: string;
+  archive_binary_path?: string;
+}
+
+export interface BinaryFetchRequest {
+  url: string;
+  archive_binary_path?: string;
+}
+
+export type BinaryFetchResponse = BinaryUploadResponse;
 
 export interface BackendUpdateBody {
   enabled?: boolean;

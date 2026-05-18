@@ -74,6 +74,20 @@ type BackendConfig struct {
 	// pre-registers prism with the provider and pastes the values here.
 	OAuthClientID     string `json:"oauth_client_id,omitempty"`
 	OAuthClientSecret string `json:"oauth_client_secret,omitempty"`
+
+	// Binary backend fields. BinaryHash discriminates: when non-empty the
+	// gateway treats this as a prism-managed binary backend, mounts the
+	// binstore read-only into the sandbox, and ignores command/url/openapi.
+	// BinaryArgs is the parsed argv (shell-style split happens admin-side
+	// from the operator's textbox); BinaryName is the operator's display
+	// name for the binary (also used as the in-container leaf path).
+	// BinarySource carries "upload" or "url" so the UI can render the right
+	// re-fetch affordance later.
+	BinaryHash      string   `json:"binary_hash,omitempty"`
+	BinaryArgs      []string `json:"binary_args,omitempty"`
+	BinaryName      string   `json:"binary_name,omitempty"`
+	BinarySource    string   `json:"binary_source,omitempty"`
+	BinarySourceURL string   `json:"binary_source_url,omitempty"`
 }
 
 // BackendUpdate is the PATCH /backends/{id} body for operational settings.
@@ -287,6 +301,34 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) { //nolin
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if cfg.BinaryHash != "" {
+		// Binary mode is mutually exclusive with the existing transports.
+		// We reject early so an ambiguous payload doesn't half-attach a
+		// backend; the gateway re-checks the same invariants but the admin
+		// trust boundary is here.
+		if cfg.Command != "" || cfg.URL != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "binary_hash cannot be combined with command or url"})
+			return
+		}
+		if !isHexHash(cfg.BinaryHash) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "binary_hash must be a 64-char hex sha256"})
+			return
+		}
+		if a.binaryStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "binary store not configured"})
+			return
+		}
+		entry, err := a.binaryStore.Stat(cfg.BinaryHash)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "binary_hash not found in store; upload or fetch first"})
+			return
+		}
+		// Fill in BinaryName from the store if the operator left it blank
+		// — keeps the backend record self-describing on restart.
+		if strings.TrimSpace(cfg.BinaryName) == "" {
+			cfg.BinaryName = entry.Name
+		}
+	}
 
 	// If a URL is provided with no explicit credential, probe for OAuth.
 	if cfg.URL != "" && cfg.Credential == nil {
@@ -350,6 +392,9 @@ func (a *API) handleAddBackend(w http.ResponseWriter, r *http.Request) { //nolin
 func shouldAddBackendAsync(cfg *BackendConfig) bool {
 	if cfg == nil {
 		return false
+	}
+	if cfg.BinaryHash != "" {
+		return true
 	}
 	return cfg.Command != "" && cfg.URL == ""
 }

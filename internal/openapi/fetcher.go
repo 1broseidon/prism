@@ -74,7 +74,10 @@ func NewFetcher(cfg FetcherConfig) *Fetcher {
 			Transport: transport,
 			// We allow redirects but re-apply the SSRF guard on each hop
 			// (the dialer runs on every connection, so we are covered).
-			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 5 {
+					return errors.New("stopped after 5 redirects")
+				}
 				if req.URL == nil {
 					return errors.New("redirect with nil URL")
 				}

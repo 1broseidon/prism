@@ -187,6 +187,7 @@ function StatusPill({ backend }: { backend: Backend }) {
 // HTTP internally — the user thinks of them as commands, not URLs.
 function isStdio(backend: Backend): boolean {
   if (isOpenAPI(backend)) return false;
+  if (isBinary(backend)) return false;
   return backend.bridge_managed === true || !backend.url;
 }
 
@@ -195,6 +196,13 @@ function isStdio(backend: Backend): boolean {
 // HTTP MCP backend; the URL is the spec's base URL.
 function isOpenAPI(backend: Backend): boolean {
   return backend.transport === "openapi";
+}
+
+// Binary backends are prism-managed: an uploaded ELF mounted into the
+// existing sandbox. The hash + name + size go in the meta row instead of a
+// URL.
+function isBinary(backend: Backend): boolean {
+  return backend.transport === "binary" || !!backend.binary_hash;
 }
 
 // METHOD_FROM_TOOL extracts an HTTP method from a tool name when an
@@ -213,11 +221,18 @@ function methodFromToolName(namespacedName: string, prefix: string): string {
 function MetaRow({ backend }: { backend: Backend }) {
   const stdio = isStdio(backend);
   const openapi = isOpenAPI(backend);
+  const binary = isBinary(backend);
   const toolCount = backend.tools?.length ?? 0;
   const credType = backend.credential?.configured
     ? backend.credential.type
     : "none";
-  const transportLabel = openapi ? "openapi" : stdio ? "stdio" : "http";
+  const transportLabel = binary
+    ? "binary"
+    : openapi
+      ? "openapi"
+      : stdio
+        ? "stdio"
+        : "http";
 
   return (
     <div class="meta-row">
@@ -232,7 +247,23 @@ function MetaRow({ backend }: { backend: Backend }) {
         // extension can carry the original URL through.
         <MetaItem label="spec source" value="file (uploaded)" />
       )}
-      {!openapi && !stdio && backend.url && (
+      {binary && backend.binary_name && (
+        <MetaItem label="binary" value={backend.binary_name} mono />
+      )}
+      {binary && backend.binary_hash && (
+        <MetaItem
+          label="sha256"
+          value={backend.binary_hash.slice(0, 12) + "…"}
+          mono
+        />
+      )}
+      {binary && backend.binary_size != null && (
+        <MetaItem label="size" value={fmtBytes(backend.binary_size)} />
+      )}
+      {binary && backend.binary_source && (
+        <MetaItem label="source" value={backend.binary_source} />
+      )}
+      {!openapi && !stdio && !binary && backend.url && (
         <MetaItem label="endpoint" value={backend.url} mono />
       )}
       {stdio && backend.runtime && (

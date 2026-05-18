@@ -79,6 +79,13 @@ type API struct {
 	// HTTP client. Nil in production — handlers fall back to the default
 	// SSRF-guarded fetcher.
 	openAPIFetcher fetcherFactory
+	// binaryStore owns the content-addressed binary directory. Nil in test
+	// builds or in modes that don't enable binary backends; handlers return
+	// 503 when unset.
+	binaryStore BinaryStore
+	// binaryFetcher is a test hook mirroring openAPIFetcher for the
+	// POST /binaries/fetch path. Nil in production.
+	binaryFetcher binaryFetcherFactory
 }
 
 // SetBackendPolicyTraceProvider wires the per-agent resolution trace provider
@@ -236,6 +243,15 @@ func (a *API) registerAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
 	mux.Handle("PATCH /backends/", a.admin(http.HandlerFunc(a.handlePatchBackend)))
 	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
+
+	// Binary backend ingestion. Upload (multipart) and URL-fetch routes both
+	// land an ELF in the binstore and return its hash; the operator then
+	// passes that hash to POST /backends/{id} via binary_hash. Metadata
+	// lookup (GET /binaries/{hash}) lets the UI verify a hash survives
+	// restart without re-uploading.
+	mux.Handle("POST /binaries/upload", a.admin(http.HandlerFunc(a.handleBinaryUpload)))
+	mux.Handle("POST /binaries/fetch", a.admin(http.HandlerFunc(a.handleBinaryFetch)))
+	mux.Handle("GET /binaries/", a.session(http.HandlerFunc(a.handleBinaryGet)))
 }
 
 // handleBackendPost dispatches POST /backends/{id} and

@@ -65,6 +65,14 @@ type Backend struct {
 	// mutex is held + the backend is still in the map, so no new Adds can
 	// race with the post-delete Wait.
 	inflight sync.WaitGroup
+	// Binary-backend metadata captured at attach time. Only populated when
+	// Transport == "binary"; surfaced through BackendStatus so the admin UI
+	// can render hash + size without re-reading KV.
+	BinaryHash      string
+	BinaryName      string
+	BinarySize      int64
+	BinarySource    string
+	BinarySourceURL string
 }
 
 // BackendToolInfo is the per-tool metadata returned in BackendStatus.
@@ -124,6 +132,8 @@ type Gateway struct {
 	stdioDisabled  string
 	network        *networkRuntime
 	workspace      *workspaceBridgeManager
+	binaryStore    BinaryStore // optional: enables prism-managed binary backends
+	binaryMount    string      // sandbox mount target for binstore root (default /opt/prism/bin)
 }
 
 // New creates a new Gateway.
@@ -241,6 +251,54 @@ func (g *Gateway) SetStore(s store.Store) {
 	g.kvStore = s
 }
 
+// BinaryStore is the slice of binstore.Store the gateway needs to resolve
+// hashes when spawning a binary backend. Kept narrow so tests can plug in a
+// fake without depending on the on-disk implementation.
+type BinaryStore interface {
+	Root() string
+	Stat(hash string) (BinaryEntry, error)
+	Exists(hash string) bool
+}
+
+// BinaryEntry is the gateway's view of a stored binary. Mirrors
+// binstore.Entry but lives in this package so the interface above doesn't
+// need to depend on the binstore types directly (avoids a circular import in
+// tests that mock the store).
+type BinaryEntry struct {
+	Hash string
+	Name string
+	Size int64
+}
+
+// SetBinaryStore wires the content-addressed binary store. The store's root
+// directory is bind-mounted into every binary-backend sandbox at the path
+// returned by BinaryMount() (default /opt/prism/bin). Optional — without it
+// the binary backend code paths return clear errors instead of attempting to
+// resolve a hash that has nowhere to live.
+func (g *Gateway) SetBinaryStore(s BinaryStore) {
+	g.binaryStore = s
+	if g.binaryMount == "" {
+		g.binaryMount = "/opt/prism/bin"
+	}
+}
+
+// BinaryMount returns the in-sandbox target path of the binstore mount.
+// Defaults to /opt/prism/bin when SetBinaryStore has been called and the
+// caller hasn't overridden the target via SetBinaryMount.
+func (g *Gateway) BinaryMount() string {
+	if g.binaryMount == "" {
+		return "/opt/prism/bin"
+	}
+	return g.binaryMount
+}
+
+// SetBinaryMount overrides the in-sandbox target path. The default is
+// /opt/prism/bin and there is rarely a reason to change it — exposed mostly
+// so tests can verify the spawn payload uses the configured target.
+func (g *Gateway) SetBinaryMount(target string) {
+	g.binaryMount = target
+}
+
 // SetBridgeURL configures the prism-bridge manage endpoint used for delegated command backends.
 func (g *Gateway) SetBridgeURL(u string) {
 	g.SetBridgeURLs([]string{u})
@@ -345,11 +403,32 @@ type persistedBackend struct {
 	OpenAPISourceURL      string `json:"openapi_source_url,omitempty"`
 	OpenAPIBaseURL        string `json:"openapi_base_url,omitempty"`
 	OpenAPISecurityScheme string `json:"openapi_security_scheme,omitempty"`
+
+	// Binary backend fields. BinaryHash != "" identifies a binary backend.
+	// The gateway resolves the hash to a host path via the configured
+	// binstore, synthesizes a sandbox mount, and treats the entry as a
+	// stdio backend (command = container path to the binary). BinaryName is
+	// the leaf filename inside the binstore directory; BinarySource +
+	// BinarySourceURL + BinaryArchivePath are informational for the admin
+	// UI's re-fetch flow (out of scope for v1 — note kept in code).
+	BinaryHash        string   `json:"binary_hash,omitempty"`
+	BinaryName        string   `json:"binary_name,omitempty"`
+	BinarySource      string   `json:"binary_source,omitempty"`
+	BinarySourceURL   string   `json:"binary_source_url,omitempty"`
+	BinaryArchivePath string   `json:"binary_archive_path,omitempty"`
+	BinaryArgs        []string `json:"binary_args,omitempty"`
 }
 
 // isOpenAPI reports whether this entry is an OpenAPI-typed backend.
 func (pb *persistedBackend) isOpenAPI() bool {
 	return pb != nil && len(pb.OpenAPISpecRaw) > 0
+}
+
+// isBinary reports whether this entry is a prism-managed binary backend.
+// BinaryHash is the discriminator — empty means the entry is a stdio/HTTP/
+// OpenAPI backend resolved through the other fields.
+func (pb *persistedBackend) isBinary() bool {
+	return pb != nil && pb.BinaryHash != ""
 }
 
 func boolPtr(v bool) *bool { return &v }
@@ -589,6 +668,14 @@ func (g *Gateway) ReconnectBackend(ctx context.Context, backendID string) error 
 func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string, pb *persistedBackend) error {
 	if pb.isOpenAPI() {
 		if err := g.reconnectPersistedOpenAPIBackend(ctx, backendID, pb); err != nil {
+			return err
+		}
+		g.applyDisabledTools(backendID, pb.DisabledTools)
+		g.persistBackend(backendID, pb)
+		return nil
+	}
+	if pb.isBinary() {
+		if err := g.reconnectPersistedBinaryBackend(ctx, backendID, pb); err != nil {
 			return err
 		}
 		g.applyDisabledTools(backendID, pb.DisabledTools)
@@ -2056,6 +2143,15 @@ type BackendStatus struct {
 	// reconnect on the current run. Lets the UI flag them as broken/
 	// deletable without confusing them with healthy backends.
 	Disconnected bool `json:"disconnected,omitempty"`
+	// Binary backend metadata. Populated for entries whose persisted record
+	// carries a BinaryHash. Lets the admin UI render the artifact's hash,
+	// leaf name, and (when known) source URL without re-querying the
+	// binstore. Empty for non-binary backends.
+	BinaryHash      string `json:"binary_hash,omitempty"`
+	BinaryName      string `json:"binary_name,omitempty"`
+	BinarySize      int64  `json:"binary_size,omitempty"`
+	BinarySource    string `json:"binary_source,omitempty"`
+	BinarySourceURL string `json:"binary_source_url,omitempty"`
 }
 
 // RegisterCredential registers a credential for a backend in the credential store.
@@ -2129,6 +2225,13 @@ func (g *Gateway) Status() []BackendStatus {
 		if b.CB != nil {
 			s.CircuitBreaker = b.CB.State().String()
 		}
+		if b.BinaryHash != "" {
+			s.BinaryHash = b.BinaryHash
+			s.BinaryName = b.BinaryName
+			s.BinarySize = b.BinarySize
+			s.BinarySource = b.BinarySource
+			s.BinarySourceURL = b.BinarySourceURL
+		}
 		s.Credential = g.CredentialInfo(b.Config.ID)
 		statuses = append(statuses, s)
 		connected[b.Config.ID] = struct{}{}
@@ -2162,6 +2265,13 @@ func (g *Gateway) Status() []BackendStatus {
 							if pb.OpenAPIBaseURL != "" {
 								orphan.URL = pb.OpenAPIBaseURL
 							}
+						}
+						if pb.isBinary() {
+							orphan.Transport = "binary"
+							orphan.BinaryHash = pb.BinaryHash
+							orphan.BinaryName = pb.BinaryName
+							orphan.BinarySource = pb.BinarySource
+							orphan.BinarySourceURL = pb.BinarySourceURL
 						}
 					}
 				}
