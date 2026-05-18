@@ -79,7 +79,7 @@ type inputSchemaBuild struct {
 // when none), and an error for malformed inputs. A non-empty collision key
 // tells the caller the operation must be skipped with
 // SkipReasonParameterNameCollision.
-func buildInputSchema(params []*openapi3.Parameter, bodyRef *openapi3.RequestBodyRef) (inputSchemaBuild, string, error) {
+func buildInputSchema(doc *openapi3.T, params []*openapi3.Parameter, bodyRef *openapi3.RequestBodyRef) (inputSchemaBuild, string, error) {
 	b := newSchemaBuilder()
 
 	if collision, err := addParams(b, params); err != nil || collision != "" {
@@ -94,12 +94,92 @@ func buildInputSchema(params []*openapi3.Parameter, bodyRef *openapi3.RequestBod
 	if err != nil {
 		return inputSchemaBuild{}, "", err
 	}
+	// kin-openapi preserves $ref strings on resolved SchemaRefs for round-trip
+	// fidelity. Tool schemas are standalone — the LLM can't follow $ref into
+	// a #/components/schemas/User pointer that points at nothing. Inline them.
+	raw = inlineSchemaRefs(raw, doc)
 	return inputSchemaBuild{
 		Schema:         raw,
 		Locations:      b.locations,
 		BodyIsObject:   bodyIsObject,
 		HasRequestBody: hasBody,
 	}, "", nil
+}
+
+// inlineSchemaRefs walks the marshaled schema and replaces internal $ref
+// pointers with the resolved components.schemas value. Cycles (a User that
+// references itself, etc.) are broken by substituting an empty schema once
+// the chain re-enters a name it is already resolving. Foreign refs (not
+// pointing into components.schemas) and refs that don't resolve are left as
+// {} since they are unusable in a standalone tool schema either way.
+func inlineSchemaRefs(raw json.RawMessage, doc *openapi3.T) json.RawMessage {
+	if doc == nil || doc.Components == nil || len(doc.Components.Schemas) == 0 {
+		return raw
+	}
+	var node any
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return raw
+	}
+	visiting := map[string]bool{}
+	resolved := walkInlineRefs(node, doc, visiting)
+	out, err := json.Marshal(resolved)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func walkInlineRefs(node any, doc *openapi3.T, visiting map[string]bool) any {
+	switch v := node.(type) {
+	case map[string]any:
+		if ref, ok := v["$ref"].(string); ok {
+			return resolveSchemaRef(ref, doc, visiting)
+		}
+		out := make(map[string]any, len(v))
+		for k, val := range v {
+			out[k] = walkInlineRefs(val, doc, visiting)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, val := range v {
+			out[i] = walkInlineRefs(val, doc, visiting)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func resolveSchemaRef(ref string, doc *openapi3.T, visiting map[string]bool) any {
+	const prefix = "#/components/schemas/"
+	if !strings.HasPrefix(ref, prefix) {
+		// Foreign ref — would be unusable to the LLM either way. Empty
+		// schema lets the call through without a parse failure.
+		return map[string]any{}
+	}
+	if visiting[ref] {
+		// Cycle: User → User. Empty schema breaks recursion; the LLM can't
+		// follow cycles in tool schemas anyway.
+		return map[string]any{}
+	}
+	name := strings.TrimPrefix(ref, prefix)
+	target, ok := doc.Components.Schemas[name]
+	if !ok || target == nil || target.Value == nil {
+		return map[string]any{}
+	}
+	data, err := target.Value.MarshalJSON()
+	if err != nil {
+		return map[string]any{}
+	}
+	var sub any
+	if err := json.Unmarshal(data, &sub); err != nil {
+		return map[string]any{}
+	}
+	visiting[ref] = true
+	out := walkInlineRefs(sub, doc, visiting)
+	delete(visiting, ref)
+	return out
 }
 
 func addParams(b *schemaBuilder, params []*openapi3.Parameter) (string, error) {

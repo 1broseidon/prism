@@ -434,7 +434,7 @@ func processOperation(
 
 	// Build flattened input schema and check for cross-location name
 	// collisions.
-	built, collision, err := buildInputSchema(params, op.RequestBody)
+	built, collision, err := buildInputSchema(doc, params, op.RequestBody)
 	if err != nil {
 		// Treat schema-build errors as "collision-like": skip with detail.
 		spec.Skipped = append(spec.Skipped, SkippedOperation{
