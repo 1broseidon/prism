@@ -214,8 +214,8 @@ func addBody(b *schemaBuilder, bodyRef *openapi3.RequestBodyRef) (bodyIsObject, 
 	if bodyRef == nil || bodyRef.Value == nil {
 		return false, false, "", nil
 	}
-	mt := bodyRef.Value.Content.Get(allowedContentType)
-	if mt == nil || mt.Schema == nil || mt.Schema.Value == nil {
+	mt, ok := findJSONMediaType(bodyRef.Value.Content)
+	if !ok || mt == nil || mt.Schema == nil || mt.Schema.Value == nil {
 		return false, true, "", nil
 	}
 	s := mt.Schema.Value
@@ -278,7 +278,7 @@ func paramToSchema(p *openapi3.Parameter) (json.RawMessage, error) {
 	if p.Schema != nil {
 		return schemaRefToJSON(p.Schema)
 	}
-	if mt := p.Content.Get(allowedContentType); mt != nil && mt.Schema != nil {
+	if mt, ok := findJSONMediaType(p.Content); ok && mt != nil && mt.Schema != nil {
 		return schemaRefToJSON(mt.Schema)
 	}
 	// Fallback: untyped string parameter.

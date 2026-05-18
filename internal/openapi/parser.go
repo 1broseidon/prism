@@ -28,8 +28,11 @@ const MaxSpecBytes = 5 * 1024 * 1024
 // toggles.
 const SoftOperationLimit = 500
 
-// allowedContentType is the only request/response media type Prism v1
-// translates to MCP. Operations that lack a JSON variant are skipped.
+// allowedContentType is the canonical JSON media type. Prism v1 also accepts
+// any application/*+json structured-syntax variant per RFC 6839 §3.1 —
+// application/geo+json (GeoJSON), application/ld+json (JSON-LD),
+// application/vnd.api+json, etc. — since the dispatcher reads them all as
+// JSON anyway. XML-derived structured-syntax suffixes (+xml) stay rejected.
 const allowedContentType = "application/json"
 
 // SkipReason enumerates the reasons an operation may be skipped.
@@ -535,24 +538,36 @@ func snakeCase(s string) string {
 }
 
 // hasJSONContent returns true when content contains application/json (with
-// or without parameters such as charset).
+// or without parameters such as charset) OR any application/*+json variant.
 func hasJSONContent(c openapi3.Content) bool {
-	for k := range c {
-		if mediaTypeMatches(k, allowedContentType) {
-			return true
-		}
-	}
-	return false
+	_, ok := findJSONMediaType(c)
+	return ok
 }
 
-// mediaTypeMatches checks whether actual is the same media type as want,
-// ignoring parameters (e.g. "application/json; charset=utf-8" matches
-// "application/json").
-func mediaTypeMatches(actual, want string) bool {
-	if i := strings.IndexByte(actual, ';'); i >= 0 {
-		actual = actual[:i]
+// findJSONMediaType returns the first JSON-compatible MediaType from a
+// content map. Used by both parameter and body schema extraction so we
+// pick up application/geo+json, application/ld+json, etc. transparently.
+func findJSONMediaType(c openapi3.Content) (*openapi3.MediaType, bool) {
+	for k, v := range c {
+		if isJSONMediaType(k) {
+			return v, true
+		}
 	}
-	return strings.EqualFold(strings.TrimSpace(actual), want)
+	return nil, false
+}
+
+// isJSONMediaType reports whether s names application/json or an
+// application/*+json structured-syntax variant per RFC 6839 §3.1. Charset
+// and other parameters are ignored.
+func isJSONMediaType(s string) bool {
+	if i := strings.IndexByte(s, ';'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == allowedContentType {
+		return true
+	}
+	return strings.HasPrefix(s, "application/") && strings.HasSuffix(s, "+json")
 }
 
 // contentTypesDetail returns a stable comma-joined list of declared types
@@ -759,7 +774,7 @@ func responseShapeDigest(responses *openapi3.Responses) string {
 			continue
 		}
 		var keys []string
-		if mt := ref.Value.Content.Get(allowedContentType); mt != nil && mt.Schema != nil && mt.Schema.Value != nil {
+		if mt, ok := findJSONMediaType(ref.Value.Content); ok && mt != nil && mt.Schema != nil && mt.Schema.Value != nil {
 			for k := range mt.Schema.Value.Properties {
 				keys = append(keys, k)
 			}
