@@ -1,9 +1,10 @@
-# Build artifacts
+# Build artifacts (anchored to repo root — `prism-bridge` unanchored would
+# also match cmd/prism-bridge/ which is real source)
 bin/
-mcpgate
-prism
-prism-bridge
-prism-auth
+/mcpgate
+/prism
+/prism-bridge
+/prism-auth
 *.exe
 
 # Local config and secrets — never commit
