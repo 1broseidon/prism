@@ -22,15 +22,27 @@ const (
 )
 
 type consentData struct {
-	ClientName      string
-	ClientID        string
-	ResponseType    string
-	RedirectURI     string
-	State           string
-	CodeChallenge   string
-	ChallengeMethod string
-	Scopes          string
-	CSRFToken       string
+	ClientName           string
+	ClientID             string
+	ResponseType         string
+	RedirectURI          string
+	State                string
+	CodeChallenge        string
+	ChallengeMethod      string
+	Scopes               string
+	CSRFToken            string
+	AuthorizationDetails string // raw RAR payload to round-trip into the form
+	Grants               []consentGrantRow
+}
+
+// consentGrantRow is the operator-facing summary of one issued grant: tool,
+// backend, workspace, and the args predicate set. Rendered as a list on the
+// consent page so the operator can see exactly what they're approving.
+type consentGrantRow struct {
+	Tool      string
+	Backend   string
+	Workspace string
+	Args      string
 }
 
 func (s *Server) renderConsent(w http.ResponseWriter, data *consentData) {

@@ -16,18 +16,34 @@
   outline: none;
 }
 *:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
 button:focus-visible {
   outline-offset: 3px;
 }
+/* Inputs: keep the border-color tint AND add a 3px focus ring so keyboard
+   users on busy forms can see where focus landed without layout shift. */
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-focus);
+}
+
+/* Reduced motion: collapse all transitions/animations to ~10ms.
+   Spatial motion should never play under the user's stated preference. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 10ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 10ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 ::-webkit-scrollbar {
@@ -102,6 +118,11 @@ a {
 
 /* ---------- App shell ---------- */
 
+/* Inset-sidebar layout — the outer shell is the "void" frame (--color-bg-marketing);
+   the content area is a card on the lighter canvas (--color-bg-primary) with a
+   rounded top-left corner so it visually nests inside the frame. The sidebar
+   sits flush on the frame; the curve at (sidebar.right, header.bottom) is the
+   handoff from chrome to canvas. */
 .shell {
   display: grid;
   grid-template-columns: 220px 1fr;
@@ -110,53 +131,163 @@ a {
     "logo header"
     "nav  content";
   height: 100vh;
+  background: var(--color-bg-marketing);
 }
 
 .shell-logo {
   grid-area: logo;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 28px;
-  background: var(--nav-bg);
+  padding: 0 14px;
+  background: transparent;
 }
-.shell-logo .logo-mark {
+
+/* Instance switcher — workspace button at the top of the sidebar.
+   Replaces the decorative wordmark with a functional pattern that
+   signals multi-tenancy capability. */
+.instance-switcher {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-input);
+  text-decoration: none;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+  border: 1px solid transparent;
+  width: 100%;
+  min-width: 0;
+}
+.instance-switcher:hover {
+  background: var(--color-bg-translucent);
+  border-color: var(--color-border-primary);
+}
+.instance-mark {
   width: 22px;
   height: 22px;
-  border-radius: 4px;
-  background: var(--fg-emphasis);
-  color: var(--bg);
+  border-radius: 5px;
+  background: var(--color-tile-callout);
+  color: var(--color-tile-callout-ink);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 800;
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-weight: var(--weight-bold);
+  font-size: 12px;
   letter-spacing: -0.06em;
+  flex-shrink: 0;
 }
-.shell-logo h1 {
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.04em;
-  line-height: 1;
-  color: var(--fg-emphasis);
-}
-.shell-brand {
+.instance-body {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  text-decoration: none;
-  color: inherit;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.instance-name {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.015em;
+  color: var(--color-text-primary);
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.instance-env {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-text-quaternary);
+}
+.instance-chevron {
+  color: var(--color-text-quaternary);
+  flex-shrink: 0;
+}
+.instance-switcher:hover .instance-chevron {
+  color: var(--color-text-secondary);
 }
 
 .shell-header {
   grid-area: header;
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
-  padding: 0 36px;
-  background: rgba(8, 8, 8, 0.6);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  padding: 0 28px 0 36px;
+  background: transparent;
+  gap: 24px;
+  min-width: 0;
+}
+.shell-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Breadcrumb — URL-derived navigation context, lives in the header. */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--color-text-tertiary);
+  min-width: 0;
+  overflow: hidden;
+}
+.breadcrumb-link {
+  color: var(--color-text-tertiary);
+  text-decoration: none;
+  transition: color var(--dur-base) var(--ease-out);
+  white-space: nowrap;
+}
+.breadcrumb-link:hover {
+  color: var(--color-text-primary);
+}
+.breadcrumb-sep {
+  color: var(--color-text-quaternary);
+  flex-shrink: 0;
+}
+.breadcrumb-current {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.breadcrumb-dynamic {
+  /* Dynamic segments (ULIDs, UUIDs, names) render in mono — already mono
+     by parent rule — but with the emphasis colour so they read as the
+     subject of the page. */
+  font-family: var(--font-mono);
+}
+
+/* Gateway status chip — shown in the header right. */
+.gateway-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-translucent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--color-text-tertiary);
+}
+.gateway-status-label {
+  line-height: 1;
 }
 .shell-meta {
   display: flex;
@@ -174,62 +305,241 @@ a {
   grid-area: nav;
   display: flex;
   flex-direction: column;
-  padding: 28px 0;
-  background: var(--nav-bg);
+  padding: 16px 12px;
+  background: transparent;
   overflow-y: auto;
+  min-height: 0;
+}
+.nav-groups {
+  display: flex;
+  flex-direction: column;
 }
 .nav-section-label {
-  padding: 8px 28px 12px;
+  padding: 12px 14px 4px;
+  font-family: var(--font-mono);
   font-size: 9px;
-  font-weight: 700;
+  font-weight: var(--weight-semibold);
   text-transform: uppercase;
-  letter-spacing: 0.3em;
-  color: var(--faint);
+  letter-spacing: 0.18em;
+  color: var(--color-text-quaternary);
 }
 .nav-link {
   position: relative;
-  display: block;
-  padding: 10px 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  margin: 1px 0;
+  border-radius: var(--radius-input);
   font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-tertiary);
   text-decoration: none;
   cursor: pointer;
   transition:
-    color 0.25s ease,
-    background 0.25s ease;
+    color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
 }
 .nav-link:hover {
-  color: var(--fg-emphasis);
-  background: var(--hover);
+  color: var(--color-text-primary);
+  background: var(--color-bg-translucent);
 }
 .nav-link.active {
-  color: var(--fg-emphasis);
+  color: var(--color-text-primary);
+  background: var(--color-brand-soft);
 }
 .nav-link.active::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
+  left: -12px;
+  top: 6px;
+  bottom: 6px;
   width: 2px;
-  height: 22px;
-  background: var(--accent);
+  background: var(--color-tile-callout);
+  border-radius: 0 2px 2px 0;
+}
+.nav-link-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--color-ink-faint);
+  flex-shrink: 0;
+  transition: color var(--dur-base) var(--ease-out);
+}
+.nav-link:hover .nav-link-icon {
+  color: var(--color-text-primary);
+}
+.nav-link.active .nav-link-icon {
+  color: var(--color-link-primary);
+}
+.nav-link-label {
+  flex: 1;
+  min-width: 0;
+}
+.nav-section-label-spaced {
+  margin-top: 14px;
+}
+/* Sidebar footer — user identity + version/uptime. Stays anchored to
+   the bottom of the sidebar regardless of nav content length. */
+.nav-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-primary);
+  margin-left: -12px;
+  margin-right: -12px;
+  padding-left: 12px;
+  padding-right: 12px;
 }
 .nav-meta {
-  margin-top: auto;
-  padding: 16px 28px;
+  padding: 10px 14px 0;
   display: flex;
   gap: 8px;
   font-family: var(--font-mono);
   font-size: 10px;
-  color: var(--faint);
-  letter-spacing: 0.05em;
+  color: var(--color-text-quaternary);
+  letter-spacing: 0.04em;
   font-variant-numeric: tabular-nums;
-  border-top: 1px solid var(--line);
 }
 .nav-meta-dot {
   opacity: 0.6;
+}
+
+/* User menu — sidebar footer block with avatar + email + dropdown. */
+.user-menu {
+  position: relative;
+}
+.user-menu-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-input);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+  font: inherit;
+}
+.user-menu-trigger:hover,
+.user-menu-trigger-open {
+  background: var(--color-bg-translucent);
+  border-color: var(--color-border-primary);
+}
+.user-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  background: var(--color-bg-quaternary);
+  color: var(--color-text-primary);
+  flex-shrink: 0;
+  letter-spacing: 0;
+}
+.user-avatar-lg {
+  width: 32px;
+  height: 32px;
+  font-size: 12px;
+}
+.user-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.user-email {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0;
+}
+.user-role {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--color-text-quaternary);
+}
+.user-menu-chevron {
+  color: var(--color-text-quaternary);
+  flex-shrink: 0;
+}
+
+/* Dropdown popover positioned ABOVE the trigger (sidebar footer is at
+   bottom of the viewport — menu opens upward). */
+.user-menu-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--radius-input);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  z-index: 60;
+}
+.user-menu-pop-header {
+  display: flex;
+  gap: 10px;
+  padding: 10px 8px;
+  align-items: center;
+  border-bottom: 1px solid var(--color-border-primary);
+  margin-bottom: 4px;
+}
+.user-menu-pop-email {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  letter-spacing: 0;
+  word-break: break-all;
+  line-height: 1.2;
+}
+.user-menu-pop-role {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--color-text-quaternary);
+  margin-top: 4px;
+}
+.user-menu-pop-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-base) var(--ease-out);
+}
+.user-menu-pop-item:hover {
+  background: var(--color-bg-translucent);
+  color: var(--color-text-primary);
 }
 
 /* ---------- Header cog ---------- */
@@ -271,9 +581,12 @@ a {
 }
 .settings-tab {
   position: relative;
-  padding: 10px 18px;
-  font-size: 13px;
-  font-weight: 500;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
   color: var(--muted);
   text-decoration: none;
   border-bottom: 2px solid transparent;
@@ -287,6 +600,13 @@ a {
   color: var(--fg-emphasis);
   border-bottom-color: var(--accent);
 }
+.settings-section-intro {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0;
+  margin-bottom: 32px;
+}
 
 /* ---------- Content frame ---------- */
 
@@ -295,6 +615,13 @@ a {
   padding: 40px 48px;
   overflow-y: auto;
   overflow-x: hidden;
+  background: var(--color-bg-primary);
+  /* Rounded top-left corner reveals the void frame in the cut-away — this is
+     the "flows into the nav" join that defines the inset-sidebar pattern.
+     The 6-LCH-points lightness step between --color-bg-marketing (frame) and
+     --color-bg-primary (canvas) is enough separation on its own; a hairline
+     would compete with the curve. */
+  border-top-left-radius: 14px;
 }
 
 /* ---------- Page header ---------- */
@@ -303,14 +630,14 @@ a {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  margin-bottom: 48px;
+  margin-bottom: 28px;
 }
 .page-title {
-  font-size: 32px;
-  font-weight: 700;
-  letter-spacing: -0.045em;
-  line-height: 1;
-  color: var(--fg-emphasis);
+  font-size: 20px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.012em;
+  line-height: 1.1;
+  color: var(--color-text-primary);
 }
 .page-subtitle {
   font-family: var(--font-mono);
@@ -375,44 +702,80 @@ a {
 
 /* ---------- Tiles ---------- */
 
+/* Legacy tile-grid (equal columns) — kept for any caller that still uses it. */
 .tile-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 16px;
   margin-bottom: 40px;
 }
+
+/* Stat-grid — used on Overview. Four equal tiles, comparable, data-forward.
+   Enterprise consoles surface metrics as siblings, not as one big spotlight.
+   The earlier "hero callout" treatment was retired in the enterprise-console
+   amendment of design.md. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 32px;
+}
+@media (max-width: 1024px) {
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 560px) {
+  .stat-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .tile {
-  padding: 24px;
-  border: 1px solid var(--line);
-  background: var(--bg-surface);
-  border-radius: 12px;
-  transition: border-color 0.25s ease;
+  padding: 18px 20px;
+  border: 1px solid var(--color-border-primary);
+  background: var(--color-bg-panel);
+  border-radius: var(--radius-card);
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
 }
 .tile:hover {
-  border-color: var(--line-soft);
+  border-color: var(--color-border-secondary);
+}
+.tile-interactive {
+  cursor: pointer;
+}
+.tile-interactive:hover {
+  border-color: var(--color-border-tertiary);
+  background: var(--color-bg-secondary);
 }
 .tile-label {
+  font-family: var(--font-mono);
   font-size: 9px;
-  font-weight: 700;
+  font-weight: var(--weight-semibold);
   text-transform: uppercase;
-  letter-spacing: 0.3em;
-  color: var(--muted);
-  margin-bottom: 16px;
+  letter-spacing: 0.2em;
+  color: var(--color-text-tertiary);
+  margin-bottom: 14px;
 }
 .tile-value {
   font-family: var(--font-sans);
-  font-size: 36px;
-  font-weight: 700;
-  color: var(--fg-emphasis);
-  letter-spacing: -0.04em;
+  font-size: 28px;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  letter-spacing: -0.025em;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+}
+.tile-value-warn {
+  color: var(--color-warn);
 }
 .tile-sub {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--muted);
-  margin-top: 12px;
+  color: var(--color-text-tertiary);
+  margin-top: 10px;
 }
 
 /* ---------- Tables ---------- */
@@ -461,7 +824,6 @@ td.vtop {
 
 .empty-state {
   color: var(--muted);
-  font-style: italic;
   padding: 32px 0;
   font-size: 12px;
 }
@@ -470,8 +832,8 @@ td.vtop {
 
 .agent-name-row {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
 }
 .agent-label {
   font-weight: 500;
@@ -731,6 +1093,41 @@ tr:hover .copy-id {
   color: var(--muted);
   opacity: 0.5;
 }
+.rename-pencil {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  flex-wrap: wrap;
+  vertical-align: baseline;
+}
+.rename-pencil-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rename-pencil-button {
+  padding: 2px 6px;
+  line-height: 1;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+  transition: none;
+}
+.rename-pencil-input {
+  width: min(360px, 70vw);
+  max-width: 100%;
+  font: inherit;
+  letter-spacing: 0;
+}
+.rename-pencil-error,
+.rename-pencil-saving {
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+}
+.rename-pencil-saving {
+  font-size: 10px;
+  color: var(--muted);
+}
 .save-btn {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -800,8 +1197,7 @@ tr:hover .copy-id {
 .cred-hint {
   font-size: 9px;
   color: var(--muted);
-  opacity: 0.6;
-  font-style: italic;
+  opacity: 0.7;
 }
 .cred-badge {
   font-family: var(--font-mono);
@@ -864,44 +1260,117 @@ tr:hover .remove-btn {
 
 /* ---------- Groups ---------- */
 
-.groups-list {
+/* Server-row-aligned card layout for group rows (Policy page, post-task-50).
+   Mirrors .server-row metrics so the Policy and Servers pages share a visual
+   language: status pip + mono heading + ULID/source + right-side stats. */
+.group-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
 }
-.group-card {
+.group-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  border: 1px solid var(--line-soft);
-  padding: 8px 14px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  justify-content: space-between;
+  gap: 20px;
+  width: 100%;
+  padding: 16px 20px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s, background 0.2s;
+}
+.group-row:hover {
+  border-color: var(--line-soft);
   background: var(--bg-surface);
-  border-radius: 6px;
-  transition: border-color 0.2s;
 }
-.group-card:hover {
-  border-color: var(--muted);
+.group-row-editing {
+  cursor: default;
+  background: var(--bg-surface);
+  border-color: var(--line-soft);
 }
-.group-name {
+.group-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.group-row-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.group-row-name {
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--fg-emphasis);
-  margin-right: 4px;
+  font-size: 14px;
 }
-.group-name-link {
-  text-decoration: none;
-  transition: color 0.2s;
+.group-row-ns {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
 }
-.group-name-link:hover {
-  color: var(--accent);
+.group-row-source {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
+  padding: 1px 6px;
+  border-radius: 3px;
 }
-.group-scope {
+.group-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 18px;
+}
+.group-row-scope {
   font-size: 10px;
   color: var(--muted);
   border: 1px solid var(--line-soft);
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: 3px;
+}
+.group-row-stats {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex-shrink: 0;
+}
+.group-row-stat {
+  text-align: right;
+  min-width: 56px;
+}
+.group-row-stat-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg-emphasis);
+  font-variant-numeric: tabular-nums;
+}
+.group-row-stat-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.group-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .group-action {
   font-size: 9px;
@@ -923,8 +1392,7 @@ tr:hover .remove-btn {
 .group-source {
   font-size: 9px;
   color: var(--muted);
-  opacity: 0.5;
-  font-style: italic;
+  opacity: 0.6;
 }
 .group-editor {
   display: flex;
@@ -1157,22 +1625,30 @@ tr:hover .remove-btn {
   margin-top: 6px;
 }
 
-/* Meta row — strip of label/value pairs */
+/* Meta row — strip of label/value pairs. Caps at 4 columns per row; extras
+   wrap to a second row. Internal dividers use --line-soft so they're visible
+   against --bg-elev. */
 .meta-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0;
+  row-gap: 12px;
   padding: 16px 0;
   margin-bottom: 32px;
   background: var(--bg-elev);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
 }
 .meta-item {
-  flex: 1 1 auto;
-  min-width: 140px;
+  flex: 1 1 25%;
+  max-width: 25%;
+  min-width: 160px;
   padding: 0 24px;
-  border-right: 1px solid var(--line);
+  border-right: 1px solid var(--line-soft);
 }
+/* The visually-last item in any wrapped row should have no right divider.
+   With max-width: 25% there are exactly 4 columns per row at desktop widths,
+   so every 4th item is the row-end. The CSS :last-child handles a non-multiple
+   tail row. */
+.meta-row > .meta-item:nth-child(4n),
 .meta-item:last-child {
   border-right: none;
 }
@@ -1197,8 +1673,11 @@ tr:hover .remove-btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  display: inline-block;
-  max-width: 320px;
+  display: block;
+  max-width: 100%;
+}
+.meta-item {
+  min-width: 0;
 }
 
 /* Page-header right-side actions cluster */
@@ -1242,7 +1721,11 @@ tr:hover .remove-btn {
   opacity: 0.6;
 }
 
-/* Pills (status indicators in headers) */
+/* Pills — two tiers.
+   STATE pills (accent-tinted): ENABLED · CONNECTED · OK · DYNAMIC · HEALTHY
+   TYPE  pills (neutral outline): STDIO · HTTP · PROXIED · VIRTUAL · EPHEMERAL
+   ERROR pills (denied-tinted):  DENIED · DISCONNECTED · STALE
+   WARN  pills (warn-tinted):    PENDING · DRAINING */
 .pill {
   display: inline-flex;
   align-items: center;
@@ -1252,23 +1735,25 @@ tr:hover .remove-btn {
   text-transform: uppercase;
   letter-spacing: 0.15em;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
 }
 .pill-ok {
-  background: rgba(99, 102, 241, 0.12);
-  color: var(--accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
 }
 .pill-warn {
-  background: rgba(251, 191, 36, 0.12);
-  color: var(--warn);
+  background: oklch(80% 0.16 80 / 0.12);
+  color: var(--color-warn);
 }
 .pill-error {
-  background: rgba(248, 113, 113, 0.12);
-  color: var(--denied);
+  background: oklch(70% 0.20 25 / 0.14);
+  color: var(--color-denied);
 }
 .pill-neutral {
-  background: var(--line);
-  color: var(--muted);
+  background: transparent;
+  border-color: var(--color-rule-soft);
+  color: var(--color-ink-muted);
 }
 
 /* Status pips (small dot for list rows) */
@@ -1591,9 +2076,8 @@ tr:hover .remove-btn {
   color: var(--denied);
 }
 .hint-text {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--muted);
-  font-style: italic;
   margin-left: 4px;
 }
 .link-accent {
@@ -1638,6 +2122,16 @@ tr:hover .remove-btn {
 .server-row-pending:hover {
   background: var(--bg-elev);
   border-color: rgba(251, 191, 36, 0.3);
+}
+/* Non-interactive rows (e.g. config-managed agents with no detail page).
+   Same visual rhythm, suppressed pointer + hover affordance. */
+.server-row-static {
+  cursor: default;
+  opacity: 0.9;
+}
+.server-row-static:hover {
+  background: var(--bg-elev);
+  border-color: var(--line);
 }
 .server-row-main {
   display: flex;
@@ -1812,7 +2306,6 @@ tr:hover .remove-btn {
   white-space: pre-wrap;
 }
 .tool-desc-empty {
-  font-style: italic;
   opacity: 0.6;
 }
 .tool-row-disabled {
@@ -2055,13 +2548,15 @@ tr:hover .remove-btn {
 
 .audit-stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 280px));
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
   margin-bottom: 24px;
+  width: fit-content;
+  max-width: 100%;
 }
 .audit-stat {
   padding: 18px 24px;
@@ -2643,7 +3138,26 @@ tr:hover .remove-btn {
   margin-bottom: 10px;
 }
 .storage-layer-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
   font-weight: 600;
+  color: var(--fg-emphasis);
+}
+/* Secondary section voice — sub-section heads inside cards. Hairline rule
+   above (drawn by the card border), sentence-case mono label. Complements
+   the primary section voice (● UPPERCASE letter-spaced). */
+.section-sub-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-emphasis);
+  letter-spacing: 0;
 }
 .storage-layer-sub {
   color: var(--muted);
@@ -2654,10 +3168,19 @@ tr:hover .remove-btn {
   gap: 8px;
 }
 .storage-layer-row {
-  display: grid;
-  grid-template-columns: 160px 220px 1fr;
+  display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
+}
+.storage-layer-row > .storage-layer-backend {
+  flex: 0 0 160px;
+}
+.storage-layer-row > .config-input {
+  flex: 0 0 auto;
+}
+.storage-layer-row > select.config-input {
+  min-width: 180px;
 }
 .storage-layer-backend {
   font-family: var(--font-mono);
@@ -3084,9 +3607,18 @@ tr:hover .remove-btn {
   .agent-name-row {
     flex-wrap: wrap;
   }
-  .group-card {
+  .group-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 14px;
+  }
+  .group-row-stats {
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .storage-layer-row {
     flex-wrap: wrap;
-    row-gap: 8px;
   }
   .meta-row {
     flex-wrap: wrap;
@@ -4040,4 +4572,3 @@ tr:hover .remove-btn {
     width: 100%;
   }
 }
-

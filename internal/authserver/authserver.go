@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1broseidon/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/identity"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -98,6 +100,72 @@ type Server struct {
 	groups  map[string]GroupConfig // group definitions from config, used for policy resolution
 	scopes  []string
 	oauth   *oauthStore
+	// clock is the injectable wall clock used by DPoP nonce rotation,
+	// step-up session freshness, and grant token expiry checks. Tests
+	// substitute via SetClock; production leaves it nil so now() returns
+	// time.Now().
+	clock func() time.Time
+	// dpopReplay is the JTI replay cache shared across the /token DPoP-bound
+	// flows. Initialized in NewServer with a 5-minute TTL / 10k entry cap so
+	// stolen proofs can't be replayed within the dpopNonceWindow.
+	dpopReplay *auth.ReplayCache
+	// toolAvailability is an injectable predicate the RAR validator uses to
+	// reject grants referencing a tool the gateway has disabled. Nil means
+	// "every tool is available" — see grantToolIsAvailable below.
+	toolAvailability func(backend, tool string) bool
+	// identityDispatcher owns stable IDs for identity-bearing resources.
+	// It is wired by the unified gateway process before startup migrations run.
+	identityDispatcher identity.Dispatcher
+}
+
+// now returns the current time according to the server's injected clock.
+// When SetClock has not been called, falls back to time.Now().
+func (s *Server) now() time.Time {
+	if s == nil || s.clock == nil {
+		return time.Now()
+	}
+	return s.clock()
+}
+
+// SetClock injects a test-friendly time source. Pass time.Now to reset.
+func (s *Server) SetClock(fn func() time.Time) {
+	if s == nil {
+		return
+	}
+	s.clock = fn
+}
+
+// SetIdentityDispatcher wires the shared identity registry used by startup
+// migrations and later identity-aware authserver flows.
+func (s *Server) SetIdentityDispatcher(d identity.Dispatcher) {
+	if s == nil {
+		return
+	}
+	s.identityDispatcher = d
+}
+
+// grantToolIsAvailable reports whether the (backend, tool) pair is still
+// enabled at the gateway. The wired gateway tool-toggle store will replace
+// the default behavior via SetGrantToolAvailabilityChecker; until then
+// we accept every grant request so RAR validation can proceed without
+// false negatives.
+//
+// TODO(epic-5): wire production callers to gateway tool-toggle store.
+func (s *Server) grantToolIsAvailable(backend, tool string) bool {
+	if s == nil || s.toolAvailability == nil {
+		return true
+	}
+	return s.toolAvailability(backend, tool)
+}
+
+// SetGrantToolAvailabilityChecker injects the predicate used by RAR
+// validation to reject grants pointing at disabled tools. Pass nil to
+// reset to the default-allow behavior.
+func (s *Server) SetGrantToolAvailabilityChecker(fn func(backend, tool string) bool) {
+	if s == nil {
+		return
+	}
+	s.toolAvailability = fn
 }
 
 // kvStore is the subset of store.Store that authserver needs.
@@ -188,6 +256,9 @@ func NewServer(cfg *Config, km *KeyManager, kv kvStore, logger *slog.Logger, gro
 		groups:  groupDefs,
 		scopes:  scopes,
 		oauth:   newOAuthStore(),
+		// 5-minute TTL matches dpopNonceWindow; 10k entry cap is enough for
+		// the home-lab agent set without unbounded memory growth.
+		dpopReplay: auth.NewReplayCache(5*time.Minute, 10000),
 	}
 
 	// Restore persisted DCR clients and refresh tokens from the KV store.
@@ -206,7 +277,22 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleDiscovery)
 	mux.HandleFunc("GET /health", s.handleHealth)
+	// Step-up endpoint: paired with /authorize when an issued grant
+	// demands a freshly-authenticated session (acr/auth_time gate).
+	mux.HandleFunc("GET /stepup", s.handleStepUp)
+	mux.HandleFunc("POST /stepup", s.handleStepUp)
 	return mux
+}
+
+// DPoPReplayCache returns the JTI replay cache shared with the resource
+// middleware. Production wires this into auth.Middleware via
+// auth.WithDPoPReplayCache so /token and /mcp share a single anti-replay
+// set per RFC 9449 §11.2.
+func (s *Server) DPoPReplayCache() *auth.ReplayCache {
+	if s == nil {
+		return nil
+	}
+	return s.dpopReplay
 }
 
 // IsEphemeralKey reports whether the server is using an ephemeral signing key.
@@ -626,6 +712,86 @@ func resolveScopes(client *ClientConfig, requested []string) ([]string, error) {
 		}
 	}
 	return requested, nil
+}
+
+// tokenIssueOptions bundles everything mintTokenWithOptions needs to
+// produce a token tagged with RAR grants. Tests use it to mint a token
+// + track its grant refs in one call without going through the
+// authorize/exchange flow.
+type tokenIssueOptions struct {
+	ClientID string
+	PrismID  string
+	Scopes   []string
+	Grants   []auth.IssuedGrant
+	AuthTime int64
+	Acr      string
+	// DPoPJKT, when non-empty, is the RFC 7638 thumbprint of the DPoP
+	// proof key validated at /token. The issued access token embeds
+	// cnf.jkt so the resource enforces sender-constrained delivery.
+	DPoPJKT string
+}
+
+// mintTokenWithOptions mints an access token bound to the supplied grants
+// and registers a grant token ref so ActiveGrantTokenCount sees it. The
+// returned string is the signed JWT.
+//
+// This is the "rich" twin of mintToken — production code uses it from the
+// token exchange path; tests use it to skip the full /authorize flow when
+// only the grants-tracking side-effect matters.
+func (s *Server) mintTokenWithOptions(opts tokenIssueOptions) (string, error) {
+	if len(opts.Grants) == 0 && opts.DPoPJKT == "" && opts.AuthTime == 0 && opts.Acr == "" {
+		prismIDs := []string{}
+		if opts.PrismID != "" {
+			prismIDs = append(prismIDs, opts.PrismID)
+		}
+		return s.mintToken(opts.ClientID, opts.Scopes, prismIDs...)
+	}
+
+	now := time.Now()
+	jti, err := generateJTI()
+	if err != nil {
+		return "", err
+	}
+	claims := jwt.MapClaims{
+		"iss":       s.cfg.Issuer,
+		"sub":       opts.ClientID,
+		"aud":       s.cfg.Issuer,
+		"exp":       now.Add(time.Duration(s.cfg.TokenTTLSeconds) * time.Second).Unix(),
+		"iat":       now.Unix(),
+		"jti":       jti,
+		"scope":     strings.Join(opts.Scopes, " "),
+		"client_id": opts.ClientID,
+		"token_gen": s.GetTokenGeneration(opts.ClientID),
+	}
+	if opts.PrismID != "" {
+		claims["prism_id"] = opts.PrismID
+	}
+	if opts.AuthTime != 0 {
+		claims["auth_time"] = opts.AuthTime
+	}
+	if opts.Acr != "" {
+		claims["acr"] = opts.Acr
+	}
+	if len(opts.Grants) > 0 {
+		claims["authorization_details"] = opts.Grants
+	}
+	if opts.DPoPJKT != "" {
+		claims["cnf"] = map[string]string{"jkt": opts.DPoPJKT}
+		if amr := amrForDPoP(opts.DPoPJKT); amr != nil {
+			claims["amr"] = amr
+		}
+	}
+	t := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	t.Header["kid"] = s.km.kid
+	token, err := t.SignedString(s.km.privateKey)
+	if err != nil {
+		return "", err
+	}
+	expiresAt := now.Add(time.Duration(s.cfg.TokenTTLSeconds) * time.Second)
+	if len(opts.Grants) > 0 {
+		s.trackGrantTokenRefs(jti, opts.Grants, expiresAt)
+	}
+	return token, nil
 }
 
 // mintToken creates a signed JWT. If prismID is non-empty, it is included as a

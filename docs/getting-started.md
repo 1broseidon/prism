@@ -28,9 +28,17 @@ docker run -d \
   ghcr.io/1broseidon/prism:latest
 ```
 
-Open the admin UI at `http://localhost:9086` and add HTTP or stdio MCP servers
-from the Servers page. Reverse proxies and sidecar bridges are optional
-advanced deployment choices.
+Open the admin UI at `http://localhost:9086` and add MCP servers from the
+Servers page. The console handles all five backend sources:
+
+- **HTTP** — paste a URL to a Streamable HTTP MCP server.
+- **stdio** — paste a `command` and `args` (e.g. `npx @modelcontextprotocol/server-github`); Prism sandboxes it in a Docker container.
+- **OpenAPI** — paste an OpenAPI 3 spec URL, drop in inline JSON/YAML, or paste a `curl` command and let Prism scaffold a spec for you.
+- **Binary** — upload a static stdio MCP binary (or paste a fetch URL); Prism stores and sandboxes it.
+- **Workspace** — sandbox a stdio backend against a snapshot of a workspace registered by `prism-bridge workspace`.
+
+Reverse proxies, sidecar bridges, OIDC admin sign-in, and separate auth servers
+are optional and covered in [deployment.md](deployment.md).
 
 ## Build From Source
 
@@ -40,6 +48,7 @@ cd prism
 make build
 # → bin/prism         (the gateway)
 # → bin/prism-bridge  (the transport adapter)
+# → bin/prism-auth    (standalone OAuth server for advanced separated deployments)
 ```
 
 ## Step 1: Set Up Backends
@@ -199,7 +208,7 @@ Create `config.json` pointing to your backends. `mcpServers` is a map keyed by n
 - Prism doesn't know or care whether a backend is bridged or native — it's all HTTP
 - The map key is the namespace. Tools are exposed as `namespace__toolname` (e.g. `github__create_issue`, `dns__check-dns`)
 - `credentials` are injected by Prism into outbound requests — the agent never sees them. The credential type is the field that's set (`env`, `value`, `file`, or `command`)
-- `policy` defines how agents authenticate *to Prism*. When present, Prism embeds an OAuth 2.1 auth server; agents use the `secret` as their `client_secret` (client-credentials grant). Omit `policy` to run open in development.
+- `policy` pre-seeds agents, groups, and scopes. Prism's embedded OAuth 2.1 server is always on; with no `policy` block, no static agents exist and operators add them via the admin console (or rely on Dynamic Client Registration plus approval).
 
 ### Start Prism
 
@@ -216,13 +225,28 @@ curl http://localhost:9086/health
 # → {"status":"ok"}
 
 # Connected backends
-curl http://localhost:9086/backends
+curl http://localhost:9086/api/v1/backends
 # → [{"id":"github","namespace":"github","url":"http://localhost:3001/mcp"}, ...]
 ```
 
 ## Step 3: Connect Agent Harnesses
 
 Prism exposes a single MCP endpoint at `http://localhost:8080/mcp`. Any MCP-compatible agent connects here instead of directly to backends.
+
+Agents authenticate with OAuth 2.1 Bearer tokens issued by Prism's embedded auth server. Two paths:
+
+- **Static client credentials** — define the agent in `policy.agents` (or add it from the admin console). The agent exchanges its `client_id`/`client_secret` at `POST /token` for an access token, then sends `Authorization: Bearer <token>` to `/mcp`.
+- **Dynamic Client Registration (RFC 7591)** — many MCP clients (Claude Code, Cursor) discover the gateway via RFC 9728, register themselves at `POST /register`, and obtain a token automatically. The first time the agent connects, an admin approves it from the console and assigns groups.
+
+Get a token from the shell for testing:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/token \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=change-me" | jq -r .access_token)
+
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
 
 ### Claude Desktop
 
@@ -232,10 +256,10 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 {
   "mcpServers": {
     "prism": {
-      "transport": "streamable-http",
+      "type": "streamable-http",
       "url": "http://localhost:8080/mcp",
       "headers": {
-        "X-API-Key": "my-agent-key"
+        "Authorization": "Bearer YOUR_TOKEN_HERE"
       }
     }
   }
@@ -246,23 +270,23 @@ Restart Claude Desktop. You should see tools from all backends in the tool picke
 
 **Before Prism:** You'd configure each MCP server separately, each with its own credentials in the config. Every server's API keys sit in a plaintext JSON file on the user's machine.
 
-**After Prism:** One endpoint, one API key. Backend credentials live on the server running Prism, never on the developer's laptop.
+**After Prism:** One endpoint, one short-lived OAuth token. Backend credentials live on the server running Prism, never on the developer's laptop.
 
 ### Claude Code (CLI)
 
-Add to `~/.claude/mcp_servers.json` (global) or `.claude/mcp_servers.json` (per-project):
+Claude Code supports OAuth discovery: point it at the gateway and it will register a DCR client automatically.
 
 ```json
+// ~/.claude/mcp_servers.json
 {
   "prism": {
-    "transport": "streamable-http",
-    "url": "http://localhost:8080/mcp",
-    "headers": {
-      "X-API-Key": "my-agent-key"
-    }
+    "type": "streamable-http",
+    "url": "http://localhost:8080/mcp"
   }
 }
 ```
+
+The first connection prompts in the console for admin approval. To bypass DCR and use a static token instead, add an `Authorization: Bearer …` header as in the Claude Desktop example.
 
 ### Cursor
 
@@ -271,10 +295,10 @@ In Cursor settings (Settings → MCP Servers → Add):
 ```json
 {
   "prism": {
-    "transport": "streamable-http",
+    "type": "streamable-http",
     "url": "http://localhost:8080/mcp",
     "headers": {
-      "X-API-Key": "my-agent-key"
+      "Authorization": "Bearer YOUR_TOKEN_HERE"
     }
   }
 }
@@ -287,10 +311,10 @@ In `~/.windsurf/mcp_servers.json`:
 ```json
 {
   "prism": {
-    "transport": "streamable-http",
+    "type": "streamable-http",
     "url": "http://localhost:8080/mcp",
     "headers": {
-      "X-API-Key": "my-agent-key"
+      "Authorization": "Bearer YOUR_TOKEN_HERE"
     }
   }
 }
@@ -303,7 +327,7 @@ from openai_agents import Agent, MCPServerStreamableHTTP
 
 async with MCPServerStreamableHTTP(
     url="http://localhost:8080/mcp",
-    headers={"X-API-Key": "my-agent-key"},
+    headers={"Authorization": f"Bearer {TOKEN}"},
 ) as mcp:
     agent = Agent(
         name="my-agent",
@@ -321,11 +345,7 @@ client := mcp.NewClient(&mcp.Implementation{Name: "my-agent", Version: "0.1.0"},
 session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
     Endpoint: "http://localhost:8080/mcp",
     HTTPClient: &http.Client{
-        Transport: &headerTransport{
-            base:   http.DefaultTransport,
-            header: "X-API-Key",
-            value:  "my-agent-key",
-        },
+        Transport: &bearerTransport{base: http.DefaultTransport, token: TOKEN},
     },
 }, nil)
 
@@ -338,13 +358,12 @@ result, _ := session.CallTool(ctx, &mcp.CallToolParams{
     Arguments: map[string]any{"hostname": "example.com"},
 })
 
-// headerTransport sets the auth header on every request.
-type headerTransport struct {
-    base   http.RoundTripper
-    header, value string
+type bearerTransport struct {
+    base  http.RoundTripper
+    token string
 }
-func (t *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-    r.Header.Set(t.header, t.value)
+func (t *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+    r.Header.Set("Authorization", "Bearer "+t.token)
     return t.base.RoundTrip(r)
 }
 ```
@@ -357,7 +376,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 async with streamablehttp_client(
     "http://localhost:8080/mcp",
-    headers={"X-API-Key": "my-agent-key"},
+    headers={"Authorization": f"Bearer {TOKEN}"},
 ) as (read, write, _):
     async with ClientSession(read, write) as session:
         await session.initialize()
@@ -387,7 +406,7 @@ Watch the audit log (stderr or your configured output):
 ### 3. Check the admin API
 
 ```bash
-curl -s http://localhost:9086/backends | jq .
+curl -s http://localhost:9086/api/v1/backends | jq .
 curl -s http://localhost:9086/health
 ```
 
@@ -437,8 +456,12 @@ Each bridge is isolated: own container, own resources, own network namespace. A 
 
 ## Next Steps
 
-- **OAuth 2.1 auth**: See the [config reference](../README.md#oauth-21-production--agentic) for Keycloak, Auth0, or any OIDC provider
-- **Scope enforcement**: With OAuth, agents only see tools their token grants access to
-- **Deployment**: See [deployment.md](deployment.md) for systemd, Docker, Kubernetes, and production hardening
-- **Credential rotation**: Use `command`-type credentials with Vault or cloud CLI for automatic rotation
-- **Write your own tools**: See `examples/tools/` for bash and Python examples
+- **Agents and policy**: Edit agents, groups, and per-backend policies (workspace bindings, per-policy rate limits) from the admin console.
+- **Admin SSO**: Protect the admin port with OIDC sign-in — see the `admin_auth` block in the [README config reference](../README.md#admin-auth).
+- **Admin API contract**: See [admin-api.md](admin-api.md) for the `/api/v1` route ledger, root health/metrics/callback paths, and admin/session access split.
+- **Deployment**: See [deployment.md](deployment.md) for systemd, Docker, Kubernetes, reverse proxy, and production hardening.
+- **OpenAPI backends**: Add any HTTP API with an OpenAPI 3 spec from the Servers page — no bridge or stdio server needed.
+- **Workspace bridge**: Run `prism-bridge workspace` next to your editor/agent to expose a project tree as workspace-scoped MCP tools with sandbox snapshots and staged write-back.
+- **Credential rotation**: Use `command`-type credentials with Vault or a cloud CLI for automatic rotation.
+- **Tracing**: Set `OTEL_EXPORTER_OTLP_ENDPOINT` to ship request traces to your OpenTelemetry collector.
+- **Write your own tools**: See `examples/tools/` for bash and Python examples.

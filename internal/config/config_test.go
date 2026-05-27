@@ -276,8 +276,8 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestPublicURLExplicit(t *testing.T) {
 	path := writeConfig(t, `{
-		"public_url": "http://172.16.30.90:8080",
-		"admin_public_url": "http://172.16.30.90:9090",
+		"public_url": "http://192.0.2.10:8080",
+		"admin_public_url": "http://192.0.2.10:9090",
 		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
 	}`)
 
@@ -285,17 +285,17 @@ func TestPublicURLExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if c.PublicURL != "http://172.16.30.90:8080" {
+	if c.PublicURL != "http://192.0.2.10:8080" {
 		t.Errorf("expected explicit public_url, got %q", c.PublicURL)
 	}
-	if c.AdminPublicURL != "http://172.16.30.90:9090" {
+	if c.AdminPublicURL != "http://192.0.2.10:9090" {
 		t.Errorf("expected explicit admin_public_url, got %q", c.AdminPublicURL)
 	}
 }
 
 func TestPublicURLExplicitTrailingSlash(t *testing.T) {
 	path := writeConfig(t, `{
-		"public_url": "http://172.16.30.90:8080/",
+		"public_url": "http://192.0.2.10:8080/",
 		"mcpServers": { "test": { "url": "http://localhost:3000/mcp" } }
 	}`)
 
@@ -303,7 +303,7 @@ func TestPublicURLExplicitTrailingSlash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if c.PublicURL != "http://172.16.30.90:8080" {
+	if c.PublicURL != "http://192.0.2.10:8080" {
 		t.Errorf("expected trailing slash stripped, got %q", c.PublicURL)
 	}
 }

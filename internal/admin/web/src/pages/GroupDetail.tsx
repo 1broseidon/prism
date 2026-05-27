@@ -20,23 +20,36 @@ function namespaceHints(): string[] {
 export function GroupDetail() {
   const { params } = useRoute();
   const loc = useLocation();
-  const name = decodeURIComponent(params.name);
+  const routeParam = decodeURIComponent(params.name);
   const list = groups.data.value || [];
-  const group = list.find((g) => g.name === name);
+  // Identity-aware lookup: match against id first (canonical post-task-48
+  // URL), then fall back to display_name + legacy name. Agents store
+  // group membership by id post-migration; match members by id+name to
+  // cover both shapes.
+  const group =
+    list.find((g) => g.id === routeParam) ||
+    list.find((g) => g.name === routeParam) ||
+    list.find((g) => g.display_name === routeParam);
   const ag = agents.data.value || [];
 
   const members = useMemo<Agent[]>(() => {
-    return ag.filter((a) => (a.policy?.groups || []).includes(name));
-  }, [ag, name]);
+    if (!group) return [];
+    const keys = [group.id, group.name, group.display_name].filter(
+      (v): v is string => !!v,
+    );
+    return ag.filter((a) =>
+      (a.policy?.groups || []).some((g) => keys.includes(g)),
+    );
+  }, [ag, group]);
 
   const [editing, setEditing] = useState(false);
 
   if (groups.data.value === null) {
-    return <Shell title={name}>loading…</Shell>;
+    return <Shell title={routeParam}>loading…</Shell>;
   }
   if (!group) {
     return (
-      <Shell title={name}>
+      <Shell title={routeParam}>
         <div class="empty-state">
           group not found.{" "}
           <a href="/policy" class="link-accent">
@@ -49,11 +62,13 @@ export function GroupDetail() {
 
   const isConfig = group.source === "config";
   const mutate = canMutate();
+  const routeKey = group.id || group.name;
+  const label = group.display_name || group.name;
 
   const commit = async (next: string[]) => {
     setEditing(false);
     await withToast(async () => {
-      await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
+      await putJSON(`/groups/${encodeURIComponent(routeKey)}`, {
         scopes: next,
       });
       await groups.refresh();
@@ -64,12 +79,12 @@ export function GroupDetail() {
   const remove = async () => {
     if (
       !confirm(
-        `Delete group "${group.name}"? Agents currently in this group will lose its scopes.`,
+        `Delete group "${label}"? Agents currently in this group will lose its scopes.`,
       )
     )
       return;
     const ok = await withToast(async () => {
-      await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
+      await deleteJSON(`/groups/${encodeURIComponent(routeKey)}`);
       await groups.refresh();
       await agents.refresh();
     });
@@ -83,12 +98,12 @@ export function GroupDetail() {
         <span class="breadcrumb-sep">/</span>
         <span>groups</span>
         <span class="breadcrumb-sep">/</span>
-        <span class="breadcrumb-current">{group.name}</span>
+        <span class="breadcrumb-current">{label}</span>
       </div>
 
       <div class="detail-header">
         <div>
-          <div class="page-title">{group.name}</div>
+          <div class="page-title">{label}</div>
           <div class="page-subtitle">
             {isConfig
               ? "defined in config · read-only from the console"
@@ -151,7 +166,12 @@ export function GroupDetail() {
         ) : (
           <div class="agent-list">
             {members.map((a) => (
-              <MemberRow key={a.client_id} agent={a} groupName={name} />
+              <MemberRow
+                key={a.client_id}
+                agent={a}
+                groupKey={routeKey}
+                groupLabel={label}
+              />
             ))}
           </div>
         )}
@@ -217,7 +237,15 @@ function MetaItem({ label, value }: { label: string; value: string }) {
   );
 }
 
-function MemberRow({ agent, groupName }: { agent: Agent; groupName: string }) {
+function MemberRow({
+  agent,
+  groupKey,
+  groupLabel,
+}: {
+  agent: Agent;
+  groupKey: string;
+  groupLabel: string;
+}) {
   const loc = useLocation();
   const display = agent.label || agent.description || agent.client_id;
   const [name, ctx] = splitLabel(display);
@@ -233,10 +261,14 @@ function MemberRow({ agent, groupName }: { agent: Agent; groupName: string }) {
     e.stopPropagation();
     const policy = agent.policy || { groups: [], grant: [], deny: [] };
     await withToast(async () => {
+      // Strip both the id and the label so legacy name-keyed and
+      // post-migration id-keyed memberships both clear.
       await putJSON(
         `/agents/${encodeURIComponent(agent.prism_id!)}/policy`,
         {
-          groups: (policy.groups || []).filter((g) => g !== groupName),
+          groups: (policy.groups || []).filter(
+            (g) => g !== groupKey && g !== groupLabel,
+          ),
           grant: policy.grant || [],
           deny: policy.deny || [],
         },

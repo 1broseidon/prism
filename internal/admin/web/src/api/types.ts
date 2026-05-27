@@ -81,6 +81,7 @@ export interface WorkspaceConfig {
 
 export interface Backend {
   id: string;
+  display_name?: string;
   namespace?: string;
   url?: string;
   enabled: boolean;
@@ -119,6 +120,8 @@ export interface BackendPolicy {
 
 export interface Group {
   name: string;
+  id?: string;
+  display_name?: string;
   scopes: string[];
   source: "config" | "dynamic";
   backend_policies?: Record<string, BackendPolicy>;

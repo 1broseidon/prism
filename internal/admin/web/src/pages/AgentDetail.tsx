@@ -7,7 +7,6 @@ import { canMutate } from "../state/me";
 import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
 import { ScopeList } from "../components/ScopeList";
 import { StatusCell } from "../components/StatusCell";
-import { CopyId } from "../components/CopyId";
 import { decodeAgentRouteID, findAgentForRoute } from "../util/agentRoute";
 import type {
   Agent,
@@ -81,11 +80,7 @@ export function AgentDetail() {
             })()}
           </div>
           <div class="page-subtitle">
-            {agent.dynamic ? "dynamic · oauth dcr" : "static · config"} ·{" "}
-            <CopyId
-              value={agent.prism_id || agent.client_id}
-              label={agent.prism_id ? "prism_id" : "client_id"}
-            />
+            {agent.dynamic ? "dynamic · oauth dcr" : "static · config"}
           </div>
         </div>
         <div class="detail-status">

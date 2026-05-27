@@ -189,12 +189,8 @@ export function SettingsSignIn() {
 
   return (
     <SettingsLayout>
-      <div class="page-header">
-        <div>
-          <div class="page-subtitle">
-            console sign-in. when disabled, the console runs open.
-          </div>
-        </div>
+      <div class="settings-section-intro">
+        console sign-in. when disabled, the console runs open.
       </div>
 
       <div class="section">

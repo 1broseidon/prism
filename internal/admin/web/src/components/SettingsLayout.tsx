@@ -8,9 +8,9 @@ interface Tab {
 }
 
 const TABS: Tab[] = [
-  { href: "/settings/network", label: "Network" },
-  { href: "/settings/storage", label: "Storage", matchPrefix: "/settings/storage" },
-  { href: "/settings/sign-in", label: "Sign-in" },
+  { href: "/settings/network", label: "network" },
+  { href: "/settings/storage", label: "storage", matchPrefix: "/settings/storage" },
+  { href: "/settings/sign-in", label: "sign-in" },
 ];
 
 export function SettingsLayout({ children }: { children: ComponentChildren }) {

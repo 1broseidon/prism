@@ -23,6 +23,21 @@ type AgentPolicyResolution struct {
 	BackendID string                    `json:"backend_id"`
 	Workspace *AgentWorkspaceResolution `json:"workspace,omitempty"`
 	RateLimit *AgentRateLimitResolution `json:"rate_limit,omitempty"`
+	// Bindings lists every GrantBinding contributing to this resolution,
+	// along with the inheritance source that brought it in (agent:, group:,
+	// or role:). Empty when no grants apply.
+	Bindings []BindingRef `json:"bindings,omitempty"`
+}
+
+// BindingRef is the per-resolution view of one GrantBinding: the binding's
+// own identifier plus the template hash/version it points at and the
+// inheritance source (agent:..., group:..., role:...) that brought it
+// into this agent's resolution.
+type BindingRef struct {
+	ID           string `json:"id"`
+	TemplateID   string `json:"template_id,omitempty"`
+	TemplateHash string `json:"template_hash,omitempty"`
+	Source       string `json:"source,omitempty"`
 }
 
 // AgentWorkspaceResolution is the workspace-dimension trace.
@@ -97,7 +112,23 @@ func (a *API) handleAgentByPrismID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, agent)
+	// Round-trip the agent struct through JSON so we can splice in the
+	// grant-resolution slice without coupling to a specific agent type.
+	data, err := json.Marshal(agent)
+	if err != nil {
+		writeJSON(w, http.StatusOK, agent)
+		return
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		writeJSON(w, http.StatusOK, agent)
+		return
+	}
+	if envelope == nil {
+		envelope = make(map[string]any)
+	}
+	envelope["grant_resolution"] = a.agentGrantResolution(prismID, 50)
+	writeJSON(w, http.StatusOK, envelope)
 }
 
 // handleSetAgentPolicy handles PUT /agents/{prism_id}/policy — set policy for a DCR agent.

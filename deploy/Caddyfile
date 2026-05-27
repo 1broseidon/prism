@@ -1,6 +1,6 @@
 # Prism reverse proxy — single-hostname consolidation.
 #
-# Everything reachable under https://mcp.dfam.one (port 443):
+# Everything reachable under https://prism.example.com (port 443):
 #   /mcp, /mcp/*                                → gateway   (prism:8080)
 #   /token, /authorize, /register               → gateway   (DCR OAuth 2.1)
 #   /.well-known/oauth-protected-resource*      → gateway   (RFC 9728)
@@ -11,21 +11,21 @@
 #
 # Gateway and admin own non-overlapping paths so the split is safe.
 #
-# TLS uses Let's Encrypt DNS-01 via Cloudflare, so mcp.dfam.one can resolve
+# TLS uses Let's Encrypt DNS-01 via Cloudflare, so prism.example.com can resolve
 # to a private LAN address while clients still receive a public-trusted cert.
 # Required env var in the Caddy container:
 #   CLOUDFLARE_API_TOKEN
 #
 # Settings page must have:
-#   public_url       = https://mcp.dfam.one
-#   admin_public_url = https://mcp.dfam.one
+#   public_url       = https://prism.example.com
+#   admin_public_url = https://prism.example.com
 #   trust_proxy_headers = on
 {
 	# Disable Caddy's admin endpoint — not used, smaller attack surface.
 	admin off
 }
 
-mcp.dfam.one {
+prism.example.com {
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/1broseidon/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/identity"
 )
 
 // Policy key prefix for the KV store.
@@ -506,31 +507,44 @@ func (s *Server) loadPersistedDefaults() {
 // --- Group CRUD (KV-backed) ---
 
 // GetGroup reads a group from the KV store. Returns nil, nil if not found.
-func (s *Server) GetGroup(name string) (*GroupConfig, error) {
+// Accepts either a display name or a ULID — storage is ULID-keyed post-
+// task-48; ULID inputs are read directly, name inputs resolve via the
+// dispatcher. Falls back to direct name-keyed lookup when the dispatcher
+// is unwired (tests) or the name predates a migration.
+func (s *Server) GetGroup(nameOrID string) (*GroupConfig, error) {
 	if s.store == nil {
 		return nil, nil
 	}
-	data, err := s.store.Get(groupKeyPrefix + name)
-	if err != nil {
-		return nil, nil
+	for _, key := range s.groupStorageKeys(nameOrID) {
+		data, err := s.store.Get(groupKeyPrefix + key)
+		if err != nil {
+			continue
+		}
+		var g GroupConfig
+		if err := json.Unmarshal(data, &g); err != nil {
+			return nil, fmt.Errorf("unmarshal group: %w", err)
+		}
+		return &g, nil
 	}
-	var g GroupConfig
-	if err := json.Unmarshal(data, &g); err != nil {
-		return nil, fmt.Errorf("unmarshal group: %w", err)
-	}
-	return &g, nil
+	return nil, nil
 }
 
-// SetGroup writes a group to the KV store and updates the in-memory group map.
+// SetGroup writes a group to the KV store and updates the in-memory group
+// map. Storage is keyed by the dispatcher-assigned ULID when the dispatcher
+// is wired; otherwise by the operator-supplied name (legacy path).
 func (s *Server) SetGroup(name string, g *GroupConfig) error {
 	if s.store == nil {
 		return errors.New("no KV store configured")
+	}
+	if err := s.ensureGroupIdentity(name); err != nil {
+		return err
 	}
 	data, err := json.Marshal(g)
 	if err != nil {
 		return fmt.Errorf("marshal group: %w", err)
 	}
-	if err := s.store.Set(groupKeyPrefix+name, data); err != nil {
+	key := s.groupPrimaryKey(name)
+	if err := s.store.Set(groupKeyPrefix+key, data); err != nil {
 		return err
 	}
 	// Update in-memory map so policy resolution sees the change immediately.
@@ -538,8 +552,66 @@ func (s *Server) SetGroup(name string, g *GroupConfig) error {
 	if s.groups == nil {
 		s.groups = make(map[string]GroupConfig)
 	}
-	s.groups[name] = *g
+	s.groups[key] = *g
 	s.mu.Unlock()
+	return nil
+}
+
+// groupPrimaryKey returns the canonical KV key suffix for a group reference.
+// nameOrID may be either a display name or a ULID — ULID input returns
+// unchanged; name input resolves via the dispatcher; unwired dispatcher
+// or unknown name returns nameOrID as-is for legacy compatibility.
+func (s *Server) groupPrimaryKey(nameOrID string) string {
+	if identity.IsULID(nameOrID) {
+		return nameOrID
+	}
+	if s.identityDispatcher == nil {
+		return nameOrID
+	}
+	if ent, err := s.identityDispatcher.ResolveByName(identity.KindGroup, nameOrID); err == nil {
+		return ent.ID
+	}
+	return nameOrID
+}
+
+// groupStorageKeys returns lookup keys in fallback order — ULID first
+// (post-migration), then raw name (pre-migration / unwired-dispatcher).
+func (s *Server) groupStorageKeys(nameOrID string) []string {
+	primary := s.groupPrimaryKey(nameOrID)
+	if primary == nameOrID {
+		return []string{nameOrID}
+	}
+	return []string{primary, nameOrID}
+}
+
+// resolveGroupDisplayName turns a storage key (ULID or legacy name) into the
+// operator-facing display name. Inputs that are already names (or unknown
+// to the dispatcher) are returned unchanged.
+func (s *Server) resolveGroupDisplayName(keyOrName string) string {
+	if s.identityDispatcher == nil || !identity.IsULID(keyOrName) {
+		return keyOrName
+	}
+	if ent, err := s.identityDispatcher.Resolve(keyOrName); err == nil && ent.Kind == identity.KindGroup {
+		return ent.DisplayName
+	}
+	return keyOrName
+}
+
+// ensureGroupIdentity registers name in the identity dispatcher when it has
+// no existing entry. A dispatcher that is unwired (tests that skip the
+// migration) is a silent no-op so legacy name-keyed paths keep working.
+func (s *Server) ensureGroupIdentity(name string) error {
+	if s.identityDispatcher == nil {
+		return nil
+	}
+	if _, err := s.identityDispatcher.ResolveByName(identity.KindGroup, name); err == nil {
+		return nil
+	} else if !errors.Is(err, identity.ErrNotFound) {
+		return fmt.Errorf("identity lookup for group %q: %w", name, err)
+	}
+	if _, err := s.identityDispatcher.Allocate(identity.KindGroup, name); err != nil && !errors.Is(err, identity.ErrDisplayNameInUse) {
+		return fmt.Errorf("register group identity %q: %w", name, err)
+	}
 	return nil
 }
 
@@ -548,26 +620,33 @@ func (s *Server) DeleteGroup(name string) error {
 	if s.store == nil {
 		return errors.New("no KV store configured")
 	}
-	if err := s.store.Delete(groupKeyPrefix + name); err != nil {
-		return err
+	for _, key := range s.groupStorageKeys(name) {
+		if err := s.store.Delete(groupKeyPrefix + key); err != nil {
+			return err
+		}
 	}
 	s.mu.Lock()
-	delete(s.groups, name)
+	for _, key := range s.groupStorageKeys(name) {
+		delete(s.groups, key)
+	}
 	s.mu.Unlock()
 	return nil
 }
 
 // ListGroups merges config-sourced groups with KV-stored groups.
 // KV groups win on name conflict. Config groups have source="config",
-// KV groups have source="dynamic".
+// KV groups have source="dynamic". KV-stored groups are keyed by ULID
+// post-migration; ListGroups resolves each ID to its display_name via the
+// dispatcher so callers continue to see operator-facing names.
 func (s *Server) ListGroups() []GroupInfo {
 	s.mu.RLock()
 	configGroups := s.groups
 	s.mu.RUnlock()
 
-	// Start with a map of config groups.
+	// Start with a map of config groups (always name-keyed in memory).
 	merged := make(map[string]GroupInfo)
-	for name, g := range configGroups {
+	for nameOrID, g := range configGroups {
+		name := s.resolveGroupDisplayName(nameOrID)
 		merged[name] = GroupInfo{
 			Name:            name,
 			Scopes:          g.Scopes,
@@ -581,7 +660,8 @@ func (s *Server) ListGroups() []GroupInfo {
 		keys, err := s.store.List(groupKeyPrefix)
 		if err == nil {
 			for _, key := range keys {
-				name := strings.TrimPrefix(key, groupKeyPrefix)
+				keySuffix := strings.TrimPrefix(key, groupKeyPrefix)
+				name := s.resolveGroupDisplayName(keySuffix)
 				data, getErr := s.store.Get(key)
 				if getErr != nil {
 					continue

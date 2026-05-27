@@ -91,7 +91,7 @@ func codeChallenge(verifier string) string {
 // ProbeAuthOptions carries per-request inputs to ProbeBackendAuth.
 type ProbeAuthOptions struct {
 	// CallbackOverride is the externally-reachable base URL the provider
-	// should redirect to (e.g. http://172.16.30.90:9086). Empty falls back
+	// should redirect to (e.g. http://192.0.2.10:9086). Empty falls back
 	// to admin_public_url / localhost.
 	CallbackOverride string
 	// ManualClientID + Secret skip DCR. Required for providers without DCR
@@ -407,12 +407,13 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 
 	// Connect the backend.
 	sc := &config.ServerConfig{
-		ID:        flow.BackendID,
-		Namespace: flow.BackendID,
-		Enabled:   true,
-		URL:       flow.BackendURL,
-		Sandbox:   config.CompatSandboxConfig(),
-		Timeout:   config.Duration(30 * time.Second),
+		ID:          flow.BackendID,
+		DisplayName: flow.BackendID,
+		Namespace:   flow.BackendID,
+		Enabled:     true,
+		URL:         flow.BackendURL,
+		Sandbox:     config.CompatSandboxConfig(),
+		Timeout:     config.Duration(30 * time.Second),
 	}
 	if err := g.ConnectBackend(ctx, sc); err != nil {
 		g.setAuthStatus(flow.BackendID, "failed:connect:"+err.Error())
@@ -421,9 +422,10 @@ func (g *Gateway) CompleteAuthFlow(ctx context.Context, state, code string) erro
 
 	// Persist backend config.
 	g.persistBackend(flow.BackendID, &persistedBackend{
-		URL:     flow.BackendURL,
-		Enabled: boolPtr(true),
-		Sandbox: &sc.Sandbox,
+		DisplayName: flow.BackendID,
+		URL:         flow.BackendURL,
+		Enabled:     boolPtr(true),
+		Sandbox:     &sc.Sandbox,
 	})
 
 	g.setAuthStatus(flow.BackendID, "connected")

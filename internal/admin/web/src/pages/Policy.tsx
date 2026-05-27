@@ -14,7 +14,7 @@ const SYSTEM_SCOPE = "mcp:connect";
 
 function namespaceHints(): string[] {
   const ns = (backends.data.value || [])
-    .map((b) => b.namespace || b.id)
+    .map((b) => b.namespace || b.display_name || b.id)
     .filter(Boolean);
   return ns.map((n) => `${n}:*`).sort();
 }
@@ -107,6 +107,14 @@ function DefaultsSection() {
 
 function GroupsSection({ groups: gr }: { groups: Group[] }) {
   const [adding, setAdding] = useState(false);
+  const agentList = agents.data.value || [];
+  // Member count: agents that name this group via id, name, or display_name.
+  const memberCount = (g: Group) => {
+    const keys = [g.id, g.name, g.display_name].filter((v): v is string => !!v);
+    return agentList.filter((a) =>
+      (a.policy?.groups || []).some((x) => keys.includes(x)),
+    ).length;
+  };
 
   return (
     <div class="section">
@@ -118,9 +126,9 @@ function GroupsSection({ groups: gr }: { groups: Group[] }) {
           </button>
         )}
       </div>
-      <div class="groups-list">
+      <div class="group-list">
         {gr.map((g) => (
-          <GroupCard key={g.name} group={g} />
+          <GroupRow key={g.id || g.name} group={g} members={memberCount(g)} />
         ))}
         {adding && (
           <AddGroupForm
@@ -187,13 +195,19 @@ function AddGroupForm({
   );
 }
 
-function GroupCard({ group }: { group: Group }) {
+function GroupRow({ group, members }: { group: Group; members: number }) {
   const [editing, setEditing] = useState(false);
+  // Identity routing: ULID is the canonical key — name is the legacy
+  // fallback for config-sourced groups that pre-date the dispatcher.
+  const routeKey = group.id || group.name;
+  const label = group.display_name || group.name;
+  const isConfig = group.source === "config";
+  const mutate = canMutate() && !isConfig;
 
   const commit = async (next: string[]) => {
     setEditing(false);
     await withToast(async () => {
-      await putJSON(`/groups/${encodeURIComponent(group.name)}`, {
+      await putJSON(`/groups/${encodeURIComponent(routeKey)}`, {
         scopes: next,
       });
       await groups.refresh();
@@ -201,73 +215,107 @@ function GroupCard({ group }: { group: Group }) {
     });
   };
 
-  const remove = async () => {
-    if (!confirm(`Delete group "${group.name}"?`)) return;
+  const remove = async (e: MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm(`Delete group "${label}"?`)) return;
     await withToast(async () => {
-      await deleteJSON(`/groups/${encodeURIComponent(group.name)}`);
+      await deleteJSON(`/groups/${encodeURIComponent(routeKey)}`);
       await groups.refresh();
       await agents.refresh();
     });
   };
 
-  const detailHref = `/policy/groups/${encodeURIComponent(group.name)}`;
-
-  if (group.source === "config") {
-    return (
-      <div class="group-card">
-        <a href={detailHref} class="group-name group-name-link">
-          {group.name}
-        </a>
-        {group.scopes.map((s) => (
-          <span class="group-scope" key={s}>
-            {s}
-          </span>
-        ))}
-        <span class="group-source">config</span>
-      </div>
-    );
-  }
+  const detailHref = `/policy/groups/${encodeURIComponent(routeKey)}`;
 
   if (editing) {
     return (
-      <div class="group-card">
-        <span class="group-name">{group.name}</span>
-        <ScopeEditor
-          initial={group.scopes}
-          hints={namespaceHints()}
-          inputWidth="100px"
-          onCommit={commit}
-          onCancel={() => setEditing(false)}
-        />
+      <div class="group-row group-row-editing">
+        <div class="group-row-main">
+          <div class="group-row-header">
+            <span class={`status-pip ${isConfig ? "status-pip-neutral" : "status-pip-ok"}`} />
+            <span class="group-row-name">{label}</span>
+          </div>
+          <div style="margin-top:8px">
+            <ScopeEditor
+              initial={group.scopes}
+              hints={namespaceHints()}
+              inputWidth="120px"
+              onCommit={commit}
+              onCancel={() => setEditing(false)}
+            />
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div class="group-card">
-      <a href={detailHref} class="group-name group-name-link">
-        {group.name}
-      </a>
-      {group.scopes.length === 0 ? (
-        <span class="hint-text">no scopes</span>
-      ) : (
-        group.scopes.map((s) => (
-          <span class="group-scope" key={s}>
-            {s}
+    <a class="group-row" href={detailHref}>
+      <div class="group-row-main">
+        <div class="group-row-header">
+          <span class={`status-pip ${isConfig ? "status-pip-neutral" : "status-pip-ok"}`} />
+          <span class="group-row-name">{label}</span>
+          {group.id && group.id !== label && (
+            <span class="group-row-ns" title={group.id}>
+              / {group.id.slice(0, 8)}…
+            </span>
+          )}
+          <span class="group-row-source">
+            {isConfig ? "config" : "dynamic"}
           </span>
-        ))
-      )}
-      {canMutate() && (
-        <>
-          <button class="group-action" onClick={() => setEditing(true)}>
-            edit
-          </button>
-          <button class="group-action delete" onClick={remove}>
-            ×
-          </button>
-        </>
-      )}
-    </div>
+        </div>
+        <div class="group-row-meta">
+          {group.scopes.length === 0 ? (
+            <span class="hint-text">no scopes</span>
+          ) : (
+            group.scopes.slice(0, 6).map((s) => (
+              <span class="group-row-scope" key={s}>
+                {s}
+              </span>
+            ))
+          )}
+          {group.scopes.length > 6 && (
+            <span class="hint-text">+ {group.scopes.length - 6} more</span>
+          )}
+        </div>
+      </div>
+      <div class="group-row-stats">
+        <div class="group-row-stat">
+          <div class="group-row-stat-value">{group.scopes.length}</div>
+          <div class="group-row-stat-label">
+            scope{group.scopes.length === 1 ? "" : "s"}
+          </div>
+        </div>
+        <div class="group-row-stat">
+          <div class="group-row-stat-value">{members}</div>
+          <div class="group-row-stat-label">
+            member{members === 1 ? "" : "s"}
+          </div>
+        </div>
+        {mutate && (
+          <div class="group-row-actions">
+            <button
+              class="group-action"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setEditing(true);
+              }}
+              title="edit scopes"
+            >
+              edit
+            </button>
+            <button
+              class="group-action delete"
+              onClick={remove}
+              title="delete group"
+            >
+              ×
+            </button>
+          </div>
+        )}
+      </div>
+    </a>
   );
 }
 
@@ -344,24 +392,28 @@ function StoragePolicySection({ groups: gr }: { groups: Group[] }) {
 
       {editableGroups.length === 0 ? null : (
         <div class="storage-group-layers">
-          {editableGroups.map((g) => (
-            <StoragePolicyLayer
-              key={g.name}
-              title={`group: ${g.name}`}
-              policies={g.backend_policies}
-              backends={backendList}
-              workspaces={workspaces}
-              readOnly={!mutate}
-              onSave={(next) =>
-                savePolicies(g.name, () =>
-                  putJSON(
-                    `/groups/${encodeURIComponent(g.name)}/backend-policies`,
-                    next,
-                  ),
-                )
-              }
-            />
-          ))}
+          {editableGroups.map((g) => {
+            const routeKey = g.id || g.name;
+            const label = g.display_name || g.name;
+            return (
+              <StoragePolicyLayer
+                key={routeKey}
+                title={`group: ${label}`}
+                policies={g.backend_policies}
+                backends={backendList}
+                workspaces={workspaces}
+                readOnly={!mutate}
+                onSave={(next) =>
+                  savePolicies(label, () =>
+                    putJSON(
+                      `/groups/${encodeURIComponent(routeKey)}/backend-policies`,
+                      next,
+                    ),
+                  )
+                }
+              />
+            );
+          })}
         </div>
       )}
 
@@ -397,6 +449,10 @@ function AgentOverridesSubsection() {
             const ids = Object.keys(bp).sort();
             const name = a.label || a.description || a.client_id;
             const route = a.prism_id || a.client_id;
+            const backendLabel = (id: string) => {
+              const b = (backends.data.value || []).find((x) => x.id === id);
+              return b?.display_name || b?.namespace || id;
+            };
             return (
               <div class="storage-layer-row" key={route}>
                 <a
@@ -414,7 +470,7 @@ function AgentOverridesSubsection() {
                         parts.push(rule.workspace_selector);
                       if (rule.rate_limit?.rps)
                         parts.push(`${rule.rate_limit.rps} rps`);
-                      return `${id}: ${parts.join(" · ") || "—"}`;
+                      return `${backendLabel(id)}: ${parts.join(" · ") || "—"}`;
                     })
                     .join("    ")}
                 </span>
@@ -452,7 +508,7 @@ function StoragePolicyLayer({
   title: string;
   sub?: string;
   policies: Record<string, BackendPolicy> | undefined;
-  backends: { id: string }[];
+  backends: { id: string; display_name?: string; namespace?: string }[];
   workspaces: Workspace[];
   readOnly: boolean;
   onSave: (next: Record<string, BackendPolicy>) => Promise<unknown>;
@@ -554,9 +610,12 @@ function StoragePolicyLayer({
           {backendList.map((b) => {
             const rule = draft[b.id] || {};
             const parsed = parseSelector(rule.workspace_selector);
+            const label = b.display_name || b.namespace || b.id;
             return (
               <div class="storage-layer-row" key={b.id}>
-                <span class="storage-layer-backend">{b.id}</span>
+                <span class="storage-layer-backend" title={b.id}>
+                  {label}
+                </span>
                 <select
                   class="config-input"
                   value={parsed.kind}

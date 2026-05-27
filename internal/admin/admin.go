@@ -9,13 +9,17 @@ import (
 	"time"
 
 	"github.com/1broseidon/prism/internal/adminauth"
+	"github.com/1broseidon/prism/internal/analytics"
 	"github.com/1broseidon/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/identity"
 	"github.com/1broseidon/prism/internal/metrics"
 )
 
 // GroupInfo mirrors authserver.GroupInfo for the admin API boundary.
 type GroupInfo struct {
+	ID              string                        `json:"id,omitempty"`
 	Name            string                        `json:"name"`
+	DisplayName     string                        `json:"display_name,omitempty"`
 	Scopes          []string                      `json:"scopes"`
 	Source          string                        `json:"source"` // "config" or "dynamic"
 	BackendPolicies map[string]auth.BackendPolicy `json:"backend_policies,omitempty"`
@@ -86,6 +90,26 @@ type API struct {
 	// binaryFetcher is a test hook mirroring openAPIFetcher for the
 	// POST /binaries/fetch path. Nil in production.
 	binaryFetcher binaryFetcherFactory
+	// identity is the central kind→{id, display_name} dispatcher used
+	// by the /identity routes. Wired by SetIdentity from
+	// cmd/prism/main.go; nil in tests that don't exercise identity
+	// endpoints (the handlers return 503 when unset).
+	identity identity.Dispatcher
+	// grantMgr is the KV-backed grant template + binding store wired
+	// by SetGrantManager. Production passes the live authserver.Server;
+	// tests pass a shim. Nil-safe — every handler 503s when unset.
+	grantMgr GrantManager
+	// analyticsStore is the historical grant-event store; analyticsRing
+	// is the in-memory ring for SSE tailing. Both wired by SetAnalytics;
+	// both nil-safe — handlers 503 when the relevant capability is
+	// missing.
+	analyticsStore         analytics.Store
+	analyticsRing          *analytics.RingBuffer
+	analyticsRetentionDays int
+	// policySummaryCache backs GET /agents/policy-summary with a 60s
+	// TTL. Lazy-instantiated on first use; mutation paths call
+	// invalidateAllAgentPolicySummaries which is nil-safe.
+	policySummaryCache *agentPolicySummaryCache
 }
 
 // SetBackendPolicyTraceProvider wires the per-agent resolution trace provider
@@ -195,15 +219,16 @@ func (a *API) registerAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /backends", a.session(http.HandlerFunc(a.handleBackends)))
 	mux.Handle("GET /info", a.session(http.HandlerFunc(a.handleInfo)))
 	mux.Handle("GET /agents", a.session(http.HandlerFunc(a.handleAgents)))
+	mux.Handle("GET /agents/roles", a.session(http.HandlerFunc(a.handleAgentsRoles)))
 	mux.Handle("GET /agents/{prism_id}/policy-resolution", a.session(http.HandlerFunc(a.handleAgentPolicyResolution)))
 	mux.Handle("GET /agents/", a.session(http.HandlerFunc(a.handleAgentByPrismID)))
 	mux.Handle("GET /events", a.session(http.HandlerFunc(a.handleEvents)))
 	mux.Handle("GET /groups", a.session(http.HandlerFunc(a.handleListGroups)))
-	mux.Handle("GET /groups/", a.session(http.HandlerFunc(a.handleGetGroup)))
+	mux.Handle("GET /groups/", a.session(a.identityCompat(identity.KindGroup, http.HandlerFunc(a.handleGetGroup))))
 	mux.Handle("GET /defaults", a.session(http.HandlerFunc(a.handleDefaults)))
 	mux.Handle("GET /workspaces", a.session(http.HandlerFunc(a.handleListWorkspaces)))
 	mux.Handle("GET /workspaces/{id}", a.session(http.HandlerFunc(a.handleGetWorkspace)))
-	mux.Handle("GET /backends/", a.session(http.HandlerFunc(a.handleBackendSub)))
+	mux.Handle("GET /backends/", a.session(a.identityCompat(identity.KindBackend, http.HandlerFunc(a.handleBackendSub))))
 
 	// Admin auth configuration — admin role required when admin auth is
 	// configured; pass-through (anonymous) in open mode, consistent with
@@ -225,9 +250,9 @@ func (a *API) registerAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /agents/", a.admin(http.HandlerFunc(a.handlePutAgent)))
 	mux.Handle("DELETE /agents/stale", a.admin(http.HandlerFunc(a.handleRemoveStaleAgents)))
 	mux.Handle("DELETE /agents/", a.admin(http.HandlerFunc(a.handleDeleteAgent)))
-	mux.Handle("PUT /groups/{name}/backend-policies", a.admin(http.HandlerFunc(a.handleSetGroupBackendPolicies)))
+	mux.Handle("PUT /groups/{name}/backend-policies", a.admin(a.identityCompat(identity.KindGroup, http.HandlerFunc(a.handleSetGroupBackendPolicies))))
 	mux.Handle("PUT /groups/", a.admin(http.HandlerFunc(a.handleSetGroup)))
-	mux.Handle("DELETE /groups/", a.admin(http.HandlerFunc(a.handleDeleteGroup)))
+	mux.Handle("DELETE /groups/", a.admin(a.identityCompat(identity.KindGroup, http.HandlerFunc(a.handleDeleteGroup))))
 	mux.Handle("PUT /defaults/backend-policies", a.admin(http.HandlerFunc(a.handleSetDefaultBackendPolicies)))
 	mux.Handle("PUT /defaults", a.admin(http.HandlerFunc(a.handleSetDefaults)))
 	mux.Handle("POST /workspaces", a.admin(http.HandlerFunc(a.handleCreateWorkspace)))
@@ -241,8 +266,8 @@ func (a *API) registerAPIRoutes(mux *http.ServeMux) {
 	// doesn't bind to a particular backend id.
 	mux.Handle("POST /openapi/scaffold-from-curl", a.admin(http.HandlerFunc(a.handleOpenAPIScaffold)))
 	mux.Handle("POST /backends/", a.admin(http.HandlerFunc(a.handleBackendPost)))
-	mux.Handle("PATCH /backends/", a.admin(http.HandlerFunc(a.handlePatchBackend)))
-	mux.Handle("DELETE /backends/", a.admin(http.HandlerFunc(a.handleRemoveBackend)))
+	mux.Handle("PATCH /backends/", a.admin(a.identityCompat(identity.KindBackend, http.HandlerFunc(a.handlePatchBackend))))
+	mux.Handle("DELETE /backends/", a.admin(a.identityCompat(identity.KindBackend, http.HandlerFunc(a.handleRemoveBackend))))
 
 	// Binary backend ingestion. Upload (multipart) and URL-fetch routes both
 	// land an ELF in the binstore and return its hash; the operator then
@@ -252,6 +277,44 @@ func (a *API) registerAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /binaries/upload", a.admin(http.HandlerFunc(a.handleBinaryUpload)))
 	mux.Handle("POST /binaries/fetch", a.admin(http.HandlerFunc(a.handleBinaryFetch)))
 	mux.Handle("GET /binaries/", a.session(http.HandlerFunc(a.handleBinaryGet)))
+
+	// Identity dispatcher routes. Reads are session-gated (any signed-in
+	// operator); writes are admin-gated. The session and admin wrappers
+	// no-op when admin auth is disabled, so the routes still work in
+	// "open" mode used by integration tests.
+	mux.Handle("GET /identity", a.session(http.HandlerFunc(a.handleIdentityRoot)))
+	mux.Handle("POST /identity", a.admin(http.HandlerFunc(a.handleIdentityRoot)))
+	mux.Handle("GET /identity/", a.session(http.HandlerFunc(a.handleIdentitySub)))
+	mux.Handle("PUT /identity/", a.admin(http.HandlerFunc(a.handleIdentitySub)))
+	mux.Handle("DELETE /identity/", a.admin(http.HandlerFunc(a.handleIdentitySub)))
+
+	// Grant templates and bindings (epic-3). The handler files are
+	// non-nil but the manager itself is wired separately via
+	// SetGrantManager — each handler returns 503 when unwired.
+	mux.Handle("GET /grant-templates", a.session(http.HandlerFunc(a.handleListGrantTemplates)))
+	mux.Handle("POST /grant-templates", a.admin(http.HandlerFunc(a.handleCreateGrantTemplate)))
+	mux.Handle("GET /grant-templates/", a.session(http.HandlerFunc(a.handleGetGrantTemplate)))
+	mux.Handle("PUT /grant-templates/", a.admin(http.HandlerFunc(a.handlePutGrantTemplate)))
+	mux.Handle("DELETE /grant-templates/", a.admin(http.HandlerFunc(a.handleDeleteGrantTemplate)))
+
+	mux.Handle("GET /grant-bindings", a.session(http.HandlerFunc(a.handleListGrantBindings)))
+	mux.Handle("POST /grant-bindings", a.admin(http.HandlerFunc(a.handleCreateGrantBinding)))
+	mux.Handle("GET /grant-bindings/", a.session(http.HandlerFunc(a.handleGetGrantBinding)))
+	mux.Handle("PUT /grant-bindings/", a.admin(http.HandlerFunc(a.handlePutGrantBinding)))
+	mux.Handle("DELETE /grant-bindings/", a.admin(http.HandlerFunc(a.handleDeleteGrantBinding)))
+
+	// Policy builder and verb resolution (epic-4).
+	a.registerPolicyRoutes(mux)
+
+	// Agents triage summary (epic-4).
+	mux.Handle("GET /agents/policy-summary", a.session(http.HandlerFunc(a.handleAgentsPolicySummary)))
+
+	// Analytics surface (epic-3 + epic-4).
+	mux.Handle("GET /analytics/status", a.session(http.HandlerFunc(a.handleAnalyticsStatus)))
+	mux.Handle("GET /analytics/events", a.session(http.HandlerFunc(a.handleAnalyticsEvents)))
+	mux.Handle("GET /analytics/events/tail", a.session(http.HandlerFunc(a.handleAnalyticsTail)))
+	mux.Handle("GET /analytics/templates", a.session(http.HandlerFunc(a.handleAnalyticsTemplates)))
+	mux.Handle("GET /analytics/templates/", a.session(http.HandlerFunc(a.handleAnalyticsTemplate)))
 }
 
 // handleBackendPost dispatches POST /backends/{id} and
@@ -355,7 +418,7 @@ func (a *API) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *API) handleBackends(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, a.statusFn())
+	writeJSON(w, http.StatusOK, a.withBackendDisplayNames(a.statusFn()))
 }
 
 func (a *API) handleInfo(w http.ResponseWriter, _ *http.Request) {

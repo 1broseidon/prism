@@ -2,10 +2,12 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/1broseidon/prism/internal/auth"
+	"github.com/1broseidon/prism/internal/identity"
 )
 
 // handleListGroups handles GET /groups — list all groups with source info.
@@ -14,7 +16,22 @@ func (a *API) handleListGroups(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "group management not available"})
 		return
 	}
-	writeJSON(w, http.StatusOK, a.groupMgr.ListGroups())
+	writeJSON(w, http.StatusOK, a.withGroupIdentities(a.groupMgr.ListGroups()))
+}
+
+func (a *API) withGroupIdentities(groups []GroupInfo) []GroupInfo {
+	if a.identity == nil {
+		return groups
+	}
+	for i := range groups {
+		ent, ok := a.resolveListIdentity(identity.KindGroup, groups[i].Name)
+		if !ok {
+			continue
+		}
+		groups[i].ID = ent.ID
+		groups[i].DisplayName = ent.DisplayName
+	}
+	return groups
 }
 
 // handleGetGroup handles GET /groups/{name} — single group details.
@@ -31,6 +48,14 @@ func (a *API) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g := a.groupMgr.GetGroup(name)
+	if g == nil {
+		// The URL after the compat redirect is a ULID; fall back to the
+		// display name when the underlying group manager indexes by name
+		// only (unit-test fakes; pre-migration legacy data).
+		if alt := a.resolveSubjectName(subjectTypeGroups, name); alt != name {
+			g = a.groupMgr.GetGroup(alt)
+		}
+	}
 	if g == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "group not found"})
 		return
@@ -53,6 +78,7 @@ func (a *API) handleSetGroup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid group name"})
 		return
 	}
+	name = a.resolveSubjectName(subjectTypeGroups, name)
 
 	var body struct {
 		Scopes []string `json:"scopes"`
@@ -79,6 +105,10 @@ func (a *API) handleSetGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteGroup handles DELETE /groups/{name} — delete a dynamic group.
+//
+// Refuses with 409 (Conflict) when at least one agent still claims
+// membership. Operators must remove every member via PUT
+// /agents/{prism_id}/policy before the delete succeeds.
 func (a *API) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	if a.groupMgr == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "group management not available"})
@@ -88,6 +118,17 @@ func (a *API) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/groups/")
 	if !isValidID(name) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid group name"})
+		return
+	}
+	// Translate ULID URLs back to the operator-facing name for the
+	// agent-membership scan + delete path, which uses display_name keys.
+	name = a.resolveSubjectName(subjectTypeGroups, name)
+
+	if members := a.countAgentsInGroup(name); members > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   fmt.Sprintf("group %q still has %d members; remove them before deleting", name, members),
+			"members": members,
+		})
 		return
 	}
 
@@ -105,6 +146,27 @@ func (a *API) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "deleted": name})
+}
+
+// countAgentsInGroup snapshots ListAgents and returns the count of agents
+// whose policy.Groups contains name. Returns 0 when AgentManager is
+// unwired so the delete is permitted in tests that don't exercise the
+// guard.
+func (a *API) countAgentsInGroup(name string) int {
+	if a.agentMgr == nil {
+		return 0
+	}
+	count := 0
+	for _, raw := range a.agentMgr.ListAgents() {
+		_, groups := agentGroupsFor(raw)
+		for _, g := range groups {
+			if g == name {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
 // handleDefaults handles GET /defaults — return current default scopes and

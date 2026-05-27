@@ -54,7 +54,7 @@ export function Overview() {
 
       <McpConnectBanner />
 
-      <div class="tile-grid">
+      <div class="stat-grid">
         <Tile
           label="backends"
           value={be.length}
@@ -66,6 +66,7 @@ export function Overview() {
                 ? `${connectedBackends} healthy · ${errorBackends} error`
                 : `${connectedBackends} healthy`
           }
+          tone={errorBackends > 0 ? "warn" : "default"}
         />
         <Tile
           label="tools"
@@ -161,21 +162,26 @@ function Tile({
   sub,
   href,
   tone,
+  hero,
 }: {
   label: string;
   value: string | number;
   sub: string;
   href?: string;
   tone?: "default" | "warn" | "ok";
+  hero?: boolean;
 }) {
   const loc = useLocation();
   const interactive = !!href;
   const onClick = () => {
     if (href) loc.route(href);
   };
+  const classes = ["tile"];
+  if (interactive) classes.push("tile-interactive");
+  if (hero) classes.push("tile-hero");
   return (
     <div
-      class={interactive ? "tile tile-interactive" : "tile"}
+      class={classes.join(" ")}
       onClick={interactive ? onClick : undefined}
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}

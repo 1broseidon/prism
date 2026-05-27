@@ -72,12 +72,12 @@ func TestProtectedResourceMetadataURL(t *testing.T) {
 		want     string
 	}{
 		{
-			resource: "https://mcp.dfam.one/mcp",
-			want:     "https://mcp.dfam.one/.well-known/oauth-protected-resource/mcp",
+			resource: "https://prism.example.com/mcp",
+			want:     "https://prism.example.com/.well-known/oauth-protected-resource/mcp",
 		},
 		{
-			resource: "https://mcp.dfam.one/",
-			want:     "https://mcp.dfam.one/.well-known/oauth-protected-resource",
+			resource: "https://prism.example.com/",
+			want:     "https://prism.example.com/.well-known/oauth-protected-resource",
 		},
 	}
 

@@ -24,6 +24,7 @@ import (
 	"github.com/1broseidon/prism/internal/bridge"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/credentials"
+	"github.com/1broseidon/prism/internal/identity"
 	"github.com/1broseidon/prism/internal/metrics"
 	"github.com/1broseidon/prism/internal/middleware"
 	"github.com/1broseidon/prism/internal/store"
@@ -43,14 +44,15 @@ const namespaceSeparator = "__"
 // and is always non-nil for connected backends — Session == nil is only
 // legal when Dispatcher != nil.
 type Backend struct {
-	Config     *config.ServerConfig
-	Client     *mcp.Client
-	Session    *mcp.ClientSession
-	Dispatcher ToolDispatcher     // unified leaf call path (MCP, OpenAPI, ...)
-	OpenAPI    *OpenAPIDispatcher // typed handle when transport == "openapi"
-	CB         *middleware.CircuitBreaker
-	ToolNames  []string          // namespaced tool names registered on the gateway
-	Tools      []BackendToolInfo // tool metadata captured at registration
+	Config      *config.ServerConfig
+	DisplayName string
+	Client      *mcp.Client
+	Session     *mcp.ClientSession
+	Dispatcher  ToolDispatcher     // unified leaf call path (MCP, OpenAPI, ...)
+	OpenAPI     *OpenAPIDispatcher // typed handle when transport == "openapi"
+	CB          *middleware.CircuitBreaker
+	ToolNames   []string          // namespaced tool names registered on the gateway
+	Tools       []BackendToolInfo // tool metadata captured at registration
 	// Transport identifies how this backend dispatches calls. "mcp" or "stdio"
 	// or "openapi" — used by Status() so the admin UI can label backends
 	// without re-deriving the type from URL shape.
@@ -120,6 +122,7 @@ type Gateway struct {
 	auditor               *audit.Logger
 	credStore             *credentials.Store
 	kvStore               store.Store // optional KV store for persisting runtime credential configs
+	identityDispatcher    identity.Dispatcher
 	policyResolver        atomic.Pointer[policyResolverBox]
 	backendPolicyResolver atomic.Pointer[backendPolicyResolverBox]
 	tokenValidator        atomic.Pointer[tokenValidatorBox]
@@ -134,6 +137,17 @@ type Gateway struct {
 	workspace      *workspaceBridgeManager
 	binaryStore    BinaryStore // optional: enables prism-managed binary backends
 	binaryMount    string      // sandbox mount target for binstore root (default /opt/prism/bin)
+
+	// clock is injected for grant evaluation + drift events. Defaults to
+	// time.Now when SetClock has not been called.
+	clock func() time.Time
+	// grantEmitter (when set) receives every grant decision the gateway
+	// makes — both allowed and denied — so the analytics store and ring
+	// buffer can observe them.
+	grantEmitter auth.Emitter
+	// compatGate (when set) is consulted by the tool-call hot path before
+	// running grant matching to handle the bearer-compat transition.
+	compatGate *auth.BearerCompatGate
 }
 
 // New creates a new Gateway.
@@ -208,6 +222,58 @@ func (g *Gateway) getBackendPolicyResolver() auth.BackendPolicyResolver {
 // shared workspace token. Optional.
 func (g *Gateway) SetTokenValidator(v *auth.TokenValidator) {
 	g.tokenValidator.Store(&tokenValidatorBox{v: v})
+}
+
+// SetClock injects the clock used for grant evaluation, drift event
+// timestamps, and audit metadata. Pass time.Now to reset.
+func (g *Gateway) SetClock(clock func() time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.clock = clock
+}
+
+// now returns the current time according to the injected clock, falling
+// back to time.Now when SetClock has not been called.
+func (g *Gateway) now() time.Time {
+	g.mu.RLock()
+	clock := g.clock
+	g.mu.RUnlock()
+	if clock == nil {
+		return time.Now()
+	}
+	return clock()
+}
+
+// SetGrantEmitter wires the analytics sink that receives every grant
+// decision the gateway makes. Nil disables emission. Optional.
+func (g *Gateway) SetGrantEmitter(e auth.Emitter) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.grantEmitter = e
+}
+
+func (g *Gateway) getGrantEmitter() auth.Emitter {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.grantEmitter
+}
+
+// SetBearerCompatGate wires the gate the grant pipeline consults to handle
+// Bearer-on-grants compatibility. Nil falls back to
+// auth.DefaultBearerCompatGate().
+func (g *Gateway) SetBearerCompatGate(gate *auth.BearerCompatGate) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.compatGate = gate
+}
+
+func (g *Gateway) getCompatGate() *auth.BearerCompatGate {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.compatGate != nil {
+		return g.compatGate
+	}
+	return auth.DefaultBearerCompatGate()
 }
 
 func (g *Gateway) getTokenValidator() *auth.TokenValidator {
@@ -384,6 +450,7 @@ const backendKVPrefix = "backend/config/"
 
 // persistedBackend is the JSON representation of a runtime-added backend stored in KV.
 type persistedBackend struct {
+	DisplayName   string                  `json:"display_name,omitempty"`
 	Command       string                  `json:"command,omitempty"`
 	Args          []string                `json:"args,omitempty"`
 	Env           map[string]string       `json:"env,omitempty"`
@@ -684,6 +751,7 @@ func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string,
 	}
 	sc := &config.ServerConfig{
 		ID:            backendID,
+		DisplayName:   pb.DisplayName,
 		Namespace:     backendID,
 		URL:           pb.URL,
 		Env:           pb.Env,
@@ -693,6 +761,9 @@ func (g *Gateway) connectPersistedBackend(ctx context.Context, backendID string,
 		Sandbox:       pb.sandboxConfig(),
 		Workspace:     pb.workspaceConfig(),
 		Timeout:       config.Duration(30 * time.Second),
+	}
+	if sc.DisplayName != "" {
+		sc.Namespace = sc.DisplayName
 	}
 	if pb.Command != "" {
 		sc.OriginalCommand = append([]string{pb.Command}, pb.Args...)
@@ -787,8 +858,9 @@ func (g *Gateway) SeedBackends(_ context.Context, servers []config.ServerConfig)
 	for i := range servers {
 		s := &servers[i]
 		pb := &persistedBackend{
-			URL:     s.URL,
-			Enabled: boolPtr(s.Enabled),
+			DisplayName: s.DisplayName,
+			URL:         s.URL,
+			Enabled:     boolPtr(s.Enabled),
 		}
 		sandbox := s.Sandbox
 		pb.Sandbox = &sandbox
@@ -1008,12 +1080,16 @@ func (g *Gateway) ConnectBackend(ctx context.Context, cfg *config.ServerConfig) 
 
 	dispatcher := NewMCPSessionDispatcher(session, cfg.Namespace, nil)
 	backend := &Backend{
-		Config:     cfg,
-		Client:     client,
-		Session:    session,
-		Dispatcher: dispatcher,
-		CB:         cb,
-		Transport:  ttype,
+		Config:      cfg,
+		DisplayName: cfg.DisplayName,
+		Client:      client,
+		Session:     session,
+		Dispatcher:  dispatcher,
+		CB:          cb,
+		Transport:   ttype,
+	}
+	if backend.DisplayName == "" {
+		backend.DisplayName = cfg.ID
 	}
 
 	g.mu.Lock()
@@ -1387,6 +1463,16 @@ func (g *Gateway) routeToolCall(ctx context.Context, backendID, toolName string,
 				},
 			}, nil
 		}
+	}
+
+	// Grant enforcement: if the access token carries RFC 9396
+	// authorization_details, every tool call must match a pinned grant.
+	// Legacy scope-only tokens pass through to the existing scope-based
+	// path above. Emitted grant events feed the analytics store + ring.
+	if denied, ctx2 := g.enforceGrantsForCall(ctx, b, toolName, forwardedReq.Params.Arguments, workspaceCfg, callerClaims); denied != nil {
+		return denied, nil
+	} else {
+		ctx = ctx2
 	}
 
 	span.SetAttributes(attribute.Bool("tool.allowed", true))
@@ -2255,6 +2341,9 @@ func (g *Gateway) Status() []BackendStatus {
 					var pb persistedBackend
 					if json.Unmarshal(data, &pb) == nil {
 						orphan.URL = pb.URL
+						if pb.DisplayName != "" {
+							orphan.Namespace = pb.DisplayName
+						}
 						orphan.Enabled = pb.isEnabled()
 						orphan.BridgeManaged = pb.BridgeManaged
 						orphan.Runtime = pb.Runtime

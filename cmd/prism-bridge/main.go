@@ -128,9 +128,9 @@ Examples:
   # Wrap with a full manifest
   prism-bridge tool --manifest tools/dns.json --port 3002 -- python3 check_dns.py
 
-  # Expose repo-local Brainfile tools to a remote Prism
-  prism-bridge workspace install --gateway https://mcp.example.com \
-    --token "$PRISM_WORKSPACE_TOKEN" --root "$PWD" -- npx @brainfile/cli mcp
+  # Expose a project workspace to a remote Prism via the workspace bridge
+  prism-bridge workspace install --gateway https://prism.example.com \
+    --token "$PRISM_WORKSPACE_TOKEN" --root "$PWD" -- npx @your-org/your-mcp-cli mcp
 `)
 }
 

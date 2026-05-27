@@ -1,41 +1,152 @@
-/*
- * Prism design language — deep editorial dark, calm indigo accent.
- * Dark-only by design.
+/* Hallmark · macrostructure: Workbench · design-system: design.md · designed-as-app
+ * studied: yes · DNA-source: image (user-attached reference)
+ * Energy-dashboard screenshots → dark green-undertone paper + sage-cream callout tiles.
+ * Edit design.md first if the system needs to change.
  */
 :root {
-  /* Surfaces, deepest first */
-  --bg: #050505;
-  --bg-elev: #0c0c0c;
-  --bg-surface: #111111;
-  --nav-bg: #080808;
-  --tag-bg: #111111;
+  /* ---- Surfaces — warm-charcoal in the cream's hue lane (110)
+     so the dark surface and the cream callout read as ONE material at
+     different brightness levels, not two clashing hues. ---- */
+  --color-bg-marketing:  oklch(11% 0.006 110);
+  --color-bg-primary:    oklch(16% 0.007 110);
+  --color-bg-panel:      oklch(20% 0.008 110);
+  --color-bg-secondary:  oklch(23% 0.008 110);
+  --color-bg-tertiary:   oklch(26% 0.008 110);
+  --color-bg-quaternary: oklch(30% 0.008 110);
+  --color-bg-translucent: rgba(255, 250, 235, 0.04);
 
-  /* Foreground tiers */
-  --fg: #ebebeb;
-  --fg-emphasis: #ffffff;
-  --muted: #888888;
-  --faint: #444444;
-  --dim: #333333;
+  /* ---- Borders ---- */
+  --color-border-primary:   oklch(28% 0.008 110);
+  --color-border-secondary: oklch(34% 0.008 110);
+  --color-border-tertiary:  oklch(42% 0.008 110);
 
-  /* Lines */
-  --line: #1a1a1a;
-  --line-soft: #222222;
+  /* ---- Foreground tiers ---- */
+  --color-text-primary:    oklch(94% 0.012 100);
+  --color-text-secondary:  oklch(75% 0.008 110);
+  --color-text-tertiary:   oklch(56% 0.008 110);
+  --color-text-quaternary: oklch(42% 0.008 110);
 
-  /* Accents */
-  --accent: #6366f1;
-  --accent-dim: #4f46e5;
-  --denied: #f87171;
-  --warn: #fbbf24;
+  /* ---- Sage-cream callout system (muted to land cleanly on warm dark) ---- */
+  --color-tile-callout:       oklch(87% 0.045 105);
+  --color-tile-callout-ink:   oklch(22% 0.012 110);
+  --color-tile-callout-muted: oklch(42% 0.008 110);
+  --color-tile-callout-soft:  oklch(87% 0.045 105 / 0.12);
 
-  /* Interaction */
-  --hover: rgba(255, 255, 255, 0.04);
-  --selection: var(--accent);
+  --color-link-primary: oklch(80% 0.06 105);
+  --color-link-hover:   oklch(95% 0.015 100);
+  --color-focus:        oklch(87% 0.045 105 / 0.40);
 
-  /* Type */
-  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  /* ---- Semantic state ---- */
+  --color-warn:   oklch(80% 0.16 80);
+  --color-denied: oklch(70% 0.20 25);
+  --color-green:  oklch(60% 0.12 145);
+  --color-blue:   oklch(70% 0.14 230);
+
+  /* ---- Interaction ---- */
+  --color-hover: var(--color-bg-translucent);
+
+  /* ---- Type ---- */
+  --font-sans: "Geist", -apple-system, BlinkMacSystemFont,
+               "Segoe UI", "Roboto", sans-serif;
   --font-mono: "Azeret Mono", "SF Mono", "Consolas", monospace;
+  --font-display: var(--font-sans);
 
-  /* Back-compat alias: --active was the old emerald state color;
-     now points to coral so legacy rules render correctly. */
-  --active: var(--accent);
+  /* Variable-font weight ladder (kept; Geist supports these well) */
+  --weight-light:    300;
+  --weight-normal:   400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* ---- Spacing — 4pt ---- */
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs:  0.75rem;
+  --space-sm:  1rem;
+  --space-md:  1.5rem;
+  --space-lg:  2rem;
+  --space-xl:  3rem;
+  --space-2xl: 4.5rem;
+
+  /* ---- Type scale ---- */
+  --text-micro:  0.6875rem;
+  --text-mini:   0.75rem;
+  --text-small:  0.8125rem;
+  --text-body:   0.9375rem;
+  --text-large:  1.125rem;
+  --text-title2: 1.5rem;
+  --text-title1: 2rem;
+
+  /* Legacy text-size aliases — keep existing app.css references working. */
+  --text-xs:  var(--text-micro);
+  --text-sm:  var(--text-mini);
+  --text-md:  var(--text-small);
+  --text-lg:  var(--text-body);
+  --text-xl:  var(--text-large);
+  --text-2xl: var(--text-title2);
+  --text-3xl: var(--text-title1);
+
+  /* ---- Motion ---- */
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-in:     cubic-bezier(0.4, 0, 1, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+
+  /* ---- Radii ---- */
+  --radius-card:   6px;
+  --radius-pill:   999px;
+  --radius-input:  4px;
+  --radius-canvas: 14px;
+
+  /* =============================================================
+     Back-compat aliases — every legacy name in app.css resolves
+     onto the studied-DNA tokens above. New code references the
+     --color-* / --text-* tokens directly.
+     ============================================================= */
+  --bg:           var(--color-bg-primary);
+  --bg-elev:      var(--color-bg-panel);
+  --bg-surface:   var(--color-bg-secondary);
+  --nav-bg:       var(--color-bg-marketing);
+  --tag-bg:       var(--color-bg-tertiary);
+  --fg:           var(--color-text-primary);
+  --fg-emphasis:  var(--color-text-primary);
+  --muted:        var(--color-text-tertiary);
+  --faint:        var(--color-text-quaternary);
+  --dim:          var(--color-text-quaternary);
+  --line:         var(--color-border-primary);
+  --line-soft:    var(--color-border-secondary);
+
+  /* The "brand" of this build is the cream callout — when older code
+     references --color-accent / --accent / --color-brand-bg, it gets
+     the cream value and renders as a callout tile / button. */
+  --accent:           var(--color-tile-callout);
+  --accent-dim:       var(--color-link-primary);
+  --color-accent:     var(--color-tile-callout);
+  --color-accent-dim: var(--color-link-primary);
+  --color-accent-ink: var(--color-tile-callout-ink);
+  --color-accent-soft: var(--color-tile-callout-soft);
+  --color-brand-bg:   var(--color-tile-callout);
+  --color-brand-bg-dim: var(--color-link-primary);
+  --color-brand-text: var(--color-tile-callout-ink);
+  --color-brand-soft: var(--color-tile-callout-soft);
+
+  --color-paper:       var(--color-bg-primary);
+  --color-paper-2:     var(--color-bg-panel);
+  --color-paper-3:     var(--color-bg-secondary);
+  --color-paper-nav:   var(--color-bg-marketing);
+  --color-rule:        var(--color-border-primary);
+  --color-rule-soft:   var(--color-border-secondary);
+  --color-ink:         var(--color-text-primary);
+  --color-ink-emph:    var(--color-text-primary);
+  --color-ink-muted:   var(--color-text-tertiary);
+  --color-ink-faint:   var(--color-text-quaternary);
+  --color-ink-dim:     var(--color-text-quaternary);
+
+  --denied: var(--color-denied);
+  --warn:   var(--color-warn);
+  --hover:  var(--color-hover);
+  --selection: var(--color-tile-callout);
+  --active: var(--color-tile-callout);
 }

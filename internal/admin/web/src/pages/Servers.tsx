@@ -92,6 +92,7 @@ export function Servers() {
     return list.filter(
       (b) =>
         b.id.toLowerCase().includes(q) ||
+        (b.display_name || "").toLowerCase().includes(q) ||
         (b.namespace || "").toLowerCase().includes(q) ||
         (b.url || "").toLowerCase().includes(q) ||
         (b.tools || []).some((t) => t.name.toLowerCase().includes(q)),
@@ -297,16 +298,22 @@ function ServerRow({
       : backend.runtime
         ? `stdio · ${backend.runtime}`
         : "stdio process";
+  const label = backend.display_name || backend.id;
 
   return (
     <button class="server-row" onClick={onClick}>
       <div class="server-row-main">
         <div class="server-row-header">
           <span class={`status-pip status-pip-${statusKind}`} />
-          <span class="server-row-name">{backend.id}</span>
-          {backend.namespace && backend.namespace !== backend.id && (
-            <span class="server-row-ns">/ {backend.namespace}</span>
+          <span class="server-row-name">{label}</span>
+          {backend.display_name && backend.display_name !== backend.id && (
+            <span class="server-row-ns">/ {backend.id}</span>
           )}
+          {backend.namespace &&
+            backend.namespace !== backend.id &&
+            backend.namespace !== backend.display_name && (
+              <span class="server-row-ns">/ {backend.namespace}</span>
+            )}
           <span class="server-row-transport">{transport}</span>
         </div>
         <div class="server-row-meta">
@@ -1949,7 +1956,7 @@ function AddBinary({
           class="config-input"
           value={command}
           spellcheck={false}
-          placeholder="recoil mcp"
+          placeholder="server-bin --port 0"
           onInput={(e) => setCommand((e.target as HTMLInputElement).value)}
         />
         <span class="hint-text">

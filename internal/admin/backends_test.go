@@ -45,14 +45,14 @@ func TestCallbackBaseFromRequestAllowsOnlyPinnedForwardedHost(t *testing.T) {
 	r.Header.Set("X-Forwarded-Proto", "https")
 	r.Header.Set("X-Forwarded-Host", "attacker.example")
 
-	got := callbackBaseFromRequest(r, true, []string{"mcp.dfam.one"})
+	got := callbackBaseFromRequest(r, true, []string{"prism.example.com"})
 	if got != "https://internal.example:9086" {
 		t.Fatalf("callback base = %q", got)
 	}
 
-	r.Header.Set("X-Forwarded-Host", "mcp.dfam.one:443")
-	got = callbackBaseFromRequest(r, true, []string{"mcp.dfam.one"})
-	if got != "https://mcp.dfam.one:443" {
+	r.Header.Set("X-Forwarded-Host", "prism.example.com:443")
+	got = callbackBaseFromRequest(r, true, []string{"prism.example.com"})
+	if got != "https://prism.example.com:443" {
 		t.Fatalf("callback base = %q", got)
 	}
 }

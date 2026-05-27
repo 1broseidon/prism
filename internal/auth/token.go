@@ -30,6 +30,22 @@ type Claims struct {
 	TokenGen int64    `json:"token_gen,omitempty"`
 	Exp      int64    `json:"exp"`
 	Iat      int64    `json:"iat"`
+
+	// OAuth 2.1 grants-era fields. Optional on legacy tokens; required when
+	// the access token carries RFC 9396 authorization_details.
+	AuthTime             int64         `json:"auth_time,omitempty"`             // RFC 8176 / RFC 9470 — when the end-user authenticated.
+	Acr                  string        `json:"acr,omitempty"`                   // RFC 9470 step-up authentication context class.
+	Amr                  []string      `json:"amr,omitempty"`                   // Authentication methods.
+	JTI                  string        `json:"jti,omitempty"`                   // RFC 7519 — used in compat warnings and replay caches.
+	Cnf                  *Confirmation `json:"cnf,omitempty"`                   // RFC 7800 — DPoP key thumbprint binding.
+	AuthorizationDetails []IssuedGrant `json:"authorization_details,omitempty"` // RFC 9396 — fine-grained grants the token carries.
+}
+
+// Confirmation carries the cnf object from RFC 7800. We only populate the
+// jkt member for DPoP-bound tokens; future schemes (mTLS x5t#S256) would
+// extend this without breaking wire shape.
+type Confirmation struct {
+	JKT string `json:"jkt,omitempty"`
 }
 
 // GenerationChecker validates token generation counters.
@@ -108,6 +124,11 @@ type TokenValidatorConfig struct {
 	// When set, tokens with a stale token_gen claim are rejected, forcing
 	// clients to re-authenticate after policy changes.
 	GenerationChecker GenerationChecker `json:"-"`
+
+	// Now is the injected clock used for token-age and freshness checks.
+	// Defaults to time.Now when nil — production leaves this nil; tests
+	// substitute a controllable clock via newTestClock.
+	Now func() time.Time `json:"-"`
 }
 
 // TokenValidator validates OAuth 2.1 JWT access tokens.
@@ -116,6 +137,7 @@ type TokenValidator struct {
 	keySet     *jwksKeySet
 	parser     *jwt.Parser
 	genChecker GenerationChecker
+	now        func() time.Time
 }
 
 // NewTokenValidator creates a token validator.
@@ -131,6 +153,10 @@ func NewTokenValidator(cfg *TokenValidatorConfig) *TokenValidator {
 		ks = newJWKSKeySet(jwksURL)
 	}
 
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &TokenValidator{
 		cfg:    *cfg,
 		keySet: ks,
@@ -142,6 +168,7 @@ func NewTokenValidator(cfg *TokenValidatorConfig) *TokenValidator {
 			jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}),
 		),
 		genChecker: cfg.GenerationChecker,
+		now:        now,
 	}
 }
 
@@ -203,6 +230,53 @@ func extractClaims(mc jwt.MapClaims) *Claims {
 	if tg, ok := mc["token_gen"].(float64); ok {
 		claims.TokenGen = int64(tg)
 	}
+	if exp, ok := mc["exp"].(float64); ok {
+		claims.Exp = int64(exp)
+	}
+	if iat, ok := mc["iat"].(float64); ok {
+		claims.Iat = int64(iat)
+	}
+	if jti, ok := mc["jti"].(string); ok {
+		claims.JTI = jti
+	}
+	if at, ok := mc["auth_time"].(float64); ok {
+		claims.AuthTime = int64(at)
+	}
+	if acr, ok := mc["acr"].(string); ok {
+		claims.Acr = acr
+	}
+	if amrs, ok := mc["amr"].([]any); ok {
+		for _, m := range amrs {
+			if s, ok := m.(string); ok {
+				claims.Amr = append(claims.Amr, s)
+			}
+		}
+	}
+	if groups, ok := mc["groups"].([]any); ok {
+		for _, g := range groups {
+			if s, ok := g.(string); ok {
+				claims.Groups = append(claims.Groups, s)
+			}
+		}
+	}
+	if cnf, ok := mc["cnf"].(map[string]any); ok {
+		conf := &Confirmation{}
+		if jkt, ok := cnf["jkt"].(string); ok {
+			conf.JKT = jkt
+		}
+		if conf.JKT != "" {
+			claims.Cnf = conf
+		}
+	}
+	if details, ok := mc["authorization_details"].([]any); ok {
+		raw, err := json.Marshal(details)
+		if err == nil {
+			var grants []IssuedGrant
+			if err := json.Unmarshal(raw, &grants); err == nil {
+				claims.AuthorizationDetails = grants
+			}
+		}
+	}
 
 	switch aud := mc["aud"].(type) {
 	case string:
@@ -229,10 +303,19 @@ func (v *TokenValidator) checkTokenAge(mc jwt.MapClaims) error {
 		return nil
 	}
 	issuedAt := time.Unix(int64(iat), 0)
-	if time.Since(issuedAt) > v.cfg.MaxTokenAge {
+	now := v.clock()
+	if now.Sub(issuedAt) > v.cfg.MaxTokenAge {
 		return fmt.Errorf("token too old: issued at %s, max age %s", issuedAt, v.cfg.MaxTokenAge)
 	}
 	return nil
+}
+
+// clock returns the injected clock, falling back to time.Now.
+func (v *TokenValidator) clock() time.Time {
+	if v == nil || v.now == nil {
+		return time.Now()
+	}
+	return v.now()
 }
 
 // checkRequiredScopes ensures all required scopes are present.

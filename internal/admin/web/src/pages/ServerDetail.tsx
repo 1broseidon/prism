@@ -24,9 +24,19 @@ import { fmtAge, fmtTimeOfDay, splitLabel } from "../util/time";
 import { fmtBytes } from "../util/bytes";
 import { MethodPill } from "../components/OperationPicker";
 import { ReimportDiffModal } from "../components/ReimportDiffModal";
+import { RenamePencil } from "../components/identity/RenamePencil";
 
 type CredType = "none" | "static" | "env" | "command";
 const BACKEND_REBUILD_TIMEOUT_MS = 60_000;
+
+interface IdentityEntity {
+  id: string;
+  display_name: string;
+}
+
+interface IdentityListResponse {
+  items: IdentityEntity[];
+}
 
 interface CredFormState {
   type: CredType;
@@ -73,6 +83,40 @@ export function ServerDetail() {
   const id = params.id;
   const list = backends.data.value || [];
   const backend = list.find((b) => b.id === id);
+  const [backendIdentityID, setBackendIdentityID] = useState<string | undefined>(undefined);
+  const [renamedDisplayName, setRenamedDisplayName] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRenamedDisplayName(null);
+  }, [backend?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setBackendIdentityID(undefined);
+    if (!backend) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    (async () => {
+      try {
+        const res = await getJSON<IdentityListResponse>("/identity?kind=backend");
+        if (cancelled) return;
+        const ent = res.items.find(
+          (item) =>
+            item.id === backend.id ||
+            item.display_name === backend.id ||
+            item.display_name === backend.display_name,
+        );
+        setBackendIdentityID(ent?.id);
+      } catch {
+        if (!cancelled) setBackendIdentityID(undefined);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [backend?.id, backend?.display_name]);
 
   if (backends.data.value === null) {
     return <PageShell title={id}>loading…</PageShell>;
@@ -100,7 +144,20 @@ export function ServerDetail() {
 
       <div class="detail-header">
         <div>
-          <div class="page-title">{backend.id}</div>
+          <div class="page-title">
+            {backendIdentityID ? (
+              <RenamePencil
+                currentName={renamedDisplayName || backend.display_name || backend.id}
+                entityId={backendIdentityID}
+                onSuccess={(newDisplayName) => {
+                  setRenamedDisplayName(newDisplayName);
+                  void backends.refresh();
+                }}
+              />
+            ) : (
+              renamedDisplayName || backend.display_name || backend.id
+            )}
+          </div>
           <div class="page-subtitle">
             {backend.namespace && backend.namespace !== backend.id
               ? `namespace: ${backend.namespace}`

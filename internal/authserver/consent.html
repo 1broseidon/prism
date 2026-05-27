@@ -51,6 +51,20 @@
   <h1>Authorize Agent</h1>
   <p class="subtitle">An agent wants to connect to Prism</p>
   <div class="agent-name">{{.ClientName}}</div>
+  {{if .Grants}}
+  <div class="grants">
+    <div class="grants-title">Capability grants</div>
+    <ul class="grant-list">
+      {{range .Grants}}
+      <li class="grant-row">
+        <span class="grant-tool">{{.Backend}}.{{.Tool}}</span>
+        {{if .Workspace}}<span class="grant-ws">workspace: {{.Workspace}}</span>{{end}}
+        {{if .Args}}<span class="grant-args">{{.Args}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
   <form method="POST" action="/authorize">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <input type="hidden" name="client_id" value="{{.ClientID}}">
@@ -59,6 +73,7 @@
     <input type="hidden" name="state" value="{{.State}}">
     <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
     <input type="hidden" name="code_challenge_method" value="{{.ChallengeMethod}}">
+    {{if .AuthorizationDetails}}<input type="hidden" name="authorization_details" value="{{.AuthorizationDetails}}">{{end}}
     <label for="label">Name this agent</label>
     <input type="text" id="label" name="label" value="{{.ClientName}}" autofocus>
     <p class="help">A label to identify this agent in the admin dashboard</p>

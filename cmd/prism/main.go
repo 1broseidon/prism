@@ -22,12 +22,14 @@ import (
 
 	"github.com/1broseidon/prism/internal/admin"
 	"github.com/1broseidon/prism/internal/adminauth"
+	"github.com/1broseidon/prism/internal/analytics"
 	"github.com/1broseidon/prism/internal/audit"
 	"github.com/1broseidon/prism/internal/auth"
 	"github.com/1broseidon/prism/internal/authserver"
 	"github.com/1broseidon/prism/internal/binstore"
 	"github.com/1broseidon/prism/internal/config"
 	"github.com/1broseidon/prism/internal/gateway"
+	"github.com/1broseidon/prism/internal/identity"
 	"github.com/1broseidon/prism/internal/metrics"
 	"github.com/1broseidon/prism/internal/middleware"
 	"github.com/1broseidon/prism/internal/store"
@@ -173,6 +175,21 @@ func runServe() {
 	// call time. Shares the same authserver as the scope resolver.
 	gw.SetBackendPolicyResolver(authSrv)
 
+	// Clock + bearer-compat gate for the grant pipeline. Production uses
+	// real time and the default "warn" compat mode; operators can flip the
+	// gate to "deny" via runtime configuration.
+	authSrv.SetClock(time.Now)
+	gw.SetClock(time.Now)
+	gw.SetBearerCompatGate(auth.DefaultBearerCompatGate())
+
+	// Analytics: SQLite-backed historical store + in-memory ring buffer
+	// for SSE tailing. Wired through a sync emitter that fans out to both.
+	eventStore, ringBuf, analyticsRetention := setupAnalytics(cfg, logger)
+	if eventStore != nil {
+		defer func() { _ = eventStore.Close() }()
+	}
+	gw.SetGrantEmitter(newSyncGrantEmitter(eventStore, ringBuf))
+
 	// Build admin API with agent/audit adapters.
 	agentsFn := func() []any {
 		agents := authSrv.ListAgents()
@@ -210,9 +227,32 @@ func runServe() {
 	adminAPI.SetBackendPolicyTraceProvider(&backendPolicyTraceProvider{gw: gw, srv: authSrv})
 	adminAPI.SetWorkspaceReversePolicyLookup(&workspaceReverseLookup{srv: authSrv})
 	adminAPI.SetBinaryStore(adminBinaryStore(binStore))
+	// Identity dispatcher shared by the admin /identity API and the
+	// authserver startup migration.
+	idMgr := identity.New(kvStore)
+	adminAPI.SetIdentity(idMgr)
+	authSrv.SetIdentityDispatcher(idMgr)
+	// Grant CRUD + analytics: wired separately so tests can substitute
+	// thin shims without dragging the full authserver into their setup.
+	adminAPI.SetGrantManager(authSrv)
+	adminAPI.SetAnalytics(eventStore, ringBuf)
+	adminAPI.SetAnalyticsRetentionDays(analyticsRetention)
 	adminServer := &http.Server{
 		Handler:           adminAPI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	if err := authSrv.RunIdentityMigration(ctx, logger); err != nil {
+		logger.Error("identity migration failed", "error", err)
+		_ = os.Remove(pidFile)
+		return
+	}
+
+	gw.SetIdentityDispatcher(idMgr)
+	if err := gw.RunBackendIdentityMigration(ctx, logger, authSrv); err != nil {
+		logger.Error("backend identity migration failed", "error", err)
+		_ = os.Remove(pidFile)
+		return
 	}
 
 	errCh := make(chan error, 2)
@@ -298,6 +338,60 @@ func syncAdminAuthRedirectFromNetwork(kv store.Store, cfg *config.AdminAuthConfi
 // Audit logger is wired separately in main() so it can be shared with the admin API.
 func setupGateway(logger *slog.Logger) *gateway.Gateway {
 	return gateway.New(logger)
+}
+
+// setupAnalytics opens the historical grant-event SQLite store and the
+// in-memory ring buffer used for SSE tailing. Returns nil for the store
+// when its path can't be opened — the gateway and admin handlers treat
+// nil as "analytics disabled".
+func setupAnalytics(_ *config.Loaded, logger *slog.Logger) (*analytics.SQLiteStore, *analytics.RingBuffer, int) {
+	retentionDays := 30
+	path := strings.TrimSpace(os.Getenv("PRISM_ANALYTICS_DB"))
+	if path == "" {
+		if dataDir := strings.TrimSpace(os.Getenv("PRISM_DATA_DIR")); dataDir != "" {
+			path = filepath.Join(dataDir, "grant_events.sqlite")
+		} else if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, ".prism", "grant_events.sqlite")
+		}
+	}
+	if path == "" {
+		logger.Warn("analytics store disabled — could not determine data dir")
+		return nil, analytics.NewRingBuffer(1000), retentionDays
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { //nolint:gosec // path derives from PRISM_ANALYTICS_DB / PRISM_DATA_DIR (operator-controlled) or the home dir; no untrusted input
+		logger.Warn("analytics store disabled — failed to create dir", "path", path, "error", err)
+		return nil, analytics.NewRingBuffer(1000), retentionDays
+	}
+	store, err := analytics.OpenSQLiteStore(path)
+	if err != nil {
+		logger.Warn("analytics store disabled — failed to open SQLite store", "path", path, "error", err)
+		return nil, analytics.NewRingBuffer(1000), retentionDays
+	}
+	logger.Info("analytics store enabled", "path", path)
+	return store, analytics.NewRingBuffer(1000), retentionDays
+}
+
+// syncGrantEmitter fans every grant event the gateway emits to both the
+// historical store (when wired) and the in-memory ring (for SSE tailing).
+type syncGrantEmitter struct {
+	store analytics.Store
+	ring  *analytics.RingBuffer
+}
+
+func newSyncGrantEmitter(store analytics.Store, ring *analytics.RingBuffer) *syncGrantEmitter {
+	return &syncGrantEmitter{store: store, ring: ring}
+}
+
+func (e *syncGrantEmitter) Emit(_ context.Context, event auth.GrantEvent) {
+	if e == nil {
+		return
+	}
+	if e.ring != nil {
+		e.ring.Add(event)
+	}
+	if e.store != nil {
+		_ = e.store.Insert(event)
+	}
 }
 
 // setupBinaryStore initializes the binstore under $PRISM_DATA_DIR/binaries
@@ -686,7 +780,11 @@ func buildHandler(cfg *config.Loaded, gw *gateway.Gateway, authJWKS []byte, auth
 	})
 
 	logger.Info("OAuth 2.1 token validation enabled", "issuer", ea.Issuer)
-	middlewares = append(middlewares, auth.Middleware(validator, resourceURI))
+	middlewares = append(middlewares, auth.Middleware(validator, resourceURI,
+		auth.WithDPoPReplayCache(authSrv.DPoPReplayCache()),
+		auth.WithMiddlewareClock(time.Now),
+		auth.WithBearerCompatGate(auth.DefaultBearerCompatGate()),
+	))
 	// Share the validator with the workspace bridge handler so agent-
 	// authenticated bridges can register without the shared workspace token.
 	gw.SetTokenValidator(validator)

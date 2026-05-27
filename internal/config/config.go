@@ -54,13 +54,13 @@ type Config struct {
 
 	// PublicURL is the externally-reachable base URL for the MCP gateway.
 	// Used as the OAuth issuer and in 401 resource_metadata hints.
-	// Example: "http://172.16.30.90:8080" or "https://prism.example.com".
+	// Example: "http://192.0.2.10:8080" or "https://prism.example.com".
 	// When omitted, derived from listen address or defaults to http://localhost:{port}.
 	PublicURL string `json:"public_url,omitempty"`
 
 	// AdminPublicURL is the externally-reachable base URL for the admin API.
 	// Used for OAuth callback URLs when adding backends that require OAuth.
-	// Example: "http://172.16.30.90:9086".
+	// Example: "http://192.0.2.10:9086".
 	// When omitted, derived from admin address or defaults to http://localhost:{port}.
 	AdminPublicURL string `json:"admin_public_url,omitempty"`
 
@@ -327,9 +327,10 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 // ServerConfig is the internal representation of a backend server,
 // expanded from the mcpServers map by Load().
 type ServerConfig struct {
-	ID        string
-	Namespace string
-	Enabled   bool
+	ID          string
+	DisplayName string
+	Namespace   string
+	Enabled     bool
 
 	// Stdio transport
 	Command []string
@@ -657,6 +658,7 @@ func expand(cfg *Config) (*Loaded, error) {
 	for name, srv := range cfg.McpServers {
 		sc := ServerConfig{
 			ID:             name,
+			DisplayName:    name,
 			Namespace:      name,
 			Enabled:        serverEnabled(srv.Enabled),
 			URL:            srv.URL,

@@ -89,14 +89,15 @@ func (g *Gateway) AddBackend(ctx context.Context, id string, cfg admin.BackendCo
 	}
 
 	sc := &config.ServerConfig{
-		ID:        id,
-		Namespace: id,
-		Enabled:   true,
-		URL:       cfg.URL,
-		Env:       cfg.Env,
-		Sandbox:   config.NormalizeSandboxConfig(cfg.Sandbox, config.SandboxProfileDefault),
-		Workspace: config.NormalizeWorkspaceConfig(cfg.Workspace),
-		Timeout:   config.Duration(30 * time.Second),
+		ID:          id,
+		DisplayName: id,
+		Namespace:   id,
+		Enabled:     true,
+		URL:         cfg.URL,
+		Env:         cfg.Env,
+		Sandbox:     config.NormalizeSandboxConfig(cfg.Sandbox, config.SandboxProfileDefault),
+		Workspace:   config.NormalizeWorkspaceConfig(cfg.Workspace),
+		Timeout:     config.Duration(30 * time.Second),
 	}
 	if err := g.validateBackendWorkspaceBinding(sc.Workspace); err != nil {
 		return err
@@ -106,14 +107,15 @@ func (g *Gateway) AddBackend(ctx context.Context, id string, cfg admin.BackendCo
 	}
 
 	persisted := &persistedBackend{
-		Command:   cfg.Command,
-		Args:      cfg.Args,
-		Env:       cfg.Env,
-		URL:       cfg.URL,
-		Runtime:   cfg.Runtime,
-		Enabled:   boolPtr(sc.Enabled),
-		Sandbox:   &sc.Sandbox,
-		Workspace: sc.Workspace,
+		DisplayName: id,
+		Command:     cfg.Command,
+		Args:        cfg.Args,
+		Env:         cfg.Env,
+		URL:         cfg.URL,
+		Runtime:     cfg.Runtime,
+		Enabled:     boolPtr(sc.Enabled),
+		Sandbox:     &sc.Sandbox,
+		Workspace:   sc.Workspace,
 	}
 	var bridgeSpawn *bridgeSpawnResult
 
@@ -200,6 +202,7 @@ func (g *Gateway) addBinaryBackend(ctx context.Context, id string, cfg admin.Bac
 		enabled = *cfg.Enabled
 	}
 	pb := &persistedBackend{
+		DisplayName:       id,
 		Env:               cfg.Env,
 		Enabled:           boolPtr(enabled),
 		Sandbox:           &sandbox,
@@ -495,6 +498,7 @@ func (g *Gateway) connectedPersistedBackend(id string) (*persistedBackend, bool)
 
 func persistedFromServerConfig(sc *config.ServerConfig) *persistedBackend {
 	pb := &persistedBackend{
+		DisplayName:   sc.DisplayName,
 		URL:           sc.URL,
 		Env:           sc.Env,
 		BridgeManaged: sc.BridgeManaged,
@@ -761,18 +765,20 @@ func (g *Gateway) ConnectOpenAPIBackend(ctx context.Context, id string, spec *op
 	}
 
 	sc := &config.ServerConfig{
-		ID:        id,
-		Namespace: id,
-		URL:       dispatcher.BaseURL(),
-		Enabled:   true,
-		Timeout:   config.Duration(openapiDefaultTimeout),
+		ID:          id,
+		DisplayName: id,
+		Namespace:   id,
+		URL:         dispatcher.BaseURL(),
+		Enabled:     true,
+		Timeout:     config.Duration(openapiDefaultTimeout),
 	}
 	backend := &Backend{
-		Config:     sc,
-		Session:    nil,
-		Dispatcher: dispatcher,
-		OpenAPI:    dispatcher,
-		Transport:  "openapi",
+		Config:      sc,
+		DisplayName: sc.DisplayName,
+		Session:     nil,
+		Dispatcher:  dispatcher,
+		OpenAPI:     dispatcher,
+		Transport:   "openapi",
 	}
 
 	g.mu.Lock()
@@ -843,6 +849,7 @@ func (g *Gateway) reconnectPersistedBinaryBackend(ctx context.Context, id string
 
 	sc := &config.ServerConfig{
 		ID:            id,
+		DisplayName:   pb.DisplayName,
 		Namespace:     id,
 		Env:           pb.Env,
 		BridgeManaged: pb.BridgeManaged,
@@ -851,6 +858,9 @@ func (g *Gateway) reconnectPersistedBinaryBackend(ctx context.Context, id string
 		Sandbox:       sandbox,
 		Workspace:     pb.workspaceConfig(),
 		Timeout:       config.Duration(30 * time.Second),
+	}
+	if sc.DisplayName != "" {
+		sc.Namespace = sc.DisplayName
 	}
 	sc.OriginalCommand = append([]string{containerPath}, pb.BinaryArgs...)
 	var connectErr error
@@ -940,7 +950,19 @@ func (g *Gateway) reconnectPersistedOpenAPIBackend(ctx context.Context, id strin
 	if effectiveBase == "" {
 		effectiveBase = spec.BaseURL
 	}
-	return g.ConnectOpenAPIBackend(ctx, id, spec, effectiveBase, pb.OpenAPISecurityScheme)
+	if err := g.ConnectOpenAPIBackend(ctx, id, spec, effectiveBase, pb.OpenAPISecurityScheme); err != nil {
+		return err
+	}
+	if pb.DisplayName != "" {
+		g.mu.Lock()
+		if backend := g.backends[id]; backend != nil && backend.Config != nil {
+			backend.DisplayName = pb.DisplayName
+			backend.Config.DisplayName = pb.DisplayName
+			backend.Config.Namespace = pb.DisplayName
+		}
+		g.mu.Unlock()
+	}
+	return nil
 }
 
 // PersistOpenAPIBackend writes an OpenAPI backend's KV record. The raw bytes
@@ -948,6 +970,7 @@ func (g *Gateway) reconnectPersistedOpenAPIBackend(ctx context.Context, id strin
 // restarts (and so re-parses see exactly what the operator imported).
 func (g *Gateway) PersistOpenAPIBackend(id string, rawSpec []byte, sourceURL, baseURL, securityScheme string) {
 	pb := &persistedBackend{
+		DisplayName:           id,
 		Enabled:               boolPtr(true),
 		OpenAPISpecRaw:        append([]byte(nil), rawSpec...),
 		OpenAPISourceURL:      sourceURL,
@@ -1101,6 +1124,7 @@ func (g *Gateway) SaveOpenAPIBackend(ctx context.Context, id string, params admi
 	// are stored verbatim per epic-1 lock: a future restart must re-parse the
 	// exact source the operator imported.
 	pb := &persistedBackend{
+		DisplayName:           id,
 		Enabled:               boolPtr(true),
 		OpenAPISpecRaw:        append([]byte(nil), params.SpecRaw...),
 		OpenAPISourceURL:      params.SourceURL,
@@ -1233,6 +1257,7 @@ func (g *Gateway) ReimportOpenAPIBackend(ctx context.Context, id string, params 
 		sourceURL = previous.OpenAPISourceURL
 	}
 	next := &persistedBackend{
+		DisplayName:           previous.DisplayName,
 		Enabled:               boolPtr(true),
 		OpenAPISpecRaw:        append([]byte(nil), params.SpecRaw...),
 		OpenAPISourceURL:      sourceURL,

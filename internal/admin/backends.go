@@ -152,7 +152,7 @@ type BackendSettingsUpdater interface {
 // callbackBaseFromRequest derives the externally-reachable base URL the OAuth
 // provider should redirect to, using the inbound request. This is what makes
 // the auth flow host-aware: when an operator hits the admin at
-// http://172.16.30.90:9086, the callback returns to the same host instead of
+// http://192.0.2.10:9086, the callback returns to the same host instead of
 // the configured fallback.
 //
 // X-Forwarded-Proto / X-Forwarded-Host are honored only when trustProxy is

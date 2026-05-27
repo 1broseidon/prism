@@ -1,0 +1,9 @@
+{
+  "id": "bind-engineering-senior",
+  "template_id": "tmpl-fs-write",
+  "subjects": {
+    "groups": ["engineering"],
+    "role_required": "senior"
+  },
+  "created_by": "operator"
+}

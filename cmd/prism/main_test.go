@@ -17,7 +17,7 @@ import (
 )
 
 func TestMCPResourceURL(t *testing.T) {
-	if got := mcpResourceURL("https://mcp.dfam.one/"); got != "https://mcp.dfam.one/mcp" {
+	if got := mcpResourceURL("https://prism.example.com/"); got != "https://prism.example.com/mcp" {
 		t.Fatalf("resource url = %q", got)
 	}
 	if got := mcpResourceURL(""); got != "" {
@@ -28,7 +28,7 @@ func TestMCPResourceURL(t *testing.T) {
 func TestBuildMuxProtectedResourceMetadataIncludesMCPResource(t *testing.T) {
 	cfg := &config.Loaded{
 		EmbeddedAuth: &config.EmbeddedAuthConfig{
-			Issuer: "https://mcp.dfam.one",
+			Issuer: "https://prism.example.com",
 		},
 	}
 	mux := buildMux(
@@ -36,7 +36,7 @@ func TestBuildMuxProtectedResourceMetadataIncludesMCPResource(t *testing.T) {
 		http.NotFoundHandler(),
 		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		"https://mcp.dfam.one/mcp",
+		"https://prism.example.com/mcp",
 		nil,
 	)
 
@@ -53,7 +53,7 @@ func TestBuildMuxProtectedResourceMetadataIncludesMCPResource(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if got.Resource != "https://mcp.dfam.one/mcp" {
+	if got.Resource != "https://prism.example.com/mcp" {
 		t.Fatalf("resource = %q", got.Resource)
 	}
 }
@@ -74,12 +74,12 @@ func TestParseBridgeURLList(t *testing.T) {
 func TestSyncAdminAuthRedirectFromNetwork(t *testing.T) {
 	kv := store.NewMemoryStore()
 	if err := gateway.SaveNetworkSettings(kv, &admin.NetworkSettings{
-		AdminPublicURL: "https://mcp.dfam.one/",
+		AdminPublicURL: "https://prism.example.com/",
 	}); err != nil {
 		t.Fatalf("save network settings: %v", err)
 	}
 	cfg := &config.AdminAuthConfig{
-		RedirectURL: "http://172.16.30.90:9086/auth/callback",
+		RedirectURL: "http://192.0.2.10:9086/auth/callback",
 	}
 
 	changed, err := syncAdminAuthRedirectFromNetwork(kv, cfg)
@@ -89,7 +89,7 @@ func TestSyncAdminAuthRedirectFromNetwork(t *testing.T) {
 	if !changed {
 		t.Fatal("expected redirect to change")
 	}
-	if cfg.RedirectURL != "https://mcp.dfam.one/auth/callback" {
+	if cfg.RedirectURL != "https://prism.example.com/auth/callback" {
 		t.Fatalf("redirect url = %q", cfg.RedirectURL)
 	}
 }

@@ -1,0 +1,29 @@
+{
+  "id": "tmpl-fs-write",
+  "created_by": "operator",
+  "spec": {
+    "type": "prism.mcp.call",
+    "tool": "fs.write_file",
+    "backend": "local",
+    "args": {
+      "path": {
+        "prefix": "/workspace/a/"
+      }
+    },
+    "workspace": {
+      "id": {
+        "equals": "repo"
+      },
+      "type": {
+        "equals": "ephemeral"
+      },
+      "write_mode": {
+        "equals": "stage"
+      }
+    },
+    "hours": "09:00-18:00 UTC",
+    "auth_freshness_max": 600,
+    "cnf_required": true,
+    "acr_required": "urn:prism:mfa"
+  }
+}

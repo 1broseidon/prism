@@ -46,12 +46,8 @@ export function SettingsNetwork() {
 
   return (
     <SettingsLayout>
-      <div class="page-header">
-        <div>
-          <div class="page-subtitle">
-            how prism advertises itself to oauth providers and clients
-          </div>
-        </div>
+      <div class="settings-section-intro">
+        how prism advertises itself to oauth providers and clients
       </div>
 
       {loaded === null ? (

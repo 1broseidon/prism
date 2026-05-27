@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Set up Node.js (for the admin SPA)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: internal/admin/web/package-lock.json
+
+      - name: Build admin SPA
+        working-directory: internal/admin/web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Format check
+        run: make fmt-check
+
+      - name: Vet
+        run: make vet
+
+      - name: Build all binaries
+        run: make build
+
+      - name: Test (race)
+        run: make test
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      # Pre-create dist so the embed has something to read (lint loads packages).
+      - name: Seed admin SPA dist
+        run: |
+          mkdir -p internal/admin/web/dist
+          [ -f internal/admin/web/dist/index.html ] || echo '<!doctype html><title>prism</title>' > internal/admin/web/dist/index.html
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --build-tags=mcp_go_client_oauth

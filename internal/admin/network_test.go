@@ -53,7 +53,7 @@ func TestPutNetworkSyncsAdminAuthRedirectURL(t *testing.T) {
 			Issuer:       "https://issuer.example",
 			ClientID:     "client",
 			ClientSecret: "secret",
-			RedirectURL:  "http://172.16.30.90:9086/auth/callback",
+			RedirectURL:  "http://192.0.2.10:9086/auth/callback",
 			Rules:        []config.AdminAuthRule{{Role: "admin", Emails: []string{"admin@example.com"}}},
 		},
 	}
@@ -74,7 +74,7 @@ func TestPutNetworkSyncsAdminAuthRedirectURL(t *testing.T) {
 		nil,
 		auth,
 	)
-	body := `{"admin_public_url":"https://mcp.dfam.one","public_url":"https://mcp.dfam.one:8443","trust_proxy_headers":true}`
+	body := `{"admin_public_url":"https://prism.example.com","public_url":"https://prism.example.com:8443","trust_proxy_headers":true}`
 	r := httptest.NewRequest(http.MethodPut, "/api/v1/config/network", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
@@ -87,7 +87,7 @@ func TestPutNetworkSyncsAdminAuthRedirectURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	if got.Config.RedirectURL != "https://mcp.dfam.one/auth/callback" {
+	if got.Config.RedirectURL != "https://prism.example.com/auth/callback" {
 		t.Fatalf("redirect url = %q", got.Config.RedirectURL)
 	}
 	if mgr.settings == nil || mgr.persisted == nil {

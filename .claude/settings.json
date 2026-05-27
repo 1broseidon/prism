@@ -1,29 +1,5 @@
 {
   "hooks": {
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "command": "recoil session-evidence hook --agent claude-code",
-            "marker": "recoil-hook",
-            "timeout": 30,
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "command": "recoil hook remind --format=claude-code",
-            "marker": "recoil-hook",
-            "timeout": 5,
-            "type": "command"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",

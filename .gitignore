@@ -1,17 +1,38 @@
+# Build artifacts
+bin/
 mcpgate
+prism
+prism-bridge
+prism-auth
 *.exe
+
+# Local config and secrets — never commit
 config.json
 .env
-bin/
-
-# Local instance configs (may contain real secrets)
 auth.json
 
-# Per-machine agent runtime dirs
+# Per-machine / per-tool runtime dirs
 .codex/
 .opencode/
 .recoil/
+.familiar/
+.hallmark/
+.playwright-cli/
+.vscode/
+.idea/
 opencode.json
+
+# Internal task tracking / design scratch — not for public distribution
+.brainfile/
+design.md
+docs/superpowers/
+
+# Screenshots and design refs — never committed; reference them from PRs instead
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
 
 # Local-only Claude Code permissions (settings.json is team-shared)
 .claude/settings.local.json

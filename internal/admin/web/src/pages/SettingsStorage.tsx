@@ -109,14 +109,10 @@ export function SettingsStorage() {
 
   return (
     <SettingsLayout>
-      <div class="page-header">
-        <div>
-          <div class="page-subtitle">
-            storage attached to mcp servers. virtual workspaces persist on the
-            gateway; proxied bridges sync from local repos; ephemeral storage
-            is auto-managed.
-          </div>
-        </div>
+      <div class="settings-section-intro">
+        storage attached to mcp servers. virtual workspaces persist on the
+        gateway; proxied bridges sync from local repos; ephemeral storage is
+        auto-managed.
       </div>
 
       <StorageSummary totals={totals} workspaces={workspaces} />
