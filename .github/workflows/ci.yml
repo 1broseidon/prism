@@ -65,7 +65,11 @@ jobs:
           mkdir -p internal/admin/web/dist
           [ -f internal/admin/web/dist/index.html ] || echo '<!doctype html><title>prism</title>' > internal/admin/web/dist/index.html
 
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v8
         with:
+          # v2.x is required because .golangci.yml uses the v2 config schema
+          # AND targets Go 1.26. The action's older v6 release pinned v1.64.8
+          # which can't parse a v2 config or load a 1.26 module.
+          # `latest` on the v8 action resolves to the latest v2 release.
           version: latest
           args: --build-tags=mcp_go_client_oauth
