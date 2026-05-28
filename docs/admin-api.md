@@ -1,17 +1,17 @@
 # Admin API Contract
 
-Prism's admin listener defaults to `:9086`. The admin UI and operator scripts use this API.
+Prism's admin listener defaults to `:9086` (configurable via the `admin` field — see [Configuration](./configuration.md#top-level-fields)). The admin UI and operator scripts use this API. To enable sign-in and roles, configure [admin authentication](./configuration.md#authentication).
 
 ## Mount layout
 
-| Surface | Path | Notes |
+| Surface | Method + Path | Notes |
 |---|---|---|
 | JSON API | `/api/v1/*` | Versioned admin JSON endpoints. Handlers see paths without `/api/v1`. |
-| Admin auth callback | `/auth/callback` | Root-level OIDC redirect target. Do not move under `/api/v1`. |
-| Backend OAuth callback | `/oauth/callback` | Root-level callback for outbound OAuth to upstream backends. |
-| Liveness | `/health` | Root-level health probe for orchestrators. |
-| Metrics | `/metrics` | Root-level Prometheus endpoint when metrics are enabled. |
-| Admin UI | `/` | SPA fallback for browser routes. |
+| Admin auth callback | `GET /auth/callback` | Root-level OIDC redirect target. Do not move under `/api/v1`. |
+| Backend OAuth callback | `GET /oauth/callback` | Root-level callback for outbound OAuth to upstream backends. Registered only when an outbound OAuth callback handler is wired. |
+| Liveness | `GET /health` | Root-level health probe for orchestrators. |
+| Metrics | `GET /metrics` | Root-level Prometheus endpoint. Registered only when metrics are enabled. |
+| Admin UI | `/` | SPA fallback for browser routes (method-agnostic). |
 
 ## Authentication model
 
@@ -23,11 +23,13 @@ All paths below are mounted under `/api/v1` unless marked root-level.
 
 ### Auth and session
 
+These three are registered directly on the mux and are not wrapped by the session/admin middleware.
+
 | Method | Path | Access | Purpose |
 |---|---|---|---|
-| GET | `/auth/me` | session | Current admin session/user. |
-| GET | `/auth/login` | public/session bootstrap | Start admin login. |
-| POST | `/auth/logout` | session | End admin session. |
+| GET | `/auth/me` | public | Current session/user; returns `{"auth":"open"}` when admin auth is disabled. |
+| GET | `/auth/login` | public | Start admin login. A per-IP login rate limit applies even in open mode. |
+| POST | `/auth/logout` | public | End admin session. |
 | GET | `/auth/callback` | root-level | OIDC redirect target. |
 | GET | `/oauth/callback` | root-level | Upstream backend OAuth callback when enabled. |
 
@@ -42,6 +44,7 @@ All paths below are mounted under `/api/v1` unless marked root-level.
 | GET | `/agents/roles` | session | List agent roles. |
 | GET | `/agents/{prism_id}/policy-resolution` | session | Explain effective policy for an agent. |
 | GET | `/agents/{prism_id}...` | session | Agent detail compatibility route. |
+| GET | `/agents/policy-summary` | session | Cached policy summary for all agents. |
 | GET | `/events` | session | Recent audit/admin events. |
 | GET | `/groups` | session | List groups. |
 | GET | `/groups/{id}...` | session | Group detail compatibility route. |
@@ -103,6 +106,8 @@ All paths below are mounted under `/api/v1` unless marked root-level.
 | POST | `/binaries/upload` | admin | Upload a binary backend artifact. |
 | POST | `/binaries/fetch` | admin | Fetch a binary backend artifact by URL. |
 
+The `reconnect`, `workspace-changes/*`, `openapi-diff`, and `reimport` POST routes share the single registered `POST /backends/` pattern and are dispatched by URL suffix. Likewise the `GET /backends/{id}...` detail routes (auth-status, workspace-changes, openapi-source) are suffix-dispatched off the one `GET /backends/` pattern.
+
 ### Grants, policy, and analytics
 
 | Method | Path | Access | Purpose |
@@ -117,11 +122,25 @@ All paths below are mounted under `/api/v1` unless marked root-level.
 | GET | `/grant-bindings/{id}...` | session | Read grant binding. |
 | PUT | `/grant-bindings/{id}...` | admin | Update grant binding. |
 | DELETE | `/grant-bindings/{id}...` | admin | Delete grant binding. |
-| GET | `/agents/policy-summary` | session | Cached policy summary for all agents. |
 | GET | `/analytics/status` | session | Analytics subsystem status. |
 | GET | `/analytics/events` | session | Query analytics events. |
 | GET | `/analytics/events/tail` | session | Tail analytics events. |
 | GET | `/analytics/templates` | session | Analytics by template. |
 | GET | `/analytics/templates/{id}...` | session | Analytics for one template. |
 
-Policy-builder route details are registered by the policy route module and should be kept under `/api/v1` with the same session/admin split.
+### Policy builder
+
+Registered by the policy route module; mounted under `/api/v1` with the same session/admin split.
+
+| Method | Path | Access | Purpose |
+|---|---|---|---|
+| GET | `/policy/verbs` | session | List policy verbs. |
+| GET | `/policy/verbs/{id}...` | session | Resolve a single verb. |
+| GET | `/policy/subjects/{id}...` | session | Read a policy subject. |
+| POST | `/policy/subjects/{id}...` | admin | Create a policy subject. |
+| PUT | `/policy/subjects/{id}...` | admin | Update a policy subject. |
+| DELETE | `/policy/subjects/{id}...` | admin | Delete a policy subject. |
+| GET | `/policy/health` | session | Policy subsystem health. |
+| GET | `/policy/access` | session | Resolve access for a backend (requires `backend` query param; optional `tool` filter; 24h window). |
+
+For the config fields behind these routes (agents, groups, scopes, credentials), see [Configuration](./configuration.md#authentication). To connect an agent against the gateway, see [Getting Started](./getting-started.md).
