@@ -368,7 +368,7 @@ A minimal seed with an HTTP backend, a credential, and a static agent:
   "mcpServers": {
     "api": {
       "url": "http://localhost:3005/mcp",
-      "credentials": { "header": "X-API-Key", "value": "sk_live_your_key" }
+      "credentials": { "header": "X-API-Key", "value": "<your-api-key>" }
     }
   },
   "policy": {

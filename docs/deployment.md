@@ -299,8 +299,8 @@ whatever each backend's `credentials.env` references — they are not reserved b
 Prism:
 
 ```bash
-GITHUB_TOKEN=Bearer ghp_xxxxxxxxxxxx
-STRIPE_KEY=sk_live_xxxxxxxxxxxx
+GITHUB_TOKEN=Bearer <github-token>
+STRIPE_KEY=<stripe-key>
 ```
 
 ```bash
@@ -376,7 +376,7 @@ metadata:
   name: prism-github-token
 type: Opaque
 stringData:
-  token: "Bearer ghp_xxxxxxxxxxxx"
+  token: "Bearer <github-token>"
 ```
 
 ### Deployment
@@ -526,7 +526,7 @@ pod's Service.
 Both Prism ports speak plain HTTP — terminate TLS at the proxy (or use Prism's
 own TLS termination; see [Configuration](./configuration.md#tls)). The gateway
 port (`:8080`) hosts `/mcp` (and `/mcp/`), the OAuth endpoints (`/token`,
-`/authorize`, `/register`, `/stepup`), the `/workspace/*` control plane, and
+`/authorize`, `/register`), the `/workspace/*` control plane, and
 the `/.well-known/*` discovery documents. The admin port (`:9086`) hosts the
 SPA at `/`, the JSON API at `/api/v1/*`, and root-level `/health`, `/metrics`,
 `/auth/callback`, and `/oauth/callback`.

@@ -181,7 +181,7 @@ The type is inferred from which field is set. Set **exactly one** of `value`, `e
 ```json
 {
   "header": "X-API-Key",
-  "value": "sk_live_your_key"
+  "value": "<your-api-key>"
 }
 ```
 

@@ -102,7 +102,7 @@ Agent ──Bearer──→   │  Auth ─→ Scope Filter ─→ Router      �
      └──────────────┘    └──────────────┘     └──────────────┘
 ```
 
-Three binaries ship as static images: `prism` (the gateway), `prism-bridge` (the stdio↔HTTP adapter), and `prism-auth` (a standalone OAuth server for separated deployments — most setups use the auth server embedded in `prism`). Built on the [official Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk).
+Prism builds three static binaries: `prism` (the gateway), `prism-bridge` (the stdio↔HTTP adapter), and `prism-auth` (a standalone OAuth server for separated deployments — most setups use the auth server embedded in `prism`). The published container images bundle `prism` and `prism-bridge`; `prism-auth` ships only as a release binary. Built on the [official Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk).
 
 ## Documentation
 
