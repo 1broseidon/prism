@@ -3,3 +3,8 @@ node_modules/
 dist/
 .DS_Store
 *.log
+apps/desktop/src-tauri/gen/
+
+# local agent tooling
+.claude/
+.codex/

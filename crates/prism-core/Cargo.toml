@@ -1,0 +1,33 @@
+[package]
+name = "prism-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless MCP gateway: policy, backends, approvals, audit"
+
+[dependencies]
+tokio = { version = "1.47", features = ["full"] }
+rmcp = { version = "3.2", features = [
+    "server",
+    "client",
+    "transport-streamable-http-server",
+    "transport-child-process",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["v4"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+rand = "0.9.2"
+axum = { version = "0.8.4", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
+http = "1.3"
+tokio-util = { version = "0.7.16", features = ["rt"] }
+
+[dev-dependencies]
+tempfile = "3.20"

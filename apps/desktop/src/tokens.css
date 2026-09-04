@@ -1,0 +1,63 @@
+/* Prism design tokens. Every colour and font in styles.css references one of these. */
+:root {
+  color-scheme: light dark;
+
+  /* Type. Native UI face so the panel reads as part of the OS, mono for anything machine-shaped. */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, "Inter", Cantarell, "Ubuntu", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --leading: 1.45;
+  --tracking-tight: -0.01em;
+  --tracking-label: 0.06em;
+
+  /* Space, 4pt scale. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-panel: 12px;
+
+  --header-h: 44px;
+  --tabs-h: 36px;
+
+  --dur-fast: 110ms;
+  --dur-short: 180ms;
+  --dur-med: 260ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+
+  /* Cool engineered paper, one cobalt signal. light-dark() keys off color-scheme, so the OS picks and a dev override is one property. */
+  --color-paper: light-dark(oklch(98.5% 0.004 250), oklch(19.5% 0.012 260));
+  --color-paper-2: light-dark(oklch(96.4% 0.005 250), oklch(23% 0.013 260));
+  --color-paper-3: light-dark(oklch(93.6% 0.007 250), oklch(27% 0.014 260));
+  --color-ink: light-dark(oklch(24% 0.02 258), oklch(95% 0.006 250));
+  --color-ink-2: light-dark(oklch(40% 0.018 257), oklch(80% 0.01 252));
+  --color-ink-3: light-dark(oklch(58% 0.015 257), oklch(60% 0.014 254));
+  --color-rule: light-dark(oklch(90.5% 0.006 250), oklch(29% 0.013 260));
+  --color-rule-2: light-dark(oklch(84% 0.009 250), oklch(36% 0.015 260));
+  --color-accent: light-dark(oklch(56% 0.2 256), oklch(70% 0.17 256));
+  --color-accent-hover: light-dark(oklch(50% 0.2 256), oklch(76% 0.15 256));
+  --color-accent-ink: light-dark(oklch(99% 0 0), oklch(16% 0.03 258));
+  --color-accent-soft: light-dark(oklch(94.5% 0.035 256), oklch(30% 0.07 256));
+  --color-ok: light-dark(oklch(58% 0.15 150), oklch(72% 0.15 150));
+  --color-warn: light-dark(oklch(66% 0.15 75), oklch(78% 0.14 80));
+  --color-danger: light-dark(oklch(55% 0.19 25), oklch(70% 0.17 25));
+  --color-danger-soft: light-dark(oklch(95.5% 0.025 25), oklch(28% 0.05 25));
+  --color-code: light-dark(oklch(22% 0.016 260), oklch(14% 0.012 260));
+  --color-code-ink: light-dark(oklch(91% 0.01 250), oklch(90% 0.01 250));
+  --color-code-muted: light-dark(oklch(66% 0.015 255), oklch(58% 0.015 255));
+  --color-focus: var(--color-accent);
+  --shadow-ink: light-dark(oklch(24% 0.02 258 / 0.22), oklch(0% 0 0 / 0.55));
+  --shadow-ink-2: light-dark(oklch(24% 0.02 258 / 0.12), oklch(0% 0 0 / 0.4));
+  --shadow-panel: 0 16px 40px var(--shadow-ink), 0 1px 3px var(--shadow-ink-2);
+}
