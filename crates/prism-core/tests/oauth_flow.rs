@@ -1001,7 +1001,7 @@ async fn oauth_http_limits_reject_floods_and_large_bodies() {
         .status,
         200
     );
-    assert!(PrismConfig::load(&_dir.path().join("prism.json"))
+    assert!(PrismConfig::load(_dir.path().join("prism.json"))
         .unwrap()
         .clients
         .is_empty());

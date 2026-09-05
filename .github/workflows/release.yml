@@ -1,0 +1,183 @@
+name: release
+
+# Tag a release with `vX.Y.Z` (or run manually against an existing tag). The tag must match the
+# version in Cargo.toml, tauri.conf.json and package.json; the bump lives in one commit before the tag.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then TAG="${{ inputs.tag }}"; else TAG="${GITHUB_REF#refs/tags/}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+      - name: Versions agree with the tag
+        run: |
+          V="${{ steps.tag.outputs.version }}"
+          CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          TAURI=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
+          PKG=$(jq -r .version apps/desktop/package.json)
+          echo "tag=$V cargo=$CARGO tauri=$TAURI package=$PKG"
+          [ "$V" = "$CARGO" ] && [ "$V" = "$TAURI" ] && [ "$V" = "$PKG" ] || { echo "version mismatch" >&2; exit 1; }
+      - name: Changelog has an entry
+        run: grep -q "^## \[${{ steps.tag.outputs.version }}\]" CHANGELOG.md || { echo "Add a ## [${{ steps.tag.outputs.version }}] section to CHANGELOG.md before tagging." >&2; exit 1; }
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            os: darwin
+            arch: arm64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            os: darwin
+            arch: x86_64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            os: linux
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            os: linux
+            arch: arm64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            os: windows
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.verify.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            libdbus-1-dev libssl-dev libxdo-dev pkg-config build-essential file
+
+      - name: Frontend deps
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Test core
+        if: matrix.arch != 'x86_64' || matrix.os != 'darwin'
+        run: cargo test -p prism-core --locked
+
+      # Signing and notarization are optional. Without the APPLE_* secrets the macOS bundle is
+      # ad-hoc signed and users clear the quarantine flag once; see README "Install".
+      - name: Build bundles
+        working-directory: apps/desktop
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm tauri build --target ${{ matrix.target }} --ci
+
+      - name: Collect and rename
+        run: |
+          V="${{ needs.verify.outputs.version }}"
+          B="target/${{ matrix.target }}/release/bundle"
+          OUT=out; mkdir -p "$OUT"
+          S="${{ matrix.os }}_${{ matrix.arch }}"
+          case "${{ matrix.os }}" in
+            darwin)
+              cp "$B"/dmg/*.dmg "$OUT/prism_${V}_${S}.dmg"
+              (cd "$B/macos" && tar czf "$OLDPWD/$OUT/prism_${V}_${S}.app.tar.gz" Prism.app)
+              ;;
+            linux)
+              cp "$B"/appimage/*.AppImage "$OUT/prism_${V}_${S}.AppImage"
+              cp "$B"/deb/*.deb "$OUT/prism_${V}_${S}.deb"
+              cp "$B"/rpm/*.rpm "$OUT/prism_${V}_${S}.rpm"
+              ;;
+            windows)
+              cp "$B"/msi/*.msi "$OUT/prism_${V}_${S}.msi"
+              cp "$B"/nsis/*-setup.exe "$OUT/prism_${V}_${S}-setup.exe"
+              ;;
+          esac
+          ls -la "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism_${{ matrix.os }}_${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.verify.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum prism_* > checksums.txt && cat checksums.txt
+      - name: Release notes from changelog
+        run: |
+          V="${{ needs.verify.outputs.version }}"
+          awk -v v="$V" '/^## \[/ { if (on) exit; if (index($0, "## [" v "]") == 1) { on = 1; next } } on { print }' CHANGELOG.md \
+            | sed '/./,$!d' > dist/notes.md
+          awk 'NF { f = 1 } END { exit f ? 0 : 1 }' dist/notes.md || { echo "empty changelog section for $V" >&2; exit 1; }
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          name: Prism ${{ needs.verify.outputs.tag }}
+          body_path: dist/notes.md
+          files: |
+            dist/prism_*
+            dist/checksums.txt
