@@ -114,10 +114,11 @@ jobs:
         if: matrix.arch != 'x86_64' || matrix.os != 'darwin'
         run: cargo test -p prism-core --locked
 
-      # Signing and notarization are optional. Without the APPLE_* secrets the macOS bundle is
-      # ad-hoc signed and users clear the quarantine flag once; see README "Install".
-      - name: Build bundles
-        working-directory: apps/desktop
+      # Signing and notarization are optional. The variables are exported only when the secrets
+      # exist: Tauri treats an empty APPLE_CERTIFICATE as a certificate and fails to import it.
+      # Without them the macOS bundle is ad-hoc signed and users clear quarantine once (README).
+      - name: Apple signing secrets
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -125,6 +126,17 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name}" ]; then
+              echo "::add-mask::${!name}"
+              echo "$name=${!name}" >> "$GITHUB_ENV"
+            fi
+          done
+          if [ -n "$APPLE_CERTIFICATE" ]; then echo "Signing with the configured identity."; else echo "No signing secrets; bundle will be ad-hoc signed."; fi
+
+      - name: Build bundles
+        working-directory: apps/desktop
         run: pnpm tauri build --target ${{ matrix.target }} --ci
 
       - name: Collect and rename
