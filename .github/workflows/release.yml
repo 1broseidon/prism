@@ -32,7 +32,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then TAG="${{ inputs.tag }}"; else TAG="${GITHUB_REF#refs/tags/}"; fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ steps.tag.outputs.tag }}
       - name: Versions agree with the tag
@@ -79,7 +79,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ needs.verify.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
@@ -89,12 +89,12 @@ jobs:
         with:
           workspaces: . -> target
           key: ${{ matrix.target }}
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
 
@@ -150,7 +150,7 @@ jobs:
           esac
           ls -la "$OUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: prism_${{ matrix.os }}_${{ matrix.arch }}
           path: out/*
@@ -160,10 +160,10 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ needs.verify.outputs.tag }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -175,7 +175,7 @@ jobs:
           awk -v v="$V" '/^## \[/ { if (on) exit; if (index($0, "## [" v "]") == 1) { on = 1; next } } on { print }' CHANGELOG.md \
             | sed '/./,$!d' > dist/notes.md
           awk 'NF { f = 1 } END { exit f ? 0 : 1 }' dist/notes.md || { echo "empty changelog section for $V" >&2; exit 1; }
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.verify.outputs.tag }}
           name: Prism ${{ needs.verify.outputs.tag }}
