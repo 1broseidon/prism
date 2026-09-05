@@ -41,7 +41,7 @@ A Homebrew cask via `1broseidon/tap` follows the first tagged release.
 
 ### From source
 
-Requires Rust stable, Node 22 and pnpm 10. On Linux, also the Tauri build dependencies:
+Requires Rust stable, Node 24 and pnpm 10. On Linux, also the Tauri build dependencies:
 
 ```sh
 sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
