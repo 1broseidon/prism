@@ -29,11 +29,7 @@ Download the build for your machine from the [latest release](https://github.com
 | Linux, x86_64 | `.AppImage`, `.deb`, `.rpm` | AppImage needs `chmod +x`. The deb and rpm declare their WebKitGTK and AppIndicator dependencies. |
 | Linux, arm64 | `.AppImage`, `.deb`, `.rpm` | Same. |
 
-**macOS quarantine.** Builds are ad-hoc signed, not notarized. The first launch is refused with "cannot be opened because the developer cannot be verified", and on some versions with "is damaged and can't be opened". Either way, clear the quarantine flag once after copying the app to Applications:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/Prism.app
-```
+**macOS.** Builds are signed with a Developer ID certificate and notarized by Apple, so the app opens without a Gatekeeper prompt. If you installed an earlier unsigned build, replace it with the current download.
 
 **Linux requirements.** Prism needs a session D-Bus and an unlocked Secret Service provider such as GNOME Keyring or KWallet, because that is where server credentials live. GNOME users also need an AppIndicator extension for the tray icon to appear. Ubuntu and Fedora desktops ship both.
 
@@ -172,7 +168,7 @@ Versions live in three places and must agree: the workspace `Cargo.toml`, `apps/
 git tag vX.Y.Z && git push --tags
 ```
 
-The release workflow checks the three versions against the tag, builds the DMG, MSI, NSIS installer, AppImage, deb and rpm for five targets, writes `checksums.txt`, and publishes a GitHub release with the changelog section as its notes. Signed and notarized macOS builds need six repository secrets: `APPLE_CERTIFICATE` (base64 Developer ID Application p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and the App Store Connect key as `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_P8`. Without the certificate the bundle is ad-hoc signed.
+The release workflow checks the three versions against the tag, builds the DMG, MSI, NSIS installer, AppImage, deb and rpm for five targets, writes `checksums.txt`, and publishes a GitHub release with the changelog section as its notes. macOS signing and notarization use six repository secrets: `APPLE_CERTIFICATE` (base64 Developer ID Application p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and the App Store Connect key as `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_P8`. Without the certificate the bundle is ad-hoc signed.
 
 ## License
 
