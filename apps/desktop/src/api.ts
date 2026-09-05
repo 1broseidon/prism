@@ -14,10 +14,16 @@ import type {
   AuditEntry,
   ConnectSnippet,
   Decision,
+  Attention,
   GatewayStatus,
+  NewRule,
   PendingCall,
+  PendingSignIn,
+  Posture,
   Rule,
   ServerView,
+  Settings,
+  ToolInfo,
 } from "./types";
 
 export function getStatus() {
@@ -57,6 +63,19 @@ export function removeAgent(agentId: string) {
   return invoke<void>("remove_agent", { agentId });
 }
 
+export function listSignins() {
+  return invoke<PendingSignIn[]>("list_signins");
+}
+
+export function decideSignin(id: string, approve: boolean) {
+  return invoke<void>("decide_signin", { id, approve });
+}
+
+/** Sign an agent out everywhere: every token it holds stops working at once. */
+export function revokeAgentTokens(agentId: string) {
+  return invoke<void>("revoke_agent_tokens", { agentId });
+}
+
 export function listPending() {
   return invoke<PendingCall[]>("list_pending");
 }
@@ -73,6 +92,26 @@ export function deleteRule(ruleId: string) {
   return invoke<void>("delete_rule", { ruleId });
 }
 
+export function addRule(rule: NewRule) {
+  return invoke<Rule>("add_rule", { rule });
+}
+
+export function setAgentPolicy(agentId: string, policy: { posture?: Posture; attention?: Attention }) {
+  return invoke<AgentConfig>("set_agent_policy", { agentId, posture: policy.posture ?? null, attention: policy.attention ?? null });
+}
+
+export function getSettings() {
+  return invoke<Settings>("get_settings");
+}
+
+export function setSettings(settings: Settings) {
+  return invoke<void>("set_settings", { settings });
+}
+
+export function listServerTools(serverId: string) {
+  return invoke<ToolInfo[]>("list_server_tools", { serverId });
+}
+
 export function listAudit(limit = 20) {
   return invoke<AuditEntry[]>("list_audit", { limit });
 }
@@ -83,4 +122,12 @@ export function hidePanel() {
 
 export function getConnectSnippet() {
   return invoke<ConnectSnippet>("get_connect_snippet");
+}
+
+export function createManualAgent(name: string) {
+  return invoke<import("./types").ManualToken>("create_manual_agent", { name });
+}
+
+export function replaceManualToken(agentId: string) {
+  return invoke<import("./types").ManualToken>("replace_manual_token", { agentId });
 }

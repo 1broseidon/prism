@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" role="img" aria-label="Prism">
+  <title>Prism</title>
+  <g fill="#E8FBFF">
+    <polygon points="8,50 30,12 38,50"/>
+    <polygon points="42,50 30,12 52,18 56,50"/>
+  </g>
+</svg>

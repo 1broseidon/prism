@@ -28,3 +28,21 @@ export function mmss(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
+
+/** Seconds until `iso`, never negative. */
+export function secondsUntil(iso: string, from = now.value): number {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return 0;
+  return Math.max(0, (then - from) / 1000);
+}
+
+/** "2h 05m", "23m", "40s" until `iso`. */
+export function remaining(iso: string, from = now.value): string {
+  const s = Math.floor(secondsUntil(iso, from));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+  return `${Math.floor(h / 24)}d`;
+}

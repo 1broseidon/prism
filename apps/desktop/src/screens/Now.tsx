@@ -1,25 +1,40 @@
 import { useEffect } from "preact/hooks";
 import * as api from "../api";
-import { agents, audit, errorMessage, pending, status } from "../state";
-import { clock, mmss, now, relative } from "../time";
-import type { AgentConfig, AuditEntry, Decision, PendingCall } from "../types";
-import { Button, CodeBlock, Empty, Label, describeError } from "../ui";
+import { agents, audit, errorMessage, pending, signins, status } from "../state";
+import { clock, mmss, now, relative, secondsUntil } from "../time";
+import type { AgentConfig, AuditEntry, Decision, PendingCall, PendingSignIn } from "../types";
+import { Button, CodeBlock, Empty, Label, Screen, describeError } from "../ui";
 
-/** Mirrors DEFAULT_HOLD_TIMEOUT in crates/prism-core/src/approval.rs. */
+/** Fallback when a call carries no deadline; mirrors DEFAULT_HOLD_TIMEOUT in prism-core. */
 const HOLD_SECONDS = 120;
 
-async function decide(call: PendingCall, verdict: Decision["verdict"], scope: Decision["scope"]) {
+async function decide(call: PendingCall, verdict: Decision["verdict"], scope: Decision["scope"], target: Decision["target"] = "tool") {
   try {
-    await api.decide(call.id, { verdict, scope });
+    await api.decide(call.id, { verdict, scope, target });
   } catch (err) {
     errorMessage.value = describeError(err);
   }
+}
+
+/** Under first-use the answer is remembered by default; everywhere else it is one call at a time. */
+function primaryScope(call: PendingCall): Decision["scope"] {
+  return call.posture === "first_use" ? "always" : "once";
 }
 
 async function decideAgent(agent: AgentConfig, approve: boolean) {
   try {
     await api.decideAgent(agent.id, approve);
     agents.value = await api.listAgents();
+    status.value = await api.getStatus();
+  } catch (err) {
+    errorMessage.value = describeError(err);
+  }
+}
+
+async function decideSignin(signin: PendingSignIn, approve: boolean) {
+  try {
+    await api.decideSignin(signin.id, approve);
+    signins.value = (await api.listSignins()).filter((s) => s.needs_consent);
     status.value = await api.getStatus();
   } catch (err) {
     errorMessage.value = describeError(err);
@@ -35,9 +50,10 @@ function isTyping(): boolean {
 function AgentCard({ agent, first }: { agent: AgentConfig; first: boolean }) {
   return (
     <section class="hold" aria-live="polite">
-      <Label right={<span class="mono">{relative(agent.created_at)}</span>}>
-        <span class="accent">New agent</span>
-      </Label>
+      <div class="top">
+        <span class="eyebrow">{agent.client_id ? "New agent" : "Manual client"}</span>
+        <span class="when">{relative(agent.created_at)}</span>
+      </div>
       <div class="ask">
         <b>{agent.name}</b> wants to connect
       </div>
@@ -49,9 +65,8 @@ function AgentCard({ agent, first }: { agent: AgentConfig; first: boolean }) {
         ) : null}
         {agent.connected ? "session open, waiting" : "not connected right now"}
       </div>
-      <p class="muted small" style={{ margin: "var(--space-2) 0 0" }}>
-        It sees no tools until you approve. Every call it makes afterwards still goes through your rules.
-      </p>
+      <p class="note">It sees no tools until you approve. Every call it makes afterwards still goes through your rules.</p>
+      {!agent.client_id ? <p class="note">This client also needs a manual token. Create one on its agent screen after approving it.</p> : null}
       <div class="actions">
         <Button variant="primary" hint={first ? "A" : undefined} autoFocus={first} onClick={() => void decideAgent(agent, true)}>
           Approve
@@ -64,19 +79,52 @@ function AgentCard({ agent, first }: { agent: AgentConfig; first: boolean }) {
   );
 }
 
+/** An approved agent's client is signing in again. A public client id proves nothing, so this asks. */
+function SignInCard({ signin, first }: { signin: PendingSignIn; first: boolean }) {
+  return (
+    <section class="hold" aria-live="polite">
+      <div class="top">
+        <span class="eyebrow">Sign-in</span>
+        <span class="when">{relative(signin.requested_at)}</span>
+      </div>
+      <div class="ask">
+        <b>{signin.agent_name}</b> wants to sign in again
+      </div>
+      <div class="via">
+        client <code>{signin.client_name}</code> · a browser is waiting on this
+      </div>
+      <p class="note">
+        Expected when the client lost its tokens. If nothing on your side asked to sign in, refuse: an approved name is not proof of who is asking.
+      </p>
+      <div class="actions">
+        <Button variant="primary" hint={first ? "A" : undefined} autoFocus={first} onClick={() => void decideSignin(signin, true)}>
+          Allow sign-in
+        </Button>
+        <Button variant="danger" hint={first ? "D" : undefined} onClick={() => void decideSignin(signin, false)}>
+          Refuse
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 function HoldCard({ call, first }: { call: PendingCall; first: boolean }) {
-  const elapsed = (now.value - Date.parse(call.requested_at)) / 1000;
-  const left = Math.max(0, HOLD_SECONDS - elapsed);
-  const frac = left / HOLD_SECONDS;
+  const left = call.deadline
+    ? secondsUntil(call.deadline)
+    : Math.max(0, HOLD_SECONDS - (now.value - Date.parse(call.requested_at)) / 1000);
+  const remembers = call.posture === "first_use";
   const args = call.arguments && Object.keys(call.arguments as object).length > 0
     ? JSON.stringify(call.arguments, null, 2)
     : "";
 
   return (
     <section class="hold" aria-live="polite">
-      <Label right={<span class="mono">{mmss(left)}</span>}>
-        <span class="accent">Waiting for you</span>
-      </Label>
+      <div class="top">
+        <span class="eyebrow">{call.reason === "rate_limit" ? "Running hot · waiting for you" : "Waiting for you"}</span>
+        <span class={`countdown ${left < 20 ? "late" : ""}`} aria-label={`${Math.floor(left)} seconds left`}>
+          {mmss(left)}
+        </span>
+      </div>
       <div class="ask">
         <b>{call.agent_name}</b> wants to call <span class="tool">{call.tool}</span>
       </div>
@@ -89,25 +137,32 @@ function HoldCard({ call, first }: { call: PendingCall; first: boolean }) {
           variant="primary"
           hint={first ? "A" : undefined}
           autoFocus={first}
-          onClick={() => void decide(call, "allow", "once")}
+          onClick={() => void decide(call, "allow", primaryScope(call))}
         >
-          Allow once
+          {remembers ? "Allow" : "Allow once"}
         </Button>
         <Button variant="danger" hint={first ? "D" : undefined} onClick={() => void decide(call, "deny", "once")}>
           Deny
         </Button>
       </div>
       <div class="actions secondary">
-        <Button variant="quiet" onClick={() => void decide(call, "allow", "session")}>
-          Allow for this session
+        {remembers ? (
+          <Button variant="quiet" onClick={() => void decide(call, "allow", "once")}>
+            Just this once
+          </Button>
+        ) : (
+          <Button variant="quiet" onClick={() => void decide(call, "allow", "always")}>
+            Always allow this tool
+          </Button>
+        )}
+        <Button variant="quiet" onClick={() => void decide(call, "allow", { for: { minutes: 30 } })}>
+          Allow for 30 min
         </Button>
-        <Button variant="quiet" onClick={() => void decide(call, "allow", "always")}>
-          Always allow this tool
+        <Button variant="quiet" onClick={() => void decide(call, "allow", "always", "server")}>
+          Everything on {call.server_name}
         </Button>
       </div>
-      <div class={`clock ${left < 20 ? "late" : ""}`} aria-hidden="true">
-        <i style={{ transform: `scaleX(${frac})` }} />
-      </div>
+      {remembers ? <p class="note">First use: Prism remembers this answer for {call.tool} from now on.</p> : null}
     </section>
   );
 }
@@ -133,6 +188,10 @@ function sourceText(entry: AuditEntry): string {
       return "rule";
     case "unapproved":
       return "unapproved";
+    case "posture":
+      return entry.source.posture.replace("_", " ");
+    case "do_not_disturb":
+      return "dnd";
     default:
       return "timeout";
   }
@@ -142,6 +201,7 @@ export function NowScreen() {
   const st = status.value;
   const calls = pending.value;
   const requests = agents.value.filter((a) => a.status === "pending");
+  const logins = signins.value;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -149,23 +209,28 @@ export function NowScreen() {
       const key = event.key.toLowerCase();
       if (key !== "a" && key !== "d") return;
       const firstAgent = agents.value.find((a) => a.status === "pending");
+      const firstSignin = signins.value[0];
       const firstCall = pending.value[0];
       if (firstAgent) {
         event.preventDefault();
         void decideAgent(firstAgent, key === "a");
+      } else if (firstSignin) {
+        event.preventDefault();
+        void decideSignin(firstSignin, key === "a");
       } else if (firstCall) {
         event.preventDefault();
-        void decide(firstCall, key === "a" ? "allow" : "deny", "once");
+        void decide(firstCall, key === "a" ? "allow" : "deny", key === "a" ? primaryScope(firstCall) : "once");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const nothing = calls.length === 0 && requests.length === 0;
+  const nothing = calls.length === 0 && requests.length === 0 && logins.length === 0;
 
   return (
-    <div>
+    <div class="screen">
+      <Screen>
       {nothing ? (
         <Empty title="Nothing waiting.">
           New agents and held calls show up here the moment they ask. Your rules decide the rest.
@@ -175,8 +240,11 @@ export function NowScreen() {
           {requests.map((agent, i) => (
             <AgentCard key={agent.id} agent={agent} first={i === 0} />
           ))}
+          {logins.map((signin, i) => (
+            <SignInCard key={signin.id} signin={signin} first={requests.length === 0 && i === 0} />
+          ))}
           {calls.map((call, i) => (
-            <HoldCard key={call.id} call={call} first={requests.length === 0 && i === 0} />
+            <HoldCard key={call.id} call={call} first={requests.length === 0 && logins.length === 0 && i === 0} />
           ))}
         </>
       )}
@@ -198,10 +266,11 @@ export function NowScreen() {
         ) : (
           audit.value.map((entry) => (
             <div class="row" key={entry.id}>
-              <span class={`dot ${verdictTone(entry)}`} />
               <time dateTime={entry.at}>{clock(entry.at)}</time>
               <span class="who">
-                <b>{entry.agent_name}</b> · {entry.tool}
+                <span class={`dot ${verdictTone(entry)}`} />
+                <b>{entry.agent_name}</b>
+                <code>{entry.tool}</code>
               </span>
               <span class="src">{sourceText(entry)}</span>
               {entry.error ? <span class="err">{entry.error}</span> : null}
@@ -209,6 +278,7 @@ export function NowScreen() {
           ))
         )}
       </div>
+      </Screen>
     </div>
   );
 }

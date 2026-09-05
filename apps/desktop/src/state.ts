@@ -5,6 +5,7 @@ import type {
   ConnectSnippet,
   GatewayStatus,
   PendingCall,
+  PendingSignIn,
   Rule,
   ServerView,
 } from "./types";
@@ -13,12 +14,40 @@ export const status = signal<GatewayStatus | null>(null);
 export const servers = signal<ServerView[]>([]);
 export const agents = signal<AgentConfig[]>([]);
 export const pending = signal<PendingCall[]>([]);
+export const signins = signal<PendingSignIn[]>([]);
 export const rules = signal<Rule[]>([]);
 export const audit = signal<AuditEntry[]>([]);
 export const lastCreatedSnippet = signal<ConnectSnippet | null>(null);
 export const lastCreatedAgentId = signal<string | null>(null);
 export const errorMessage = signal<string | null>(null);
+
 export type Tab = "now" | "servers" | "agents" | "rules";
 const TABS: Tab[] = ["now", "servers", "agents", "rules"];
-const fromHash = location.hash.slice(1) as Tab;
-export const tab = signal<Tab>(TABS.includes(fromHash) ? fromHash : "now");
+
+/** Screens pushed on top of a tab, phone-style. Each owns the whole panel until it is popped. */
+export type Screen =
+  | { kind: "add-server" }
+  | { kind: "connect-agent" }
+  | { kind: "agent"; agentId: string }
+  | { kind: "agent-server"; agentId: string; serverId: string }
+  | { kind: "settings" };
+export const stack = signal<Screen[]>([]);
+
+export function push(screen: Screen): void {
+  stack.value = [...stack.value, screen];
+}
+
+export function pop(): void {
+  stack.value = stack.value.slice(0, -1);
+}
+
+/** Dev affordance: `#servers/add` or `#agents/connect` opens a tab with a screen already pushed. */
+const [hashTab, hashScreen] = location.hash.slice(1).split("/");
+export const tab = signal<Tab>(TABS.includes(hashTab as Tab) ? (hashTab as Tab) : "now");
+if (hashScreen === "add" && tab.value === "servers") stack.value = [{ kind: "add-server" }];
+if (hashScreen === "connect" && tab.value === "agents") stack.value = [{ kind: "connect-agent" }];
+if (hashScreen === "settings") stack.value = [{ kind: "settings" }];
+if (hashScreen && hashScreen.startsWith("a") && tab.value === "agents" && hashScreen !== "connect") {
+  const [agentId, serverId] = hashScreen.split(":");
+  stack.value = serverId ? [{ kind: "agent", agentId }, { kind: "agent-server", agentId, serverId }] : [{ kind: "agent", agentId }];
+}

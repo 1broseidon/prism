@@ -5,6 +5,7 @@ use crate::approval::{Decision, PendingCall};
 use crate::audit::AuditEntry;
 use crate::backend::BackendStatus;
 use crate::config::{AgentConfig, AgentStatus};
+use crate::oauth::PendingSignIn;
 
 /// Events broadcast to desktop (and any other subscriber).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,18 @@ pub enum GatewayEvent {
     AgentDisconnected {
         agent_id: String,
     },
+    /// An already-approved agent's client started an OAuth sign-in and needs a yes.
+    SignInRequested(PendingSignIn),
+    SignInDecided {
+        id: String,
+        approved: bool,
+    },
+    /// Posture or attention changed for an agent.
+    AgentUpdated {
+        agent_id: String,
+    },
+    /// Do-not-disturb, timeout behaviour, or another operator setting changed.
+    SettingsChanged,
     ServerStatus {
         server_id: String,
         status: BackendStatus,

@@ -13,6 +13,8 @@ pub enum Error {
     AlreadyExists(String),
     #[error("invalid argument: {0}")]
     Invalid(String),
+    #[error("too many requests: {0}")]
+    RateLimited(&'static str),
     #[error("backend error: {0}")]
     Backend(String),
     #[error("gateway error: {0}")]

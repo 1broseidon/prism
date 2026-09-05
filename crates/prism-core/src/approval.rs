@@ -6,12 +6,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
 
+use crate::config::Posture;
 use crate::error::{Error, Result};
 
-/// How long a held call waits for a human before it is denied.
+/// How long a held call waits for a human before it is denied, unless the config says otherwise.
 pub const DEFAULT_HOLD_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub const TIMEOUT_MESSAGE: &str = "Prism held this call for approval and nobody answered within 120s. Open the Prism panel and retry.";
+pub const TIMEOUT_MESSAGE: &str =
+    "Prism held this call for approval and nobody answered in time. Open the Prism panel and retry.";
+
+/// Why a call is being held rather than resolved by policy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldReason {
+    /// A rule or the agent's posture said ask.
+    #[default]
+    Policy,
+    /// Policy said allow, but the agent tripped the per-minute rate limit.
+    RateLimit,
+}
 
 /// A tool call waiting on a human decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,6 +37,14 @@ pub struct PendingCall {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub requested_at: DateTime<Utc>,
+    /// When the hold times out; the panel counts down to this.
+    #[serde(default)]
+    pub deadline: Option<DateTime<Utc>>,
+    /// The agent's posture, so the panel can pick sensible defaults (first-use remembers).
+    #[serde(default)]
+    pub posture: Posture,
+    #[serde(default)]
+    pub reason: HoldReason,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,12 +54,24 @@ pub enum DecisionVerdict {
     Deny,
 }
 
+/// How long the answer lasts. `For` is a time box in minutes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionScope {
     Once,
     Session,
     Always,
+    For { minutes: u32 },
+}
+
+/// How wide the remembered rule reaches: this tool, everything on the server, or everything.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionTarget {
+    #[default]
+    Tool,
+    Server,
+    Agent,
 }
 
 /// Human decision for a pending call.
@@ -46,6 +79,8 @@ pub enum DecisionScope {
 pub struct Decision {
     pub verdict: DecisionVerdict,
     pub scope: DecisionScope,
+    #[serde(default)]
+    pub target: DecisionTarget,
 }
 
 /// Result of waiting on a held call.
@@ -80,6 +115,11 @@ impl ApprovalRegistry {
     }
 
     pub async fn register(&self, call: PendingCall) -> HoldOutcome {
+        self.register_for(call, self.timeout).await
+    }
+
+    /// Hold `call` for at most `timeout`, whatever the registry default is.
+    pub async fn register_for(&self, call: PendingCall, timeout: Duration) -> HoldOutcome {
         let id = call.id.clone();
         let (tx, rx) = oneshot::channel();
         {
@@ -87,7 +127,7 @@ impl ApprovalRegistry {
             map.insert(id.clone(), Slot { call, tx });
         }
 
-        match tokio::time::timeout(self.timeout, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => HoldOutcome::Decided(decision),
             Ok(Err(_)) => {
                 self.inner.lock().await.remove(&id);
@@ -141,6 +181,9 @@ mod tests {
             tool: "read".into(),
             arguments: serde_json::json!({"path": "/tmp"}),
             requested_at: Utc::now(),
+            deadline: None,
+            posture: Posture::default(),
+            reason: HoldReason::Policy,
         }
     }
 
@@ -155,6 +198,7 @@ mod tests {
         let decision = Decision {
             verdict: DecisionVerdict::Allow,
             scope: DecisionScope::Once,
+            target: DecisionTarget::Tool,
         };
         registry.decide("p1", decision).await.expect("decide");
         let outcome = handle.await.expect("join");
@@ -174,6 +218,7 @@ mod tests {
                 Decision {
                     verdict: DecisionVerdict::Allow,
                     scope: DecisionScope::Once,
+                    target: DecisionTarget::Tool,
                 },
             )
             .await;
@@ -189,6 +234,7 @@ mod tests {
                 Decision {
                     verdict: DecisionVerdict::Deny,
                     scope: DecisionScope::Once,
+                    target: DecisionTarget::Tool,
                 },
             )
             .await

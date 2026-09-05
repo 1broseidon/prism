@@ -1,8 +1,8 @@
 import * as api from "../api";
 import { agents, errorMessage, rules, servers } from "../state";
-import { relative } from "../time";
+import { relative, remaining } from "../time";
 import type { Rule } from "../types";
-import { Button, Chip, Empty, Label, describeError } from "../ui";
+import { Button, Chip, Empty, Label, Screen, describeError } from "../ui";
 
 function nameOf(list: { id: string; name: string }[], id: string | null): string {
   if (!id) return "any";
@@ -10,7 +10,12 @@ function nameOf(list: { id: string; name: string }[], id: string | null): string
 }
 
 function scopeChip(rule: Rule) {
+  if (rule.expires_at) return <Chip tone="warn">{remaining(rule.expires_at)} left</Chip>;
   return rule.scope === "session" ? <Chip tone="warn">this session</Chip> : <Chip>always</Chip>;
+}
+
+function decisionTone(rule: Rule): "ok" | "danger" | "warn" {
+  return rule.decision === "allow" ? "ok" : rule.decision === "deny" ? "danger" : "warn";
 }
 
 export function RulesScreen() {
@@ -25,17 +30,19 @@ export function RulesScreen() {
   };
 
   return (
-    <div>
+    <div class="screen">
+      <Screen>
       <Label right={<span>{list.length}</span>}>Rules</Label>
       {list.length === 0 ? (
-        <Empty title="No rules yet.">Answer a held call with “for this session” or “always” and the rule lands here. Session rules vanish when Prism quits.</Empty>
+        <Empty title="No rules yet.">Every remembered answer and every setting you make on an agent lands here. Session rules vanish when Prism quits.</Empty>
       ) : (
         <div class="list">
           {list.map((rule) => (
             <div class="item" key={rule.id}>
               <div class="title">
-                <Chip tone={rule.decision === "allow" ? "ok" : "danger"}>{rule.decision}</Chip>
+                <Chip tone={decisionTone(rule)}>{rule.decision}</Chip>
                 {scopeChip(rule)}
+                {rule.attention ? <Chip tone="accent">{rule.attention}</Chip> : null}
               </div>
               <div class="side">
                 <Button variant="quiet" class="danger" onClick={() => void remove(rule.id)}>
@@ -49,6 +56,7 @@ export function RulesScreen() {
           ))}
         </div>
       )}
+      </Screen>
     </div>
   );
 }

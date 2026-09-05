@@ -16,24 +16,26 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::{ErrorData as McpError, RoleServer};
-use serde::Serialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::approval::{
-    ApprovalRegistry, Decision, DecisionScope, DecisionVerdict, HoldOutcome, PendingCall,
-    TIMEOUT_MESSAGE,
+    ApprovalRegistry, Decision, DecisionScope, DecisionTarget, DecisionVerdict, HoldOutcome,
+    HoldReason, PendingCall, TIMEOUT_MESSAGE,
 };
 use crate::audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict};
 use crate::backend::{BackendManager, BackendStatus, ServerView};
 use crate::config::{
-    AgentConfig, AgentStatus, PanelAnchor, PrismConfig, Rule, RuleDecision, RuleScope, ServerConfig,
+    AgentConfig, AgentStatus, Attention, PanelAnchor, Posture, PrismConfig, Rule, RuleDecision,
+    RuleScope, ServerConfig, TimeoutBehavior,
 };
 use crate::error::{Error, Result};
 use crate::events::{channel, EventReceiver, EventSender, GatewayEvent};
-use crate::policy::{self, ToolAnnotations, Verdict};
+use crate::oauth::{self, AuthenticatedAgent, OAuthState, TokenView};
+use crate::policy::{self, Decider, ToolAnnotations, Verdict};
 
 /// Live gateway status for the desktop UI.
 #[derive(Debug, Clone, Serialize)]
@@ -45,7 +47,49 @@ pub struct GatewayStatus {
     pub agent_count: usize,
     pub pending_count: usize,
     pub pending_agents: usize,
+    /// Approved agents whose client is signing in again and waiting for consent.
+    pub pending_signins: usize,
     pub auto_open_on_pending: bool,
+    pub do_not_disturb: bool,
+}
+
+/// Operator-level knobs, the ones that are not about one agent or one rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Settings {
+    pub on_timeout: TimeoutBehavior,
+    pub do_not_disturb: bool,
+    pub rate_limit_per_minute: Option<u32>,
+    pub hold_timeout_secs: u64,
+    pub auto_open_on_pending: bool,
+}
+
+/// A rule as the panel creates it. Same triple as an existing rule replaces that rule.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewRule {
+    pub agent_id: Option<String>,
+    pub server_id: Option<String>,
+    pub tool: Option<String>,
+    pub decision: RuleDecision,
+    #[serde(default)]
+    pub attention: Option<Attention>,
+    #[serde(default = "always")]
+    pub scope: RuleScope,
+    /// Time box in minutes; `None` means until removed.
+    #[serde(default)]
+    pub minutes: Option<u32>,
+}
+
+fn always() -> RuleScope {
+    RuleScope::Always
+}
+
+/// One tool on one server, as the panel lists it for per-tool overrides.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub read_only: bool,
+    pub destructive: bool,
 }
 
 /// The gateway URL and a generic `mcp.json` block pointing at it.
@@ -61,6 +105,8 @@ pub struct AgentView {
     #[serde(flatten)]
     pub agent: AgentConfig,
     pub connected: bool,
+    /// Live tokens this agent holds. Empty for agents that connect unauthenticated.
+    pub tokens: Vec<TokenView>,
 }
 
 /// One live MCP session and the agent it authenticated as.
@@ -71,15 +117,19 @@ struct SessionEntry {
 
 /// The MCP gateway agents connect to.
 pub struct Gateway {
-    config_path: PathBuf,
-    config: RwLock<PrismConfig>,
+    pub(crate) config_path: PathBuf,
+    pub(crate) config: RwLock<PrismConfig>,
     backends: BackendManager,
+    credentials: Arc<dyn crate::credentials::CredentialStore>,
     approval: ApprovalRegistry,
     audit: AuditLog,
-    events: EventSender,
+    pub(crate) events: EventSender,
     shutdown: CancellationToken,
-    listen_port: u16,
+    pub(crate) listen_port: u16,
+    pub(crate) oauth: OAuthState,
     sessions: std::sync::Mutex<HashMap<String, SessionEntry>>,
+    /// Call timestamps per agent for the rate tripwire; trimmed to the last minute on each check.
+    calls: std::sync::Mutex<HashMap<String, VecDeque<Instant>>>,
 }
 
 impl Gateway {
@@ -88,37 +138,65 @@ impl Gateway {
         config_path: impl AsRef<Path>,
         audit_path: impl AsRef<Path>,
     ) -> Result<Arc<Self>> {
+        Self::start_with_credentials(
+            config_path.as_ref().to_path_buf(),
+            audit_path.as_ref().to_path_buf(),
+            Arc::new(crate::credentials::NativeStore::default()),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_credentials(
+        config_path: PathBuf,
+        audit_path: PathBuf,
+        credentials: Arc<dyn crate::credentials::CredentialStore>,
+    ) -> Result<Arc<Self>> {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                    .add_directive("rmcp=off".parse().expect("valid log directive")),
             )
             .try_init();
 
-        let config_path = config_path.as_ref().to_path_buf();
-        let config = if config_path.exists() {
-            PrismConfig::load(&config_path)?
-        } else {
-            let fresh = PrismConfig::default();
-            fresh.save(&config_path)?;
-            fresh
-        };
-        let listen_port = config.listen_port;
+        // Repair both locations even if a locked credential store later prevents startup.
+        crate::storage::prepare(&config_path)?;
         let (events, _) = channel();
-        let audit = AuditLog::new(audit_path, events.clone())?;
-        let backends = BackendManager::new(events.clone());
+        let audit_events = events.clone();
+        let audit = tokio::task::spawn_blocking(move || AuditLog::new(audit_path, audit_events))
+            .await
+            .map_err(|_| Error::Gateway("audit storage setup could not complete".into()))??;
+        let path = config_path.clone();
+        let store = credentials.clone();
+        let config = tokio::task::spawn_blocking(move || {
+            crate::storage::prepare(&path)?;
+            let mut config = if path.exists() {
+                PrismConfig::load(&path)?
+            } else {
+                PrismConfig::default()
+            };
+            crate::oauth::prune_unused_clients(&mut config, chrono::Utc::now());
+            crate::credentials::migrate(&config, &path, store.as_ref())
+        })
+        .await
+        .map_err(|_| Error::Gateway("credential migration could not complete".into()))??;
+        let listen_port = config.listen_port;
+        let backends = BackendManager::new(events.clone(), credentials.clone());
         let shutdown = CancellationToken::new();
 
         let gateway = Arc::new(Self {
             config_path,
             config: RwLock::new(config.clone()),
             backends,
+            credentials,
             approval: ApprovalRegistry::new(),
             audit,
             events,
             shutdown: shutdown.clone(),
             listen_port,
             sessions: std::sync::Mutex::new(HashMap::new()),
+            calls: std::sync::Mutex::new(HashMap::new()),
+            oauth: OAuthState::default(),
         });
 
         for server in config.servers.into_iter().filter(|s| s.enabled) {
@@ -126,6 +204,23 @@ impl Gateway {
         }
 
         spawn_http(gateway.clone(), listen_port, shutdown)?;
+        let weak = Arc::downgrade(&gateway);
+        let stop = gateway.shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60 * 60)) => {
+                        let Some(gateway) = weak.upgrade() else { break; };
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if gateway.audit.cleanup().is_err() {
+                                warn!("audit retention cleanup failed");
+                            }
+                        }).await;
+                    }
+                }
+            }
+        });
         info!(listen_port, "prism gateway listening on 127.0.0.1");
         Ok(gateway)
     }
@@ -144,7 +239,13 @@ impl Gateway {
                 .iter()
                 .filter(|a| a.status == AgentStatus::Pending)
                 .count(),
+            pending_signins: self
+                .pending_signins()
+                .iter()
+                .filter(|s| s.needs_consent)
+                .count(),
             auto_open_on_pending: config.auto_open_on_pending,
+            do_not_disturb: config.do_not_disturb,
         }
     }
 
@@ -166,6 +267,11 @@ impl Gateway {
     }
 
     pub async fn add_server(&self, mut server: ServerConfig) -> Result<ServerConfig> {
+        if server.credential_ref.is_some() {
+            return Err(Error::Invalid(
+                "new servers must supply launch values, not credential references".into(),
+            ));
+        }
         if server.id.is_empty() {
             server.id = uuid::Uuid::new_v4().to_string();
         }
@@ -184,24 +290,49 @@ impl Gateway {
             {
                 return Err(Error::AlreadyExists(format!("server {}", server.name)));
             }
-            config.servers.push(server.clone());
-            config.save(&self.config_path)?;
+            let store = self.credentials.clone();
+            server = tokio::task::spawn_blocking(move || {
+                crate::credentials::protect_server(store.as_ref(), &mut server)?;
+                Ok::<_, Error>(server)
+            })
+            .await
+            .map_err(|_| Error::Gateway("could not store server credentials".into()))??;
+            let mut updated = config.clone();
+            updated.servers.push(server.clone());
+            // On an uncertain disk failure, keep the credential entry for recovery.
+            updated.save(&self.config_path)?;
+            *config = updated;
         }
         self.backends.start(server.clone()).await;
         Ok(server)
     }
 
     pub async fn remove_server(&self, server_id: &str) -> Result<()> {
-        {
+        let credential_ref = {
             let mut config = self.config.write().await;
-            let before = config.servers.len();
-            config.servers.retain(|s| s.id != server_id);
-            if config.servers.len() == before {
-                return Err(Error::NotFound(format!("server {server_id}")));
-            }
-            config.save(&self.config_path)?;
-        }
+            let server = config
+                .servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
+            let credential_ref = server.credential_ref.clone();
+            let mut updated = config.clone();
+            updated.servers.retain(|s| s.id != server_id);
+            updated.save(&self.config_path)?;
+            *config = updated;
+            credential_ref
+        };
         self.backends.remove(server_id).await;
+        if let Some(id) = credential_ref {
+            let store = self.credentials.clone();
+            tokio::task::spawn_blocking(move || crate::credentials::delete(store.as_ref(), &id))
+                .await
+                .map_err(|_| {
+                    Error::Gateway(
+                        "server removed, but credential cleanup could not complete".into(),
+                    )
+                })??;
+        }
         Ok(())
     }
 
@@ -215,14 +346,24 @@ impl Gateway {
             .lock()
             .map(|s| s.values().map(|e| e.agent_id.clone()).collect())
             .unwrap_or_default();
-        self.config
-            .read()
-            .await
+        let now = Utc::now();
+        let config = self.config.read().await;
+        config
             .agents
             .iter()
             .cloned()
             .map(|agent| AgentView {
                 connected: connected.contains(&agent.id),
+                tokens: config
+                    .tokens
+                    .iter()
+                    .filter(|t| t.agent_id == agent.id && !t.is_expired(now))
+                    .map(|t| TokenView {
+                        kind: t.kind,
+                        created_at: t.created_at,
+                        expires_at: t.expires_at,
+                    })
+                    .collect(),
                 agent,
             })
             .collect()
@@ -245,8 +386,13 @@ impl Gateway {
                 .ok_or_else(|| Error::NotFound(format!("agent {agent_id}")))?;
             agent.status = status;
             agent.decided_at = Some(Utc::now());
+            if !approve {
+                // Deny is a sign-out too: nothing it holds keeps working.
+                config.tokens.retain(|t| t.agent_id != agent_id);
+            }
             config.save(&self.config_path)?;
         }
+        self.resolve_authorization(agent_id, approve);
         let _ = self.events.send(GatewayEvent::AgentDecided {
             agent_id: agent_id.to_string(),
             status,
@@ -259,12 +405,14 @@ impl Gateway {
         {
             let mut config = self.config.write().await;
             let before = config.agents.len();
+            Self::forget_credentials(&mut config, agent_id);
             config.agents.retain(|a| a.id != agent_id);
             if config.agents.len() == before {
                 return Err(Error::NotFound(format!("agent {agent_id}")));
             }
             config.save(&self.config_path)?;
         }
+        self.resolve_authorization(agent_id, false);
         let _ = self.events.send(GatewayEvent::AgentDecided {
             agent_id: agent_id.to_string(),
             status: AgentStatus::Denied,
@@ -291,22 +439,22 @@ impl Gateway {
         }
     }
 
-    /// Called on MCP `initialize`: map the client to an agent (registering it as pending if
-    /// unknown) and remember the session so approval can reach it.
-    async fn register_session(
+    /// Called on MCP `initialize` over a bearer-authenticated request: the token already
+    /// names the agent, so nothing the client announces about itself is trusted for identity.
+    async fn register_authenticated_session(
         &self,
         session_id: &str,
-        client_name: &str,
+        agent_id: &str,
         client_version: Option<&str>,
         peer: Peer<RoleServer>,
-    ) -> AgentConfig {
-        let (agent, is_new) = {
+    ) -> Option<AgentConfig> {
+        let agent = {
             let mut config = self.config.write().await;
-            let pair = config.find_or_request_agent(client_name, client_version);
-            if let Err(err) = config.save(&self.config_path) {
-                warn!(%err, "could not persist agent registration");
+            let agent = config.agents.iter_mut().find(|a| a.id == agent_id)?;
+            if let Some(v) = client_version {
+                agent.client_version = Some(v.to_string());
             }
-            pair
+            agent.clone()
         };
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.insert(
@@ -317,16 +465,10 @@ impl Gateway {
                 },
             );
         }
-        if is_new {
-            info!(agent = %agent.name, "new agent requested access");
-            let _ = self
-                .events
-                .send(GatewayEvent::AgentRequested(agent.clone()));
-        }
         let _ = self.events.send(GatewayEvent::AgentConnected {
             agent_id: agent.id.clone(),
         });
-        agent
+        Some(agent)
     }
 
     fn unregister_session(&self, session_id: &str) {
@@ -362,17 +504,172 @@ impl Gateway {
             id: id.to_string(),
             decision,
         });
-        if matches!(
-            decision.scope,
-            DecisionScope::Session | DecisionScope::Always
-        ) {
+        if decision.scope != DecisionScope::Once {
             self.append_rule_for(&call, decision).await?;
         }
         Ok(())
     }
 
+    /// Current rules, with expired time boxes pruned on the way out.
     pub async fn rules(&self) -> Vec<Rule> {
+        let now = Utc::now();
+        let stale = self
+            .config
+            .read()
+            .await
+            .rules
+            .iter()
+            .any(|r| r.is_expired(now));
+        if stale {
+            let mut config = self.config.write().await;
+            config.rules.retain(|r| !r.is_expired(now));
+            if let Err(err) = config.save(&self.config_path) {
+                warn!(%err, "could not persist pruned rules");
+            }
+            drop(config);
+            let _ = self.events.send(GatewayEvent::RulesChanged);
+        }
         self.config.read().await.rules.clone()
+    }
+
+    /// Add a rule from the panel. A rule on the same agent, server, and tool is replaced.
+    pub async fn add_rule(&self, new: NewRule) -> Result<Rule> {
+        if new.agent_id.is_none() && new.server_id.is_none() && new.tool.is_none() {
+            return Err(Error::Invalid(
+                "a rule needs at least an agent, a server, or a tool".into(),
+            ));
+        }
+        let now = Utc::now();
+        let rule = Rule {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: new.agent_id,
+            server_id: new.server_id,
+            tool: new.tool.filter(|t| !t.trim().is_empty()),
+            decision: new.decision,
+            attention: new.attention,
+            scope: new.scope,
+            expires_at: new
+                .minutes
+                .map(|m| now + chrono::Duration::minutes(i64::from(m))),
+            condition: None,
+            created_at: now,
+        };
+        self.upsert_rule(rule.clone()).await?;
+        Ok(rule)
+    }
+
+    async fn upsert_rule(&self, rule: Rule) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            config.rules.retain(|r| {
+                !(r.agent_id == rule.agent_id
+                    && r.server_id == rule.server_id
+                    && r.tool == rule.tool)
+            });
+            config.rules.push(rule);
+            config.save(&self.config_path)?;
+        }
+        let _ = self.events.send(GatewayEvent::RulesChanged);
+        Ok(())
+    }
+
+    /// Change how an agent behaves when no rule matches, and how loudly its calls are surfaced.
+    pub async fn set_agent_policy(
+        &self,
+        agent_id: &str,
+        posture: Option<Posture>,
+        attention: Option<Attention>,
+    ) -> Result<AgentConfig> {
+        let agent = {
+            let mut config = self.config.write().await;
+            let agent = config
+                .agents
+                .iter_mut()
+                .find(|a| a.id == agent_id)
+                .ok_or_else(|| Error::NotFound(format!("agent {agent_id}")))?;
+            if let Some(p) = posture {
+                agent.posture = p;
+            }
+            if let Some(a) = attention {
+                agent.attention = a;
+            }
+            let agent = agent.clone();
+            config.save(&self.config_path)?;
+            agent
+        };
+        let _ = self.events.send(GatewayEvent::AgentUpdated {
+            agent_id: agent_id.to_string(),
+        });
+        Ok(agent)
+    }
+
+    pub async fn settings(&self) -> Settings {
+        let config = self.config.read().await;
+        Settings {
+            on_timeout: config.on_timeout,
+            do_not_disturb: config.do_not_disturb,
+            rate_limit_per_minute: config.rate_limit_per_minute,
+            hold_timeout_secs: config.hold_timeout_secs,
+            auto_open_on_pending: config.auto_open_on_pending,
+        }
+    }
+
+    pub async fn set_settings(&self, settings: Settings) -> Result<()> {
+        if settings.hold_timeout_secs < 10 {
+            return Err(Error::Invalid(
+                "hold timeout must be at least 10 seconds".into(),
+            ));
+        }
+        {
+            let mut config = self.config.write().await;
+            config.on_timeout = settings.on_timeout;
+            config.do_not_disturb = settings.do_not_disturb;
+            config.rate_limit_per_minute = settings.rate_limit_per_minute.filter(|n| *n > 0);
+            config.hold_timeout_secs = settings.hold_timeout_secs;
+            config.auto_open_on_pending = settings.auto_open_on_pending;
+            config.save(&self.config_path)?;
+        }
+        let _ = self.events.send(GatewayEvent::SettingsChanged);
+        Ok(())
+    }
+
+    /// Tools one server currently exposes, for per-tool overrides in the panel.
+    pub async fn server_tools(&self, server_id: &str) -> Vec<ToolInfo> {
+        self.backends
+            .list_tools(false)
+            .await
+            .into_iter()
+            .filter(|(server, _)| server.id == server_id)
+            .map(|(_, tool)| ToolInfo {
+                name: tool.name.to_string(),
+                description: tool.description.as_ref().map(|d| d.to_string()),
+                read_only: tool
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.read_only_hint)
+                    .unwrap_or(false),
+                destructive: tool
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.destructive_hint)
+                    .unwrap_or(false),
+            })
+            .collect()
+    }
+
+    /// Record one call attempt and report whether the agent is over `limit` per minute.
+    fn rate_tripped(&self, agent_id: &str, limit: u32) -> bool {
+        let now = Instant::now();
+        let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+        let window = calls.entry(agent_id.to_string()).or_default();
+        while window
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > std::time::Duration::from_secs(60))
+        {
+            window.pop_front();
+        }
+        window.push_back(now);
+        window.len() as u32 > limit
     }
 
     pub async fn delete_rule(&self, rule_id: &str) -> Result<()> {
@@ -432,29 +729,37 @@ impl Gateway {
     }
 
     async fn append_rule_for(&self, call: &PendingCall, decision: Decision) -> Result<()> {
+        let now = Utc::now();
+        let (scope, expires_at) = match decision.scope {
+            DecisionScope::Once => return Ok(()),
+            DecisionScope::Session => (RuleScope::Session, None),
+            DecisionScope::Always => (RuleScope::Always, None),
+            DecisionScope::For { minutes } => (
+                RuleScope::Always,
+                Some(now + chrono::Duration::minutes(i64::from(minutes.max(1)))),
+            ),
+        };
+        let (server_id, tool) = match decision.target {
+            DecisionTarget::Tool => (Some(call.server_id.clone()), Some(call.tool.clone())),
+            DecisionTarget::Server => (Some(call.server_id.clone()), None),
+            DecisionTarget::Agent => (None, None),
+        };
         let rule = Rule {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: Some(call.agent_id.clone()),
-            server_id: Some(call.server_id.clone()),
-            tool: Some(call.tool.clone()),
+            server_id,
+            tool,
             decision: match decision.verdict {
                 DecisionVerdict::Allow => RuleDecision::Allow,
                 DecisionVerdict::Deny => RuleDecision::Deny,
             },
-            scope: match decision.scope {
-                DecisionScope::Once => RuleScope::Session,
-                DecisionScope::Session => RuleScope::Session,
-                DecisionScope::Always => RuleScope::Always,
-            },
-            created_at: Utc::now(),
+            attention: None,
+            scope,
+            expires_at,
+            condition: None,
+            created_at: now,
         };
-        {
-            let mut config = self.config.write().await;
-            config.rules.push(rule);
-            config.save(&self.config_path)?;
-        }
-        let _ = self.events.send(GatewayEvent::RulesChanged);
-        Ok(())
+        self.upsert_rule(rule).await
     }
 
     pub(crate) async fn handle_list_tools(&self, agent_id: Option<&str>) -> ListToolsResult {
@@ -517,6 +822,7 @@ impl Gateway {
                 source: AuditSource::Unapproved,
                 duration_ms: started.elapsed().as_millis() as u64,
                 error: Some(message.clone()),
+                attention: Attention::Silent,
             });
             return Ok(CallToolResult::error(vec![ContentBlock::text(message)]));
         }
@@ -545,17 +851,41 @@ impl Gateway {
             .map(serde_json::Value::Object)
             .unwrap_or(serde_json::Value::Null);
 
-        let (verdict, matched_rule) = {
+        let (eval, dnd, on_timeout, rate_limit) = {
             let config = self.config.read().await;
-            let v = policy::evaluate(
+            let eval = policy::evaluate(
                 &config.rules,
-                &agent.id,
+                &agent,
                 &server.id,
                 &original_tool,
                 annotations.as_ref(),
+                Utc::now(),
             );
-            let rule = winning_rule(&config.rules, &agent.id, &server.id, &original_tool);
-            (v, rule)
+            (
+                eval,
+                config.do_not_disturb,
+                config.on_timeout,
+                config.rate_limit_per_minute,
+            )
+        };
+
+        // The tripwire counts every attempt and turns an allow into an ask once an agent runs hot.
+        let tripped = rate_limit.is_some_and(|limit| self.rate_tripped(&agent.id, limit));
+        let (verdict, reason) = match (eval.verdict, tripped) {
+            (Verdict::Allow, true) => (Verdict::Ask, HoldReason::RateLimit),
+            (v, _) => (v, HoldReason::Policy),
+        };
+        let source = match &eval.decider {
+            Decider::Rule { rule_id } => AuditSource::Rule {
+                rule_id: rule_id.clone(),
+            },
+            Decider::Posture(posture) => AuditSource::Posture { posture: *posture },
+        };
+        // While do-not-disturb is on, nothing louder than a badge gets through.
+        let attention = if dnd {
+            eval.attention.min(Attention::Badge)
+        } else {
+            eval.attention
         };
 
         match verdict {
@@ -566,21 +896,25 @@ impl Gateway {
                     &original_tool,
                     arguments,
                     started,
-                    AuditSource::Rule {
-                        rule_id: matched_rule
-                            .as_ref()
-                            .map(|r| r.id.clone())
-                            .unwrap_or_default(),
-                    },
+                    source,
                     AuditVerdict::Allowed,
+                    attention,
                 )
                 .await
             }
             Verdict::Deny => {
-                let summary = matched_rule
-                    .as_ref()
-                    .map(rule_summary)
-                    .unwrap_or_else(|| "deny".into());
+                let summary = match &eval.decider {
+                    Decider::Rule { rule_id } => {
+                        let config = self.config.read().await;
+                        config
+                            .rules
+                            .iter()
+                            .find(|r| &r.id == rule_id)
+                            .map(rule_summary)
+                            .unwrap_or_else(|| "deny".into())
+                    }
+                    Decider::Posture(p) => format!("{p:?} posture"),
+                };
                 let message = format!("Denied by Prism policy: {summary}");
                 self.audit.record(AuditEntry {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -590,21 +924,93 @@ impl Gateway {
                     server_id: server.id,
                     tool: original_tool,
                     verdict: AuditVerdict::Denied,
-                    source: AuditSource::Rule {
-                        rule_id: matched_rule.map(|r| r.id).unwrap_or_default(),
-                    },
+                    source,
                     duration_ms: started.elapsed().as_millis() as u64,
                     error: Some(message.clone()),
+                    attention,
                 });
                 Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
             }
+            Verdict::Ask if dnd => {
+                self.resolve_unattended(
+                    &agent,
+                    &server,
+                    &original_tool,
+                    arguments,
+                    started,
+                    annotations.as_ref(),
+                    on_timeout,
+                    AuditSource::DoNotDisturb,
+                    "Prism is in do-not-disturb and this call needed a human. Retry later or ask the operator.",
+                )
+                .await
+            }
             Verdict::Ask => {
-                self.hold_then_forward(agent, server, original_tool, arguments, started)
-                    .await
+                self.hold_then_forward(
+                    agent,
+                    server,
+                    original_tool,
+                    arguments,
+                    started,
+                    annotations.as_ref(),
+                    reason,
+                )
+                .await
             }
         }
     }
 
+    /// Nobody can answer (timeout or do-not-disturb): apply the configured fallback.
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_unattended(
+        &self,
+        agent: &AgentConfig,
+        server: &ServerConfig,
+        tool: &str,
+        arguments: serde_json::Value,
+        started: Instant,
+        annotations: Option<&ToolAnnotations>,
+        behavior: TimeoutBehavior,
+        source: AuditSource,
+        message: &str,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let read_only = annotations.is_some_and(ToolAnnotations::is_read_only);
+        if behavior == TimeoutBehavior::AllowReadOnly && read_only {
+            return self
+                .forward_or_error(
+                    agent,
+                    server,
+                    tool,
+                    arguments,
+                    started,
+                    source,
+                    AuditVerdict::Allowed,
+                    Attention::Badge,
+                )
+                .await;
+        }
+        let verdict = if source == AuditSource::Timeout {
+            AuditVerdict::Timeout
+        } else {
+            AuditVerdict::Denied
+        };
+        self.audit.record(AuditEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            at: Utc::now(),
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            server_id: server.id.clone(),
+            tool: tool.to_string(),
+            verdict,
+            source,
+            duration_ms: started.elapsed().as_millis() as u64,
+            error: Some(message.to_string()),
+            attention: Attention::Badge,
+        });
+        Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn hold_then_forward(
         &self,
         agent: AgentConfig,
@@ -612,7 +1018,17 @@ impl Gateway {
         tool: String,
         arguments: serde_json::Value,
         started: Instant,
+        annotations: Option<&ToolAnnotations>,
+        reason: HoldReason,
     ) -> std::result::Result<CallToolResult, McpError> {
+        let (hold, on_timeout) = {
+            let config = self.config.read().await;
+            (
+                std::time::Duration::from_secs(config.hold_timeout_secs),
+                config.on_timeout,
+            )
+        };
+        let now = Utc::now();
         let pending = PendingCall {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: agent.id.clone(),
@@ -621,27 +1037,27 @@ impl Gateway {
             server_name: server.name.clone(),
             tool: tool.clone(),
             arguments: arguments.clone(),
-            requested_at: Utc::now(),
+            requested_at: now,
+            deadline: Some(now + chrono::Duration::from_std(hold).unwrap_or_default()),
+            posture: agent.posture,
+            reason,
         };
         let _ = self.events.send(GatewayEvent::PendingCall(pending.clone()));
-        let outcome = self.approval.register(pending.clone()).await;
+        let outcome = self.approval.register_for(pending.clone(), hold).await;
         match outcome {
             HoldOutcome::Timeout => {
-                self.audit.record(AuditEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    at: Utc::now(),
-                    agent_id: agent.id,
-                    agent_name: agent.name,
-                    server_id: server.id,
-                    tool,
-                    verdict: AuditVerdict::Timeout,
-                    source: AuditSource::Timeout,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    error: Some(TIMEOUT_MESSAGE.into()),
-                });
-                Ok(CallToolResult::error(vec![ContentBlock::text(
+                self.resolve_unattended(
+                    &agent,
+                    &server,
+                    &tool,
+                    arguments,
+                    started,
+                    annotations,
+                    on_timeout,
+                    AuditSource::Timeout,
                     TIMEOUT_MESSAGE,
-                )]))
+                )
+                .await
             }
             HoldOutcome::Decided(decision) => match decision.verdict {
                 DecisionVerdict::Deny => {
@@ -656,6 +1072,7 @@ impl Gateway {
                         source: AuditSource::Human,
                         duration_ms: started.elapsed().as_millis() as u64,
                         error: Some("Denied by the user in Prism".into()),
+                        attention: Attention::Silent,
                     });
                     Ok(CallToolResult::error(vec![ContentBlock::text(
                         "Denied by the user in Prism",
@@ -670,6 +1087,7 @@ impl Gateway {
                         started,
                         AuditSource::Human,
                         AuditVerdict::Allowed,
+                        Attention::Silent,
                     )
                     .await
                 }
@@ -687,6 +1105,7 @@ impl Gateway {
         started: Instant,
         source: AuditSource,
         verdict: AuditVerdict,
+        attention: Attention,
     ) -> std::result::Result<CallToolResult, McpError> {
         match self.backends.call_tool(&server.id, tool, arguments).await {
             Ok(result) => {
@@ -706,6 +1125,7 @@ impl Gateway {
                     } else {
                         None
                     },
+                    attention,
                 });
                 Ok(result)
             }
@@ -722,6 +1142,7 @@ impl Gateway {
                     source,
                     duration_ms: started.elapsed().as_millis() as u64,
                     error: Some(message.clone()),
+                    attention,
                 });
                 Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
             }
@@ -765,6 +1186,27 @@ impl PrismProxy {
     fn agent_id(&self) -> Option<String> {
         self.agent_id.lock().ok().and_then(|a| a.clone())
     }
+
+    /// The identity on this request must be the one that opened the session. The HTTP layer
+    /// enforces the same thing; this is the check that survives a transport change.
+    fn caller(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> std::result::Result<Option<String>, McpError> {
+        let on_request = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<AuthenticatedAgent>())
+            .map(|a| a.agent_id.clone());
+        let session = self.agent_id();
+        if on_request.is_none() || on_request != session {
+            return Err(McpError::invalid_request(
+                "this session belongs to another agent",
+                None,
+            ));
+        }
+        Ok(session)
+    }
 }
 
 impl Drop for PrismProxy {
@@ -792,17 +1234,27 @@ impl ServerHandler for PrismProxy {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> std::result::Result<InitializeResult, McpError> {
-        let agent = self
+        let authenticated = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<AuthenticatedAgent>())
+            .map(|a| a.agent_id.clone());
+        let version = Some(request.client_info.version.as_str());
+        let authenticated = authenticated
+            .ok_or_else(|| McpError::invalid_request("a bearer token is required", None))?;
+        let agent_id = self
             .gateway
-            .register_session(
+            .register_authenticated_session(
                 &self.session_id,
-                &request.client_info.name,
-                Some(request.client_info.version.as_str()),
+                &authenticated,
+                version,
                 context.peer.clone(),
             )
-            .await;
+            .await
+            .map(|a| a.id)
+            .ok_or_else(|| McpError::invalid_request("unknown agent", None))?;
         if let Ok(mut slot) = self.agent_id.lock() {
-            *slot = Some(agent.id);
+            *slot = Some(agent_id);
         }
         Ok(self.get_info())
     }
@@ -810,21 +1262,20 @@ impl ServerHandler for PrismProxy {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, McpError> {
-        Ok(self
-            .gateway
-            .handle_list_tools(self.agent_id().as_deref())
-            .await)
+        let agent = self.caller(&context)?;
+        Ok(self.gateway.handle_list_tools(agent.as_deref()).await)
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<CallToolResponse, McpError> {
+        let agent = self.caller(&context)?;
         self.gateway
-            .handle_call_tool(request, self.agent_id().as_deref())
+            .handle_call_tool(request, agent.as_deref())
             .await
             .map(Into::into)
     }
@@ -842,16 +1293,21 @@ fn spawn_http(gateway: Arc<Gateway>, port: u16, shutdown: CancellationToken) -> 
                 })
             },
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default().with_allowed_hosts([
-                "127.0.0.1".to_string(),
-                "localhost".to_string(),
-                "::1".to_string(),
-                format!("127.0.0.1:{port}"),
-                format!("localhost:{port}"),
-            ]),
+            // The outer HTTP guard enforces one Host policy for MCP and OAuth alike.
+            StreamableHttpServerConfig::default().disable_allowed_hosts(),
         );
 
-    let app = Router::new().nest_service("/mcp", service);
+    let app = Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn_with_state(
+            gateway.clone(),
+            oauth::require_bearer,
+        ))
+        .merge(oauth::router(gateway.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            gateway.clone(),
+            crate::http_security::guard,
+        ));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     tokio::spawn(async move {
@@ -879,45 +1335,6 @@ fn aggregate_tool(server_name: &str, mut tool: Tool) -> Tool {
     tool
 }
 
-fn winning_rule(rules: &[Rule], agent_id: &str, server_id: &str, tool: &str) -> Option<Rule> {
-    let verdict = policy::evaluate(rules, agent_id, server_id, tool, None);
-    if matches!(verdict, Verdict::Ask) {
-        return None;
-    }
-    rules
-        .iter()
-        .filter(|rule| {
-            rule.agent_id.as_deref().is_none_or(|v| v == agent_id)
-                && rule.server_id.as_deref().is_none_or(|v| v == server_id)
-                && rule.tool.as_deref().is_none_or(|v| v == tool)
-        })
-        .cloned()
-        .min_by_key(|rule| {
-            let spec = match (
-                rule.agent_id.is_some(),
-                rule.server_id.is_some(),
-                rule.tool.is_some(),
-            ) {
-                (true, true, true) => 0u8,
-                (true, true, false) => 1,
-                (false, true, true) => 2,
-                (false, true, false) => 3,
-                (true, false, false) => 4,
-                (false, false, false) => 5,
-                (true, false, true) => 2,
-                (false, false, true) => 4,
-            };
-            (
-                spec,
-                if rule.decision == RuleDecision::Deny {
-                    0
-                } else {
-                    1
-                },
-            )
-        })
-}
-
 fn rule_summary(rule: &Rule) -> String {
     let agent = rule.agent_id.as_deref().unwrap_or("*");
     let server = rule.server_id.as_deref().unwrap_or("*");
@@ -925,6 +1342,7 @@ fn rule_summary(rule: &Rule) -> String {
     let decision = match rule.decision {
         RuleDecision::Allow => "allow",
         RuleDecision::Deny => "deny",
+        RuleDecision::Ask => "ask",
     };
     format!("{decision} agent={agent} server={server} tool={tool}")
 }

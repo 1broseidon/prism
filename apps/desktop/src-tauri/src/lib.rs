@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prism_core::{
-    AgentView, Decision, Gateway, GatewayEvent, PanelAnchor, PendingCall, PrismConfig, Rule,
-    ServerConfig, ServerView,
+    AgentConfig, AgentView, Attention, Decision, Gateway, GatewayEvent, NewRule, PanelAnchor,
+    PendingCall, Posture, PrismConfig, Rule, ServerConfig, ServerView, Settings, ToolInfo,
 };
 use serde::Serialize;
 use tauri::image::Image;
@@ -24,6 +24,9 @@ use tracing::{error, warn};
 
 const TRAY_ID: &str = "prism-tray";
 const PANEL_LABEL: &str = "panel";
+/// Window size in logical pixels: a 400x600 panel plus a 16px gutter on every side so the CSS shadow can fade
+/// out inside the transparent window instead of being clipped square at its edge. Mirrors tauri.conf.json.
+const PANEL_SIZE: (f64, f64) = (432.0, 632.0);
 
 struct AppState {
     gateway: Arc<Gateway>,
@@ -33,8 +36,9 @@ static LAST_SHOW_MS: AtomicU64 = AtomicU64::new(0);
 static IGNORE_FOCUS_LOSS: AtomicBool = AtomicBool::new(false);
 /// Set once the panel has actually received focus since it was shown; blur only hides after that.
 static SEEN_FOCUS: AtomicBool = AtomicBool::new(false);
-/// Where the cursor was the last time the user opened the panel from the tray. On Linux the tray
-/// never reports its position, but the cursor on the tray menu is right next to the icon.
+/// Calls resolved without a human that asked for a badge, not yet seen. Cleared when the panel opens.
+static UNSEEN: AtomicU64 = AtomicU64::new(0);
+/// Last cursor position when opening from the tray, reused for later auto-opens.
 static TRAY_HINT: Mutex<Option<PhysicalPosition<f64>>> = Mutex::new(None);
 
 #[derive(Clone, Serialize)]
@@ -55,9 +59,8 @@ fn panel_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
 }
 
 /// Place the panel next to the tray. macOS and Windows report the icon's rect through tray
-/// events, so the positioner plugin can anchor to it. Linux trays (StatusNotifierItem) never
-/// report a position, so there the panel anchors to the corner of the screen edge that holds
-/// the desktop panel, inferred from the monitor's reserved work area.
+/// events, so the positioner plugin can anchor to it. Linux uses the cursor position when
+/// opening from the tray menu, falling back to the desktop panel's reserved work area.
 fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
     let anchor = app
         .try_state::<AppState>()
@@ -185,6 +188,16 @@ fn remember_tray_hint(app: &AppHandle) {
 }
 
 fn show_panel(app: &AppHandle) {
+    // Opening the panel is how the operator sees badged calls, so the badge clears here.
+    if UNSEEN.swap(0, Ordering::SeqCst) > 0 {
+        if let Some(state) = app.try_state::<AppState>() {
+            let gateway = state.gateway.clone();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                settle_tray_icon(&app, &gateway).await;
+            });
+        }
+    }
     if let Some(window) = panel_window(app) {
         IGNORE_FOCUS_LOSS.store(true, Ordering::SeqCst);
         SEEN_FOCUS.store(false, Ordering::SeqCst);
@@ -218,7 +231,22 @@ fn toggle_panel(app: &AppHandle) {
     }
 }
 
-fn idle_icon() -> Result<Image<'static>, tauri::Error> {
+/// Pale glyph for dark bars. macOS ignores the colour (template), GNOME and KDE bars are dark,
+/// and Windows gets the ink variant when its taskbar is light.
+fn idle_icon(app: &AppHandle) -> Result<Image<'static>, tauri::Error> {
+    #[cfg(target_os = "windows")]
+    {
+        let light = app
+            .get_webview_window("panel")
+            .and_then(|w| w.theme().ok())
+            .map(|t| t == tauri::Theme::Light)
+            .unwrap_or(false);
+        if light {
+            return Image::from_bytes(include_bytes!("../icons/tray-idle-ink.png"));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
     Image::from_bytes(include_bytes!("../icons/tray-idle.png"))
 }
 
@@ -228,9 +256,14 @@ fn pending_icon() -> Result<Image<'static>, tauri::Error> {
 
 fn set_tray_icon(app: &AppHandle, pending: bool) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let icon = if pending { pending_icon() } else { idle_icon() };
+        let icon = if pending {
+            pending_icon()
+        } else {
+            idle_icon(app)
+        };
         if let Ok(icon) = icon {
-            let _ = tray.set_icon(Some(icon));
+            // Idle is a template on macOS so the menu bar tints it; pending keeps its amber.
+            let _ = tray.set_icon_with_as_template(Some(icon), !pending);
         }
     }
 }
@@ -249,7 +282,7 @@ async fn list_servers(state: State<'_, AppState>) -> Result<Vec<ServerView>, Str
     Ok(state.gateway.servers().await)
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct AddServerArgs {
     name: String,
     command: String,
@@ -258,10 +291,7 @@ struct AddServerArgs {
 }
 
 #[tauri::command]
-async fn add_server(
-    state: State<'_, AppState>,
-    args: AddServerArgs,
-) -> Result<ServerConfig, String> {
+async fn add_server(state: State<'_, AppState>, args: AddServerArgs) -> Result<ServerView, String> {
     let server = ServerConfig {
         id: String::new(),
         name: args.name,
@@ -269,8 +299,16 @@ async fn add_server(
         args: args.args,
         env: args.env,
         enabled: true,
+        credential_ref: None,
     };
-    state.gateway.add_server(server).await.map_err(map_err)
+    let added = state.gateway.add_server(server).await.map_err(map_err)?;
+    state
+        .gateway
+        .servers()
+        .await
+        .into_iter()
+        .find(|server| server.id == added.id)
+        .ok_or_else(|| "server is no longer configured".to_string())
 }
 
 #[tauri::command]
@@ -297,6 +335,30 @@ async fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentView>, Strin
 }
 
 #[tauri::command]
+async fn create_manual_agent(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<prism_core::ManualToken, String> {
+    state
+        .gateway
+        .create_manual_agent(&name)
+        .await
+        .map_err(map_err)
+}
+
+#[tauri::command]
+async fn replace_manual_token(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<prism_core::ManualToken, String> {
+    state
+        .gateway
+        .replace_manual_token(&agent_id)
+        .await
+        .map_err(map_err)
+}
+
+#[tauri::command]
 async fn decide_agent(
     state: State<'_, AppState>,
     agent_id: String,
@@ -312,6 +374,31 @@ async fn decide_agent(
 #[tauri::command]
 async fn remove_agent(state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
     state.gateway.remove_agent(&agent_id).await.map_err(map_err)
+}
+
+#[tauri::command]
+async fn list_signins(
+    state: State<'_, AppState>,
+) -> Result<Vec<prism_core::PendingSignIn>, String> {
+    Ok(state.gateway.pending_signins())
+}
+
+#[tauri::command]
+async fn decide_signin(
+    state: State<'_, AppState>,
+    id: String,
+    approve: bool,
+) -> Result<(), String> {
+    state.gateway.decide_signin(&id, approve).map_err(map_err)
+}
+
+#[tauri::command]
+async fn revoke_agent_tokens(state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    state
+        .gateway
+        .revoke_agent_tokens(&agent_id)
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -332,6 +419,43 @@ async fn list_rules(state: State<'_, AppState>) -> Result<Vec<Rule>, String> {
 #[tauri::command]
 async fn delete_rule(state: State<'_, AppState>, rule_id: String) -> Result<(), String> {
     state.gateway.delete_rule(&rule_id).await.map_err(map_err)
+}
+
+#[tauri::command]
+async fn add_rule(state: State<'_, AppState>, rule: NewRule) -> Result<Rule, String> {
+    state.gateway.add_rule(rule).await.map_err(map_err)
+}
+
+#[tauri::command]
+async fn set_agent_policy(
+    state: State<'_, AppState>,
+    agent_id: String,
+    posture: Option<Posture>,
+    attention: Option<Attention>,
+) -> Result<AgentConfig, String> {
+    state
+        .gateway
+        .set_agent_policy(&agent_id, posture, attention)
+        .await
+        .map_err(map_err)
+}
+
+#[tauri::command]
+async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
+    Ok(state.gateway.settings().await)
+}
+
+#[tauri::command]
+async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<(), String> {
+    state.gateway.set_settings(settings).await.map_err(map_err)
+}
+
+#[tauri::command]
+async fn list_server_tools(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<Vec<ToolInfo>, String> {
+    Ok(state.gateway.server_tools(&server_id).await)
 }
 
 #[tauri::command]
@@ -407,15 +531,55 @@ async fn handle_gateway_event(app: &AppHandle, gateway: &Gateway, event: &Gatewa
             let body = format!("{} wants to connect to Prism", agent.name);
             attention(app, gateway, &body).await;
         }
-        GatewayEvent::CallDecided { .. }
-        | GatewayEvent::Audit(_)
-        | GatewayEvent::AgentDecided { .. } => {
-            let status = gateway.status().await;
-            if status.pending_count == 0 && status.pending_agents == 0 {
-                set_tray_icon(app, false);
+        GatewayEvent::SignInRequested(signin) => {
+            let body = format!("{} wants to sign in again", signin.agent_name);
+            attention(app, gateway, &body).await;
+        }
+        // A call resolved without a human. The rule or agent says how loudly to surface it.
+        GatewayEvent::Audit(entry) if entry.attention != Attention::Silent => {
+            UNSEEN.fetch_add(1, Ordering::SeqCst);
+            set_tray_icon(app, true);
+            if entry.attention >= Attention::Notify {
+                let outcome = match entry.verdict {
+                    prism_core::AuditVerdict::Allowed => "allowed",
+                    prism_core::AuditVerdict::Denied => "denied",
+                    prism_core::AuditVerdict::Timeout => "timed out",
+                    prism_core::AuditVerdict::Error => "failed",
+                };
+                let body = format!("{} · {} {}", entry.agent_name, entry.tool, outcome);
+                if let Err(err) = app
+                    .notification()
+                    .builder()
+                    .title("Prism")
+                    .body(body)
+                    .show()
+                {
+                    warn!(%err, "notification failed");
+                }
+            }
+            if entry.attention == Attention::Open {
+                show_panel(app);
             }
         }
+        GatewayEvent::CallDecided { .. }
+        | GatewayEvent::Audit(_)
+        | GatewayEvent::AgentDecided { .. }
+        | GatewayEvent::SignInDecided { .. } => {
+            settle_tray_icon(app, gateway).await;
+        }
         _ => {}
+    }
+}
+
+/// Idle icon once nothing is waiting and nothing badged is unseen.
+async fn settle_tray_icon(app: &AppHandle, gateway: &Gateway) {
+    let status = gateway.status().await;
+    if status.pending_count == 0
+        && status.pending_agents == 0
+        && status.pending_signins == 0
+        && UNSEEN.load(Ordering::SeqCst) == 0
+    {
+        set_tray_icon(app, false);
     }
 }
 
@@ -440,7 +604,7 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let open = MenuItem::with_id(app, "open", "Open Prism", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
-    let icon = idle_icon()?;
+    let icon = idle_icon(app)?;
 
     #[allow(unused_mut)]
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
@@ -485,7 +649,8 @@ pub fn run() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .add_directive("rmcp=off".parse().expect("valid log directive")),
         )
         .try_init();
 
@@ -502,7 +667,7 @@ pub fn run() {
             if app.get_webview_window(PANEL_LABEL).is_none() {
                 WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("index.html".into()))
                     .title("Prism")
-                    .inner_size(400.0, 600.0)
+                    .inner_size(PANEL_SIZE.0, PANEL_SIZE.1)
                     .decorations(false)
                     .transparent(true)
                     .always_on_top(true)
@@ -513,7 +678,7 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window(PANEL_LABEL) {
-                let _ = window.set_size(LogicalSize::new(400.0, 600.0));
+                let _ = window.set_size(LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1));
             }
 
             let (config_path, audit_path) = config_paths(app.handle())?;
@@ -597,12 +762,22 @@ pub fn run() {
             remove_server,
             restart_server,
             list_agents,
+            create_manual_agent,
+            replace_manual_token,
             decide_agent,
             remove_agent,
+            revoke_agent_tokens,
+            list_signins,
+            decide_signin,
             list_pending,
             decide,
             list_rules,
             delete_rule,
+            add_rule,
+            set_agent_policy,
+            get_settings,
+            set_settings,
+            list_server_tools,
             list_audit,
             hide_panel,
             get_connect_snippet,

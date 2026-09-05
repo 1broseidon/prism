@@ -7,17 +7,19 @@ import {
   pending,
   rules,
   servers,
+  signins,
   status,
 } from "./state";
 import type { GatewayEvent } from "./types";
 
 export async function loadAll(): Promise<void> {
   try {
-    const [st, srv, ag, pend, ru, au] = await Promise.all([
+    const [st, srv, ag, pend, si, ru, au] = await Promise.all([
       api.getStatus(),
       api.listServers(),
       api.listAgents(),
       api.listPending(),
+      api.listSignins(),
       api.listRules(),
       api.listAudit(20),
     ]);
@@ -25,6 +27,7 @@ export async function loadAll(): Promise<void> {
     servers.value = srv;
     agents.value = ag;
     pending.value = pend;
+    signins.value = si.filter((s) => s.needs_consent);
     rules.value = ru;
     audit.value = au;
     errorMessage.value = null;
@@ -60,11 +63,20 @@ export async function subscribeEvents(): Promise<() => void> {
         servers.value = await api.listServers();
         status.value = await api.getStatus();
         break;
+      case "sign_in_requested":
+      case "sign_in_decided":
+        signins.value = (await api.listSignins()).filter((s) => s.needs_consent);
+        status.value = await api.getStatus();
+        break;
       case "agent_requested":
       case "agent_decided":
       case "agent_connected":
       case "agent_disconnected":
+      case "agent_updated":
         agents.value = await api.listAgents();
+        status.value = await api.getStatus();
+        break;
+      case "settings_changed":
         status.value = await api.getStatus();
         break;
       default:

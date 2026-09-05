@@ -12,7 +12,46 @@ export interface GatewayStatus {
   agent_count: number;
   pending_count: number;
   pending_agents: number;
+  /** Approved agents whose client is signing in again and waiting for a yes. */
+  pending_signins: number;
   auto_open_on_pending: boolean;
+  do_not_disturb: boolean;
+}
+
+/** What an agent's calls do when no rule covers them. */
+export type Posture = "supervised" | "first_use" | "guided" | "trusted";
+
+/** How loudly Prism surfaces a call it resolved without asking. */
+export type Attention = "silent" | "badge" | "notify" | "open";
+
+export type TimeoutBehavior = "deny" | "allow_read_only";
+
+export interface Settings {
+  on_timeout: TimeoutBehavior;
+  do_not_disturb: boolean;
+  rate_limit_per_minute: number | null;
+  hold_timeout_secs: number;
+  auto_open_on_pending: boolean;
+}
+
+/** A token an agent holds. Prism keeps only the hash, so this is all there is to show. */
+export interface TokenView {
+  kind: "access" | "refresh" | "manual";
+  created_at: string;
+  expires_at: string | null;
+}
+
+/** Present only in the create/replace response, never in agent listings. */
+export interface ManualToken {
+  agent_id: string;
+  token: string;
+}
+
+export interface ToolInfo {
+  name: string;
+  description: string | null;
+  read_only: boolean;
+  destructive: boolean;
 }
 
 export interface ServerView {
@@ -21,6 +60,7 @@ export interface ServerView {
   command: string;
   args: string[];
   env: Record<string, string>;
+  credentials_stored: boolean;
   enabled: boolean;
   status: BackendStatus;
 }
@@ -35,8 +75,24 @@ export interface AgentConfig {
   status: AgentStatus;
   created_at: string;
   decided_at: string | null;
+  posture: Posture;
+  attention: Attention;
+  /** The OAuth client this agent signs in as; absent for manually configured agents. */
+  client_id?: string | null;
   /** True while at least one MCP session for this agent is open. */
   connected: boolean;
+  /** Live tokens, newest last. Empty for agents that never signed in. */
+  tokens: TokenView[];
+}
+
+/** An OAuth sign-in parked until you answer. Only shown for agents that were already approved. */
+export interface PendingSignIn {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  client_name: string;
+  requested_at: string;
+  needs_consent: boolean;
 }
 
 export interface PendingCall {
@@ -48,21 +104,45 @@ export interface PendingCall {
   tool: string;
   arguments: unknown;
   requested_at: string;
+  /** When the hold times out. */
+  deadline: string | null;
+  posture: Posture;
+  reason: "policy" | "rate_limit";
 }
+
+export type DecisionScope = "once" | "session" | "always" | { for: { minutes: number } };
 
 export interface Decision {
   verdict: "allow" | "deny";
-  scope: "once" | "session" | "always";
+  scope: DecisionScope;
+  /** How wide the remembered rule reaches. Defaults to this tool. */
+  target?: "tool" | "server" | "agent";
 }
+
+export type RuleDecision = "allow" | "deny" | "ask";
 
 export interface Rule {
   id: string;
   agent_id: string | null;
   server_id: string | null;
+  /** Exact name or a glob with `*`. */
   tool: string | null;
-  decision: "allow" | "deny";
+  decision: RuleDecision;
+  /** null inherits the agent's attention. */
+  attention: Attention | null;
   scope: "session" | "always";
+  expires_at: string | null;
   created_at: string;
+}
+
+export interface NewRule {
+  agent_id: string | null;
+  server_id: string | null;
+  tool: string | null;
+  decision: RuleDecision;
+  attention?: Attention | null;
+  scope?: "session" | "always";
+  minutes?: number | null;
 }
 
 export interface AuditEntry {
@@ -77,9 +157,12 @@ export interface AuditEntry {
     | { kind: "rule"; rule_id: string }
     | { kind: "human" }
     | { kind: "timeout" }
-    | { kind: "unapproved" };
+    | { kind: "unapproved" }
+    | { kind: "posture"; posture: Posture }
+    | { kind: "do_not_disturb" };
   duration_ms: number;
   error: string | null;
+  attention: Attention;
 }
 
 export interface ConnectSnippet {
@@ -91,9 +174,13 @@ export type GatewayEvent =
   | { type: "pending_call"; data: PendingCall }
   | { type: "call_decided"; data: { id: string; decision: Decision } }
   | { type: "agent_requested"; data: AgentConfig }
+  | { type: "sign_in_requested"; data: PendingSignIn }
+  | { type: "sign_in_decided"; data: { id: string; approved: boolean } }
   | { type: "agent_decided"; data: { agent_id: string; status: AgentStatus } }
   | { type: "agent_connected"; data: { agent_id: string } }
   | { type: "agent_disconnected"; data: { agent_id: string } }
+  | { type: "agent_updated"; data: { agent_id: string } }
+  | { type: "settings_changed" }
   | { type: "server_status"; data: { server_id: string; status: BackendStatus } }
   | { type: "audit"; data: AuditEntry }
   | { type: "rules_changed" };

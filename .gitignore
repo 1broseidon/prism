@@ -8,3 +8,7 @@ apps/desktop/src-tauri/gen/
 # local agent tooling
 .claude/
 .codex/
+
+# internal task tracking / agent memory — not for public distribution
+.brainfile/
+.recoil/

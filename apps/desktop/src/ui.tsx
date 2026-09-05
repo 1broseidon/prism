@@ -80,6 +80,54 @@ export function CodeBlock({ text, copyable, emptyText }: { text: string; copyabl
   );
 }
 
+/** A segmented control. One value, a few options, the chosen one lifted onto paper. */
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  small,
+  label,
+}: {
+  value: T | null;
+  options: { value: T; label: string }[];
+  onChange: (value: T) => void;
+  small?: boolean;
+  label: string;
+}) {
+  return (
+    <div class={`seg ${small ? "small" : ""}`} role="group" aria-label={label}>
+      {options.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          aria-pressed={value === opt.value}
+          onClick={() => onChange(opt.value)}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function Switch({ checked, onChange, label }: { checked: boolean; onChange: (next: boolean) => void; label: string }) {
+  return (
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} class="switch" onClick={() => onChange(!checked)}>
+      <i />
+    </button>
+  );
+}
+
+/** A screen owns its own scroll region and an optional action bar pinned to the bottom, phone-style. */
+export function Screen({ children, footer }: { children: ComponentChildren; footer?: ComponentChildren }) {
+  return (
+    <>
+      <div class="screen-body">{children}</div>
+      {footer ? <div class="screen-footer">{footer}</div> : null}
+    </>
+  );
+}
+
 export function Notice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
   return (
     <div class="notice" role="alert">

@@ -4,21 +4,32 @@ mod approval;
 mod audit;
 mod backend;
 mod config;
+mod credentials;
 mod error;
 mod events;
 mod gateway;
+mod http_security;
+mod oauth;
 mod policy;
+mod storage;
 
 pub use approval::{
-    ApprovalRegistry, Decision, DecisionScope, DecisionVerdict, HoldOutcome, PendingCall,
-    DEFAULT_HOLD_TIMEOUT, TIMEOUT_MESSAGE,
+    ApprovalRegistry, Decision, DecisionScope, DecisionTarget, DecisionVerdict, HoldOutcome,
+    HoldReason, PendingCall, DEFAULT_HOLD_TIMEOUT, TIMEOUT_MESSAGE,
 };
 pub use audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict};
 pub use backend::{BackendStatus, ServerView};
 pub use config::{
-    AgentConfig, AgentStatus, PanelAnchor, PrismConfig, Rule, RuleDecision, RuleScope, ServerConfig,
+    AgentConfig, AgentStatus, Attention, PanelAnchor, Posture, PrismConfig, Rule, RuleDecision,
+    RuleScope, ServerConfig, TimeoutBehavior,
 };
+pub use config::{OAuthClient, TokenKind, TokenRecord};
 pub use error::{Error, Result};
 pub use events::{EventReceiver, GatewayEvent};
-pub use gateway::{AgentView, ConnectSnippet, Gateway, GatewayStatus};
-pub use policy::{evaluate, ToolAnnotations, Verdict};
+pub use gateway::{AgentView, ConnectSnippet, Gateway, GatewayStatus, NewRule, Settings, ToolInfo};
+pub use oauth::{
+    hash_token, pkce_matches, redirect_uri_allowed, AuthenticatedAgent, AuthorizeOutcome,
+    AuthorizeParams, ManualToken, OAuthError, PendingSignIn, RegisterRequest, TokenRequest,
+    TokenResponse, TokenView,
+};
+pub use policy::{evaluate, glob_match, Decider, Evaluation, ToolAnnotations, Verdict};

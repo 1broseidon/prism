@@ -15,8 +15,8 @@
       {
         "label": "panel",
         "title": "Prism",
-        "width": 400,
-        "height": 600,
+        "width": 432,
+        "height": 632,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
@@ -24,11 +24,34 @@
         "visible": false,
         "resizable": false,
         "fullscreen": false,
-        "shadow": true
+        "shadow": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self'",
+        "img-src": "'self' data:",
+        "connect-src": "ipc: http://ipc.localhost",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "frame-src": "'none'",
+        "form-action": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self'",
+        "img-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "frame-src": "'none'",
+        "form-action": "'none'"
+      }
     }
   },
   "bundle": {
