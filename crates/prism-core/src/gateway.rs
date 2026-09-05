@@ -714,6 +714,7 @@ impl Gateway {
         for id in ids {
             self.backends.stop(&id).await;
         }
+        self.audit.close();
     }
 
     pub fn connect_snippet(&self) -> Result<ConnectSnippet> {

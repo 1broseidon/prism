@@ -210,6 +210,14 @@ impl AuditLog {
         &self.path
     }
 
+    /// Release the file handle. A stopped gateway must not pin the log: on Windows an open handle
+    /// makes the next start's retention rewrite fail with "access denied". Recording reopens it.
+    pub(crate) fn close(&self) {
+        if let Ok(mut writer) = self.writer.lock() {
+            writer.file.take();
+        }
+    }
+
     pub(crate) fn cleanup(&self) -> std::io::Result<()> {
         if let Ok(mut writer) = self.writer.lock() {
             writer.file.take();
