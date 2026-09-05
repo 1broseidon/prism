@@ -338,11 +338,12 @@ mod tests {
         let audit = AuditLog::new(&path, events).unwrap();
         for index in 0..6 {
             audit.record(entry(Utc::now(), &format!("batch-{index}")));
-            // Set the actual on-disk length and accounting to the boundary, then append.
+            // Set the actual on-disk length and accounting to the boundary, then append. A separate
+            // write handle does the extending: on Windows an append-only handle may not set_len.
             let mut writer = audit.writer.lock().unwrap();
-            writer
-                .file
-                .as_ref()
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
                 .unwrap()
                 .set_len(MAX_FILE_BYTES)
                 .unwrap();
