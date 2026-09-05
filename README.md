@@ -29,7 +29,7 @@ Download the build for your machine from the [latest release](https://github.com
 | Linux, x86_64 | `.AppImage`, `.deb`, `.rpm` | AppImage needs `chmod +x`. The deb and rpm declare their WebKitGTK and AppIndicator dependencies. |
 | Linux, arm64 | `.AppImage`, `.deb`, `.rpm` | Same. |
 
-**macOS quarantine.** Builds are not yet notarized. The first launch will be refused with "cannot be opened because the developer cannot be verified". Clear the flag once:
+**macOS quarantine.** Builds are ad-hoc signed, not notarized. The first launch is refused with "cannot be opened because the developer cannot be verified", and on some versions with "is damaged and can't be opened". Either way, clear the quarantine flag once after copying the app to Applications:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Prism.app

@@ -133,7 +133,15 @@ jobs:
               echo "$name=${!name}" >> "$GITHUB_ENV"
             fi
           done
-          if [ -n "$APPLE_CERTIFICATE" ]; then echo "Signing with the configured identity."; else echo "No signing secrets; bundle will be ad-hoc signed."; fi
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "Signing with the configured identity."
+          else
+            # Tauri skips codesign entirely without an identity, and an unsigned bundle shows as
+            # "damaged" on Apple silicon. "-" makes it ad-hoc sign, which downgrades that to the
+            # "unidentified developer" dialog that right-click > Open can pass.
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "No signing secrets; bundle will be ad-hoc signed."
+          fi
 
       - name: Build bundles
         working-directory: apps/desktop
