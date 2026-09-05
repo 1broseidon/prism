@@ -172,7 +172,7 @@ Versions live in three places and must agree: the workspace `Cargo.toml`, `apps/
 git tag vX.Y.Z && git push --tags
 ```
 
-The release workflow checks the three versions against the tag, builds the DMG, MSI, NSIS installer, AppImage, deb and rpm for five targets, writes `checksums.txt`, and publishes a GitHub release with the changelog section as its notes. Add the `APPLE_*` signing secrets to the repository to get notarized macOS builds; without them the bundle is ad-hoc signed.
+The release workflow checks the three versions against the tag, builds the DMG, MSI, NSIS installer, AppImage, deb and rpm for five targets, writes `checksums.txt`, and publishes a GitHub release with the changelog section as its notes. Signed and notarized macOS builds need six repository secrets: `APPLE_CERTIFICATE` (base64 Developer ID Application p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and the App Store Connect key as `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_P8`. Without the certificate the bundle is ad-hoc signed.
 
 ## License
 

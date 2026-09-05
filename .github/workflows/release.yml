@@ -114,33 +114,43 @@ jobs:
         if: matrix.arch != 'x86_64' || matrix.os != 'darwin'
         run: cargo test -p prism-core --locked
 
-      # Signing and notarization are optional. The variables are exported only when the secrets
-      # exist: Tauri treats an empty APPLE_CERTIFICATE as a certificate and fails to import it.
-      # Without them the macOS bundle is ad-hoc signed and users clear quarantine once (README).
+      # Signing and notarization are optional and independent. APPLE_CERTIFICATE (base64 p12) with
+      # its password and identity signs; the App Store Connect API key notarizes. Variables are
+      # exported only when the secrets exist: Tauri treats an empty APPLE_CERTIFICATE as a
+      # certificate and fails to import it. Without a certificate the bundle is ad-hoc signed.
       - name: Apple signing secrets
         if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -n "${!name}" ]; then
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
               echo "::add-mask::${!name}"
               echo "$name=${!name}" >> "$GITHUB_ENV"
-            fi
-          done
-          if [ -n "$APPLE_CERTIFICATE" ]; then
-            echo "Signing with the configured identity."
+            done
+            echo "Signing as: $APPLE_SIGNING_IDENTITY"
           else
             # Tauri skips codesign entirely without an identity, and an unsigned bundle shows as
-            # "damaged" on Apple silicon. "-" makes it ad-hoc sign, which downgrades that to the
+            # "damaged" on Apple silicon. "-" ad-hoc signs, which downgrades that to the
             # "unidentified developer" dialog that right-click > Open can pass.
             echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "No signing secrets; bundle will be ad-hoc signed."
+            echo "No Developer ID certificate; bundle will be ad-hoc signed."
+          fi
+          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_KEY_P8" ] && [ -n "$APPLE_CERTIFICATE" ]; then
+            keypath="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$keypath"
+            chmod 600 "$keypath"
+            echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+            echo "APPLE_API_KEY_PATH=$keypath" >> "$GITHUB_ENV"
+            echo "Notarizing with API key $APPLE_API_KEY."
+          else
+            echo "Not notarizing."
           fi
 
       - name: Build bundles
