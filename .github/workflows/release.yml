@@ -44,7 +44,9 @@ jobs:
           echo "tag=$V cargo=$CARGO tauri=$TAURI package=$PKG"
           [ "$V" = "$CARGO" ] && [ "$V" = "$TAURI" ] && [ "$V" = "$PKG" ] || { echo "version mismatch" >&2; exit 1; }
       - name: Changelog has an entry
-        run: grep -q "^## \[${{ steps.tag.outputs.version }}\]" CHANGELOG.md || { echo "Add a ## [${{ steps.tag.outputs.version }}] section to CHANGELOG.md before tagging." >&2; exit 1; }
+        run: |
+          V="${{ steps.tag.outputs.version }}"
+          grep -q "^## \[$V\]" CHANGELOG.md || { echo "Add a \"## [$V]\" section to CHANGELOG.md before tagging." >&2; exit 1; }
 
   build:
     needs: verify
