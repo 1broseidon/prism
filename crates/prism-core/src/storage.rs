@@ -206,7 +206,7 @@ fn windows_private_acl(path: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
