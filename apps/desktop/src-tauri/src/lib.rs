@@ -583,6 +583,188 @@ async fn get_connect_snippet(state: State<'_, AppState>) -> Result<ConnectSnippe
     })
 }
 
+// ----- native actions (observe) ---------------------------------------------------------
+
+/// Core status plus what only the desktop knows: where Claude Code's settings live and whether
+/// the current hook URL is in them.
+#[derive(Serialize)]
+struct NativeStatusDto {
+    #[serde(flatten)]
+    status: prism_core::NativeStatus,
+    settings_path: String,
+    hook_installed: bool,
+}
+
+#[derive(Serialize)]
+struct HookInstallResult {
+    path: String,
+    backup: Option<String>,
+}
+
+fn claude_settings_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| "home directory not found".to_string())?;
+    Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+}
+
+fn read_settings_json(path: &PathBuf) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    if text.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
+    if !value.is_object() {
+        return Err(format!("{} is not a JSON object", path.display()));
+    }
+    Ok(value)
+}
+
+fn is_prism_hook(hook: &serde_json::Value) -> bool {
+    hook.get("type").and_then(|t| t.as_str()) == Some("http")
+        && hook
+            .get("url")
+            .and_then(|u| u.as_str())
+            .is_some_and(|u| u.contains("/hooks/claude-code/"))
+}
+
+fn hook_installed(settings: &serde_json::Value, url: &str) -> bool {
+    settings
+        .pointer("/hooks/PreToolUse")
+        .and_then(|v| v.as_array())
+        .is_some_and(|groups| {
+            groups.iter().any(|group| {
+                group
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            is_prism_hook(hook)
+                                && hook.get("url").and_then(|u| u.as_str()) == Some(url)
+                        })
+                    })
+            })
+        })
+}
+
+#[tauri::command]
+async fn get_native_status(state: State<'_, AppState>) -> Result<NativeStatusDto, String> {
+    let status = state.gateway.native_status().await;
+    let path = claude_settings_path()?;
+    let installed = read_settings_json(&path)
+        .map(|settings| hook_installed(&settings, &status.hook_url))
+        .unwrap_or(false);
+    Ok(NativeStatusDto {
+        status,
+        settings_path: path.display().to_string(),
+        hook_installed: installed,
+    })
+}
+
+#[tauri::command]
+async fn set_observe_native(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    state.gateway.set_observe_native(on).await.map_err(map_err)
+}
+
+#[tauri::command]
+async fn rotate_hook_token(state: State<'_, AppState>) -> Result<(), String> {
+    state.gateway.rotate_hook_token().await.map_err(map_err)
+}
+
+/// The exact `hooks` entry for `~/.claude/settings.json`, for the copy button.
+#[tauri::command]
+async fn get_claude_hook_snippet(state: State<'_, AppState>) -> Result<String, String> {
+    let url = state.gateway.hook_url(prism_core::native::HOST_CLAUDE_CODE);
+    let value = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                { "hooks": [ { "type": "http", "url": url, "timeout": 5 } ] }
+            ]
+        }
+    });
+    serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
+}
+
+/// Merge the hook into `~/.claude/settings.json`. Every other key and every other hook is left
+/// alone; an earlier Prism hook (an old token, say) is replaced. The previous file is kept as
+/// `settings.json.bak`.
+#[tauri::command]
+async fn install_claude_hook(state: State<'_, AppState>) -> Result<HookInstallResult, String> {
+    let url = state.gateway.hook_url(prism_core::native::HOST_CLAUDE_CODE);
+    let path = claude_settings_path()?;
+    let mut settings = read_settings_json(&path)?;
+    let root = settings.as_object_mut().expect("object checked above");
+    let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        return Err("\"hooks\" in settings.json is not an object".into());
+    }
+    let pre = hooks
+        .as_object_mut()
+        .expect("checked")
+        .entry("PreToolUse")
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(groups) = pre.as_array_mut() else {
+        return Err("\"hooks.PreToolUse\" in settings.json is not an array".into());
+    };
+    for group in groups.iter_mut() {
+        if let Some(list) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            list.retain(|hook| !is_prism_hook(hook));
+        }
+    }
+    groups.retain(|group| {
+        group
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_none_or(|list| !list.is_empty())
+    });
+    groups.push(serde_json::json!({
+        "hooks": [ { "type": "http", "url": url, "timeout": 5 } ]
+    }));
+    let backup = if path.exists() {
+        let bak = path.with_extension("json.bak");
+        std::fs::copy(&path, &bak).map_err(|err| err.to_string())?;
+        Some(bak.display().to_string())
+    } else {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+        }
+        None
+    };
+    let text = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, format!("{text}\n")).map_err(|err| err.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|err| err.to_string())?;
+    Ok(HookInstallResult {
+        path: path.display().to_string(),
+        backup,
+    })
+}
+
+/// Write the would-have-asked entries of the last 30 days to the Downloads folder.
+#[tauri::command]
+async fn export_native_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let body = state.gateway.native_export(30).await;
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().home_dir())
+        .map_err(|err| err.to_string())?;
+    let name = format!(
+        "prism-native-{}.jsonl",
+        chrono::Utc::now().format("%Y-%m-%d")
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, body).map_err(|err| err.to_string())?;
+    Ok(path.display().to_string())
+}
+
 fn config_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     let config_dir = app.path().app_config_dir().map_err(|err| err.to_string())?;
     let data_dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
@@ -1050,6 +1232,12 @@ pub fn run() {
             get_update_status,
             check_update,
             install_update,
+            get_native_status,
+            set_observe_native,
+            rotate_hook_token,
+            get_claude_hook_snippet,
+            install_claude_hook,
+            export_native_report,
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

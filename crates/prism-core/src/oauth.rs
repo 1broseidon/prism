@@ -454,6 +454,7 @@ impl Gateway {
             client_name: name.to_string(),
             client_version: None,
             client_id: None,
+            host: None,
             status: AgentStatus::Approved,
             created_at: now,
             decided_at: Some(now),

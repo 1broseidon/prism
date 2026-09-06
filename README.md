@@ -130,6 +130,18 @@ Prism checks the [latest release](https://github.com/1broseidon/prism/releases/l
 
 Every update file is signed with Prism's minisign key and checked against the public key built into the app before it is installed, on top of Apple notarization on macOS. The DMG, AppImage, deb, rpm, MSI and setup exe can all update in place. Deb and rpm installs ask for your password through `pkexec`. A copy built from source, or installed by some other route, gets a link to the release page instead.
 
+## Native actions
+
+MCP is only part of what an agent does. Claude Code runs shell commands, edits files and fetches pages on its own, and none of that passes through the gateway. Prism can observe those too.
+
+**Agents → Claude Code → Write it for me** adds an HTTP hook to `~/.claude/settings.json` (a backup of the previous file is kept). From then on Claude Code posts each action to Prism just before it runs and carries on regardless of the answer. Prism adds nothing to the host's own permission flow: no card, no prompt, no block. If Prism is not running, the hook fails silently and Claude Code proceeds.
+
+What the record keeps is one line per action, never the raw input: the redacted command for a shell call, the path for a file read or write, the origin for a fetch, the tool name for anything else. Bearer tokens, key-like assignments, URL passwords and long opaque strings are replaced before the line is stored.
+
+The **Now** feed shows native rows beside MCP calls with a filter for each. The **Agents** tab shows the host's coverage: **observed** once actions are arriving, **MCP only** before the hook is set up or when observation is switched off. A short deny list runs in shadow and marks the actions it would have held, such as a recursive delete outside the working directory, a forced push, a pipe from curl into a shell, or a write under `~/.ssh`. Nothing is held; **Settings → Native actions** counts them for the week and can export the entries. That count is what decides whether a real gate is worth building.
+
+Native action coverage depends on the agent host honouring its own hooks. Prism shows what it can see and labels it; it does not sandbox anything, and a process that bypasses the host is outside what a tray app can see.
+
 ## What the audit log keeps
 
 Agent, tool, timestamp, verdict and what decided it (you, a rule, the posture, do-not-disturb, or a timeout). Tool arguments and results are never persisted, and raw error text is dropped because servers echo credentials. The current file is capped at 5 MiB with three archives, and entries older than 30 days are removed at startup and hourly. The panel shows the last 1,000.

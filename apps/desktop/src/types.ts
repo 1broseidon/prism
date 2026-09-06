@@ -79,6 +79,8 @@ export interface AgentConfig {
   attention: Attention;
   /** The OAuth client this agent signs in as; absent for manually configured agents. */
   client_id?: string | null;
+  /** Set for an agent host observed through its hooks, e.g. "claude-code". Never holds a token. */
+  host?: string | null;
   /** True while at least one MCP session for this agent is open. */
   connected: boolean;
   /** Live tokens, newest last. Empty for agents that never signed in. */
@@ -159,10 +161,49 @@ export interface AuditEntry {
     | { kind: "timeout" }
     | { kind: "unapproved" }
     | { kind: "posture"; posture: Posture }
-    | { kind: "do_not_disturb" };
+    | { kind: "do_not_disturb" }
+    | { kind: "observed" };
   duration_ms: number;
   error: string | null;
   attention: Attention;
+  /** Present for a native action seen through a host hook. */
+  native?: NativeDetail | null;
+}
+
+/** What the record keeps about a native action. `subject` is one redacted line, never the raw input. */
+export interface NativeDetail {
+  host: string;
+  session?: string | null;
+  cwd?: string | null;
+  subject: string;
+  /** Shadow deny-list rule id this action would have tripped. Nothing was held. */
+  would_hold?: string | null;
+  agent_type?: string | null;
+  /** An MCP tool Prism serves, seen again through the hook; the gateway already logged the call. */
+  via_prism: boolean;
+}
+
+export interface ShadowRule {
+  id: string;
+  summary: string;
+}
+
+export interface NativeStatus {
+  hook_url: string;
+  observe_native: boolean;
+  last_event_at: string | null;
+  actions_7d: number;
+  would_hold_7d: number;
+  by_reason: { reason: string; count: number }[];
+  rules: ShadowRule[];
+  /** Desktop only: where Claude Code's user settings live and whether the current hook URL is in them. */
+  settings_path: string;
+  hook_installed: boolean;
+}
+
+export interface HookInstallResult {
+  path: string;
+  backup: string | null;
 }
 
 export interface ConnectSnippet {

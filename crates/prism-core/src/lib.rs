@@ -9,6 +9,7 @@ mod error;
 mod events;
 mod gateway;
 mod http_security;
+pub mod native;
 mod oauth;
 mod policy;
 mod shell_path;
@@ -18,7 +19,7 @@ pub use approval::{
     ApprovalRegistry, Decision, DecisionScope, DecisionTarget, DecisionVerdict, HoldOutcome,
     HoldReason, PendingCall, DEFAULT_HOLD_TIMEOUT, TIMEOUT_MESSAGE,
 };
-pub use audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict};
+pub use audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict, NativeDetail};
 pub use backend::{BackendStatus, ServerView};
 pub use config::{
     AgentConfig, AgentStatus, Attention, PanelAnchor, Posture, PrismConfig, Rule, RuleDecision,
@@ -28,6 +29,7 @@ pub use config::{OAuthClient, TokenKind, TokenRecord};
 pub use error::{Error, Result};
 pub use events::{EventReceiver, GatewayEvent};
 pub use gateway::{AgentView, ConnectSnippet, Gateway, GatewayStatus, NewRule, Settings, ToolInfo};
+pub use native::{NativeStatus, ReasonCount, ShadowRule};
 pub use oauth::{
     hash_token, pkce_matches, redirect_uri_allowed, AuthenticatedAgent, AuthorizeOutcome,
     AuthorizeParams, ManualToken, OAuthError, PendingSignIn, RegisterRequest, TokenRequest,

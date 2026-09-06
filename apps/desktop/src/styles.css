@@ -1200,3 +1200,80 @@ textarea.input {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ----- native actions ----- */
+
+.host-mark {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--color-ink-3);
+}
+
+.feed .row.native .who b {
+  color: var(--color-ink-2);
+  font-weight: 500;
+}
+
+.feed .row.native .subject {
+  color: var(--color-ink-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feed .row.would-hold .subject,
+.feed .row.would-hold .src {
+  color: var(--color-accent);
+}
+
+.feed .seg.small {
+  margin-bottom: var(--space-2);
+}
+
+.shadow-rules {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+
+.shadow-rules li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "id count"
+    "summary count";
+  column-gap: var(--space-3);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--color-line);
+  font-size: var(--text-sm);
+}
+
+.shadow-rules li:last-child {
+  border-bottom: 0;
+}
+
+.shadow-rules .mono {
+  grid-area: id;
+  color: var(--color-ink-2);
+}
+
+.shadow-rules .hint {
+  grid-area: summary;
+  margin: 2px 0 0;
+}
+
+.shadow-rules .shadow-count {
+  grid-area: count;
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.shadow-rules .shadow-count.hit {
+  color: var(--color-accent);
+}

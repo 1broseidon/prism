@@ -130,6 +130,11 @@ pub struct Gateway {
     sessions: std::sync::Mutex<HashMap<String, SessionEntry>>,
     /// Call timestamps per agent for the rate tripwire; trimmed to the last minute on each check.
     calls: std::sync::Mutex<HashMap<String, VecDeque<Instant>>>,
+    /// Secret path segment of the host hook URL. Lives in the data dir; rotatable from the panel.
+    hook_token: std::sync::RwLock<String>,
+    hook_token_path: PathBuf,
+    native_budget: std::sync::Mutex<crate::native::EventBudget>,
+    native_last: std::sync::Mutex<Option<chrono::DateTime<Utc>>>,
 }
 
 impl Gateway {
@@ -163,9 +168,18 @@ impl Gateway {
         crate::storage::prepare(&config_path)?;
         let (events, _) = channel();
         let audit_events = events.clone();
-        let audit = tokio::task::spawn_blocking(move || AuditLog::new(audit_path, audit_events))
-            .await
-            .map_err(|_| Error::Gateway("audit storage setup could not complete".into()))??;
+        let hook_token_path = audit_path
+            .parent()
+            .map(|dir| dir.join("hook-token"))
+            .unwrap_or_else(|| PathBuf::from("hook-token"));
+        let token_path = hook_token_path.clone();
+        let (audit, hook_token) = tokio::task::spawn_blocking(move || {
+            let audit = AuditLog::new(audit_path, audit_events)?;
+            let token = load_or_create_hook_token(&token_path)?;
+            Ok::<_, Error>((audit, token))
+        })
+        .await
+        .map_err(|_| Error::Gateway("audit storage setup could not complete".into()))??;
         let path = config_path.clone();
         let store = credentials.clone();
         let config = tokio::task::spawn_blocking(move || {
@@ -197,6 +211,10 @@ impl Gateway {
             sessions: std::sync::Mutex::new(HashMap::new()),
             calls: std::sync::Mutex::new(HashMap::new()),
             oauth: OAuthState::default(),
+            hook_token: std::sync::RwLock::new(hook_token),
+            hook_token_path,
+            native_budget: std::sync::Mutex::new(Default::default()),
+            native_last: std::sync::Mutex::new(None),
         });
 
         for server in config.servers.into_iter().filter(|s| s.enabled) {
@@ -690,6 +708,213 @@ impl Gateway {
         self.audit.list(limit)
     }
 
+    // ----- native actions (observe) ------------------------------------------------------
+
+    pub(crate) fn hook_token_matches(&self, candidate: &str) -> bool {
+        self.hook_token
+            .read()
+            .map(|t| crate::native::token_eq(&t, candidate))
+            .unwrap_or(false)
+    }
+
+    /// The URL an agent host posts its hook events to. Contains the secret; treat like a token.
+    pub fn hook_url(&self, host: &str) -> String {
+        let token = self
+            .hook_token
+            .read()
+            .map(|t| t.clone())
+            .unwrap_or_default();
+        format!("http://127.0.0.1:{}/hooks/{host}/{token}", self.listen_port)
+    }
+
+    /// Replace the hook secret. The old URL stops working at once; hosts need the new one.
+    pub async fn rotate_hook_token(&self) -> Result<()> {
+        let token = crate::native::new_token();
+        let path = self.hook_token_path.clone();
+        let bytes = token.clone();
+        tokio::task::spawn_blocking(move || crate::storage::atomic_write(&path, bytes.as_bytes()))
+            .await
+            .map_err(|_| Error::Gateway("hook token write could not complete".into()))??;
+        if let Ok(mut current) = self.hook_token.write() {
+            *current = token;
+        }
+        let _ = self.events.send(GatewayEvent::SettingsChanged);
+        Ok(())
+    }
+
+    pub async fn set_observe_native(&self, on: bool) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            config.observe_native = on;
+            config.save(&self.config_path)?;
+        }
+        let _ = self.events.send(GatewayEvent::SettingsChanged);
+        Ok(())
+    }
+
+    /// Coverage and the last seven days of counts, computed from the in-memory ring.
+    pub async fn native_status(&self) -> crate::native::NativeStatus {
+        let observe_native = self.config.read().await.observe_native;
+        let cutoff = Utc::now() - chrono::Duration::days(7);
+        let mut actions = 0usize;
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for entry in self.audit.list(usize::MAX) {
+            let Some(native) = entry.native.as_ref() else {
+                continue;
+            };
+            if entry.at < cutoff || native.via_prism {
+                continue;
+            }
+            actions += 1;
+            if let Some(reason) = &native.would_hold {
+                *counts.entry(reason.clone()).or_default() += 1;
+            }
+        }
+        let mut by_reason: Vec<crate::native::ReasonCount> = counts
+            .into_iter()
+            .map(|(reason, count)| crate::native::ReasonCount { reason, count })
+            .collect();
+        by_reason.sort_by(|a, b| b.count.cmp(&a.count).then(a.reason.cmp(&b.reason)));
+        crate::native::NativeStatus {
+            hook_url: self.hook_url(crate::native::HOST_CLAUDE_CODE),
+            observe_native,
+            last_event_at: self.native_last.lock().ok().and_then(|l| *l),
+            actions_7d: actions,
+            would_hold_7d: by_reason.iter().map(|r| r.count).sum(),
+            by_reason,
+            rules: crate::native::shadow::RULES.to_vec(),
+        }
+    }
+
+    /// JSONL of the native entries the shadow list would have held, newest first.
+    pub async fn native_export(&self, days: i64) -> String {
+        let cutoff = Utc::now() - chrono::Duration::days(days);
+        let mut out = String::new();
+        for entry in self.audit.list(usize::MAX) {
+            let hit = entry
+                .native
+                .as_ref()
+                .is_some_and(|n| n.would_hold.is_some() && !n.via_prism);
+            if hit && entry.at >= cutoff {
+                if let Ok(line) = serde_json::to_string(&entry) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
+
+    /// One hook event becomes one observed audit entry. Creates the host's agent record on first
+    /// contact. A revoked host is refused, so the hook stops being accepted once you deny it.
+    pub(crate) async fn record_native(
+        &self,
+        host: &str,
+        event: crate::native::HookEvent,
+    ) -> Result<()> {
+        if !self
+            .native_budget
+            .lock()
+            .map(|mut b| b.admit())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let agent_id = format!("host:{host}");
+        let now = Utc::now();
+        let (observe, agent_name, created) = {
+            let mut config = self.config.write().await;
+            let created = match config.agents.iter().find(|a| a.id == agent_id) {
+                Some(agent) if agent.status == AgentStatus::Denied => {
+                    return Err(Error::NotFound(format!("host {host} is revoked")));
+                }
+                Some(_) => false,
+                None => {
+                    config.agents.push(AgentConfig {
+                        id: agent_id.clone(),
+                        name: host_display_name(host),
+                        client_name: host.to_string(),
+                        client_version: None,
+                        status: AgentStatus::Approved,
+                        created_at: now,
+                        decided_at: Some(now),
+                        posture: Posture::Trusted,
+                        attention: Attention::Silent,
+                        client_id: None,
+                        host: Some(host.to_string()),
+                    });
+                    config.save(&self.config_path)?;
+                    true
+                }
+            };
+            let name = config
+                .agents
+                .iter()
+                .find(|a| a.id == agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| host_display_name(host));
+            (config.observe_native, name, created)
+        };
+        if created {
+            let _ = self.events.send(GatewayEvent::AgentUpdated {
+                agent_id: agent_id.clone(),
+            });
+        }
+        if !observe {
+            return Ok(());
+        }
+        let home = home_dir();
+        let cwd = event.cwd.as_deref().map(Path::new);
+        let subject =
+            crate::native::subject(&event.tool_name, &event.tool_input, cwd, home.as_deref());
+        let would_hold = crate::native::shadow::evaluate(
+            &event.tool_name,
+            &event.tool_input,
+            cwd,
+            home.as_deref(),
+        )
+        .map(str::to_string);
+        let via_prism = if event.tool_name.starts_with("mcp__") {
+            self.backends
+                .list_tools(false)
+                .await
+                .iter()
+                .any(|(server, tool)| {
+                    event
+                        .tool_name
+                        .ends_with(&format!("__{}__{}", server.name, tool.name))
+                })
+        } else {
+            false
+        };
+        if let Ok(mut last) = self.native_last.lock() {
+            *last = Some(now);
+        }
+        self.audit.record(AuditEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            at: now,
+            agent_id,
+            agent_name,
+            server_id: host.to_string(),
+            tool: event.tool_name,
+            verdict: AuditVerdict::Allowed,
+            source: AuditSource::Observed,
+            duration_ms: 0,
+            error: None,
+            attention: Attention::Silent,
+            native: Some(crate::audit::NativeDetail {
+                host: host.to_string(),
+                session: event.session_id,
+                cwd: event.cwd,
+                subject,
+                would_hold,
+                agent_type: event.agent_type,
+                via_prism,
+            }),
+        });
+        Ok(())
+    }
+
     /// Sync snapshot of the configured panel anchor for window placement callbacks.
     pub fn panel_anchor(&self) -> PanelAnchor {
         self.config
@@ -824,6 +1049,7 @@ impl Gateway {
                 duration_ms: started.elapsed().as_millis() as u64,
                 error: Some(message.clone()),
                 attention: Attention::Silent,
+                native: None,
             });
             return Ok(CallToolResult::error(vec![ContentBlock::text(message)]));
         }
@@ -929,6 +1155,7 @@ impl Gateway {
                     duration_ms: started.elapsed().as_millis() as u64,
                     error: Some(message.clone()),
                     attention,
+                    native: None,
                 });
                 Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
             }
@@ -1007,6 +1234,7 @@ impl Gateway {
             duration_ms: started.elapsed().as_millis() as u64,
             error: Some(message.to_string()),
             attention: Attention::Badge,
+            native: None,
         });
         Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
     }
@@ -1074,6 +1302,7 @@ impl Gateway {
                         duration_ms: started.elapsed().as_millis() as u64,
                         error: Some("Denied by the user in Prism".into()),
                         attention: Attention::Silent,
+                        native: None,
                     });
                     Ok(CallToolResult::error(vec![ContentBlock::text(
                         "Denied by the user in Prism",
@@ -1127,6 +1356,7 @@ impl Gateway {
                         None
                     },
                     attention,
+                    native: None,
                 });
                 Ok(result)
             }
@@ -1144,6 +1374,7 @@ impl Gateway {
                     duration_ms: started.elapsed().as_millis() as u64,
                     error: Some(message.clone()),
                     attention,
+                    native: None,
                 });
                 Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
             }
@@ -1305,6 +1536,7 @@ fn spawn_http(gateway: Arc<Gateway>, port: u16, shutdown: CancellationToken) -> 
             oauth::require_bearer,
         ))
         .merge(oauth::router(gateway.clone()))
+        .merge(crate::native::router(gateway.clone()))
         .layer(axum::middleware::from_fn_with_state(
             gateway.clone(),
             crate::http_security::guard,
@@ -1346,4 +1578,32 @@ fn rule_summary(rule: &Rule) -> String {
         RuleDecision::Ask => "ask",
     };
     format!("{decision} agent={agent} server={server} tool={tool}")
+}
+
+fn host_display_name(host: &str) -> String {
+    match host {
+        crate::native::HOST_CLAUDE_CODE => "Claude Code".into(),
+        other => other.into(),
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// The hook secret persists so the URL in the host's settings keeps working across restarts.
+fn load_or_create_hook_token(path: &Path) -> Result<String> {
+    if path.exists() {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut crate::storage::read(path)?, &mut text)?;
+        let token = text.trim().to_string();
+        if token.len() >= 32 {
+            return Ok(token);
+        }
+    }
+    let token = crate::native::new_token();
+    crate::storage::atomic_write(path, token.as_bytes())?;
+    Ok(token)
 }

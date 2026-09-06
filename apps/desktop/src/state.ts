@@ -4,6 +4,7 @@ import type {
   AuditEntry,
   ConnectSnippet,
   GatewayStatus,
+  NativeStatus,
   PendingCall,
   PendingSignIn,
   Rule,
@@ -20,6 +21,10 @@ export const signins = signal<PendingSignIn[]>([]);
 export const rules = signal<Rule[]>([]);
 export const audit = signal<AuditEntry[]>([]);
 export const lastCreatedSnippet = signal<ConnectSnippet | null>(null);
+/** Coverage and this week's counts for native actions. Null until loaded. */
+export const native = signal<NativeStatus | null>(null);
+/** Which rows the Recent feed shows. */
+export const feedFilter = signal<"all" | "mcp" | "native">("all");
 export const lastCreatedAgentId = signal<string | null>(null);
 export const errorMessage = signal<string | null>(null);
 /** A newer release, once a check has found one. Drives the dot on the settings button. */
@@ -36,6 +41,7 @@ export type Screen =
   | { kind: "connect-agent" }
   | { kind: "agent"; agentId: string }
   | { kind: "agent-server"; agentId: string; serverId: string }
+  | { kind: "host"; agentId: string }
   | { kind: "settings" };
 export const stack = signal<Screen[]>([]);
 
@@ -53,6 +59,7 @@ export const tab = signal<Tab>(TABS.includes(hashTab as Tab) ? (hashTab as Tab) 
 if (hashScreen === "add" && tab.value === "servers") stack.value = [{ kind: "add-server" }];
 if (hashScreen === "connect" && tab.value === "agents") stack.value = [{ kind: "connect-agent" }];
 if (hashScreen === "settings") stack.value = [{ kind: "settings" }];
+if (hashScreen === "host") stack.value = [{ kind: "host", agentId: "host:claude-code" }];
 if (hashScreen && hashScreen.startsWith("a") && tab.value === "agents" && hashScreen !== "connect") {
   const [agentId, serverId] = hashScreen.split(":");
   stack.value = serverId ? [{ kind: "agent", agentId }, { kind: "agent-server", agentId, serverId }] : [{ kind: "agent", agentId }];

@@ -22,6 +22,7 @@ const servers: ServerView[] = [
   { id: "s3", name: "postgres", command: "uvx", args: ["mcp-server-postgres", "postgres://localhost/app"], env: {}, credentials_stored: true, enabled: true, status: { kind: "failed", error: "connection refused (127.0.0.1:5432)" } },
 ];
 const agents: AgentConfig[] = [
+  { id: "host:claude-code", name: "Claude Code", client_name: "claude-code", client_version: null, status: "approved", created_at: iso(3600 * 30), decided_at: iso(3600 * 30), posture: "trusted", attention: "silent", client_id: null, host: "claude-code", connected: false, tokens: [] },
   { id: "a1", name: "claude-code", client_name: "claude-code", client_version: "2.1.14", status: "approved", created_at: iso(3600 * 26), decided_at: iso(3600 * 26), posture: "guided", attention: "badge", client_id: "c-claude", connected: true, tokens: [{ kind: "access", created_at: iso(1200), expires_at: iso(-2400) }, { kind: "refresh", created_at: iso(3600 * 26), expires_at: iso(-3600 * 24 * 29) }] },
   { id: "a2", name: "cursor", client_name: "cursor", client_version: "1.7.0", status: "approved", created_at: iso(600), decided_at: iso(590), posture: "first_use", attention: "silent", client_id: "c-cursor", connected: false, tokens: [{ kind: "refresh", created_at: iso(600), expires_at: iso(-3600 * 24 * 30) }] },
   { id: "a3", name: "codex-cli", client_name: "codex-cli", client_version: "0.42.0", status: "pending", created_at: iso(12), decided_at: null, posture: "first_use", attention: "silent", client_id: "c-codex", connected: false, tokens: [] },
@@ -37,7 +38,35 @@ let rules: Rule[] = [
   { id: "r4", agent_id: "a1", server_id: "s2", tool: null, decision: "allow", attention: null, scope: "always", expires_at: iso(-60 * 24), created_at: iso(360) },
   { id: "r5", agent_id: "a1", server_id: "s1", tool: "delete_*", decision: "ask", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 2) },
 ];
+const nativeStatus = {
+  hook_url: "http://127.0.0.1:9086/hooks/claude-code/k3Jx9v2mQd8sT1uWbC4eF6gH7iJ0lM_nO-pQrStUvWx",
+  observe_native: true,
+  last_event_at: iso(30),
+  actions_7d: 412,
+  would_hold_7d: 3,
+  by_reason: [
+    { reason: "write_outside_cwd", count: 2 },
+    { reason: "git_force", count: 1 },
+  ],
+  rules: [
+    { id: "rm_outside_cwd", summary: "Recursive delete of a path outside the working directory" },
+    { id: "git_force", summary: "git push --force, reset --hard, or clean -f" },
+    { id: "pipe_to_shell", summary: "curl or wget piped into a shell or interpreter" },
+    { id: "sudo", summary: "A command run through sudo or doas" },
+    { id: "secret_read", summary: "Reading SSH keys, cloud credentials, or a .env file" },
+    { id: "sensitive_write", summary: "Writing under ~/.ssh, ~/.aws, ~/.config/gh, or a shell rc file" },
+    { id: "write_outside_cwd", summary: "Writing a file outside the working directory" },
+  ],
+  settings_path: "/home/george/.claude/settings.json",
+  hook_installed: true,
+};
+const nat = (host: string, subject: string, extra: Partial<import("./types").NativeDetail> = {}) => ({ host, subject, cwd: "/home/george/Projects/prism", session: "s-1", via_prism: false, ...extra });
 let audit: AuditEntry[] = [
+  { id: "n1", at: iso(30), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "Bash", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "cargo test -p prism-core") },
+  { id: "n2", at: iso(55), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "Edit", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "~/Projects/prism/crates/prism-core/src/native.rs") },
+  { id: "n3", at: iso(140), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "Bash", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "git push --force origin main", { would_hold: "git_force" }) },
+  { id: "n4", at: iso(300), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "WebFetch", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "https://code.claude.com") },
+  { id: "n5", at: iso(320), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "mcp__prism__filesystem__read_file", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "mcp__prism__filesystem__read_file", { via_prism: true }) },
   { id: "e1", at: iso(40), agent_id: "a1", agent_name: "Claude Code", server_id: "s1", tool: "read_file", verdict: "allowed", source: { kind: "rule", rule_id: "r1" }, duration_ms: 12, error: null, attention: "silent" },
   { id: "e2", at: iso(95), agent_id: "a2", agent_name: "Cursor", server_id: "s2", tool: "create_issue", verdict: "allowed", source: { kind: "human" }, duration_ms: 840, error: null, attention: "silent" },
   { id: "e3", at: iso(200), agent_id: "a1", agent_name: "Claude Code", server_id: "s3", tool: "query", verdict: "denied", source: { kind: "rule", rule_id: "r3" }, duration_ms: 1, error: null, attention: "notify" },
@@ -129,6 +158,12 @@ export const mock = {
   set_settings: (a: { settings: Settings }) => { settings = { ...a.settings }; return delay(undefined); },
   list_server_tools: (a: { serverId: string }) => delay(tools[a.serverId] ?? []),
   list_audit: (a: { limit: number }) => delay(audit.slice(0, a.limit)),
+  get_native_status: () => delay(nativeStatus),
+  set_observe_native: (a: { on: boolean }) => { nativeStatus.observe_native = a.on; return delay(undefined); },
+  rotate_hook_token: () => { nativeStatus.hook_url = nativeStatus.hook_url.slice(0, -6) + Math.random().toString(36).slice(2, 8); nativeStatus.hook_installed = false; return delay(undefined); },
+  get_claude_hook_snippet: () => delay(JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: "http", url: nativeStatus.hook_url, timeout: 5 }] }] } }, null, 2)),
+  install_claude_hook: () => { nativeStatus.hook_installed = true; return delay({ path: nativeStatus.settings_path, backup: nativeStatus.settings_path + ".bak" }); },
+  export_native_report: () => delay("/home/george/Downloads/prism-native-2026-09-06.jsonl"),
   hide_panel: () => delay(undefined),
   get_update_status: () =>
     delay({

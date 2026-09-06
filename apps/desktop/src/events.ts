@@ -4,6 +4,7 @@ import {
   agents,
   audit,
   errorMessage,
+  native,
   pending,
   rules,
   servers,
@@ -23,7 +24,7 @@ export async function loadAll(): Promise<void> {
       api.listPending(),
       api.listSignins(),
       api.listRules(),
-      api.listAudit(20),
+      api.listAudit(60),
     ]);
     status.value = st;
     servers.value = srv;
@@ -33,9 +34,27 @@ export async function loadAll(): Promise<void> {
     rules.value = ru;
     audit.value = au;
     errorMessage.value = null;
+    loadNativeStatus();
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : String(err);
   }
+}
+
+let nativeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Native events can arrive many times a second; one refresh every couple of seconds is plenty. */
+export function loadNativeStatus(debounce = false): void {
+  if (debounce) {
+    if (nativeTimer) return;
+    nativeTimer = setTimeout(() => {
+      nativeTimer = null;
+      loadNativeStatus();
+    }, 2000);
+    return;
+  }
+  api.getNativeStatus().then((st) => (native.value = st)).catch(() => {
+    // Optional in dev; the panel works without it.
+  });
 }
 
 export async function loadUpdateStatus(): Promise<void> {
@@ -81,7 +100,8 @@ export async function subscribeEvents(): Promise<() => void> {
         status.value = await api.getStatus();
         break;
       case "audit":
-        audit.value = [payload.data, ...audit.value].slice(0, 20);
+        audit.value = [payload.data, ...audit.value].slice(0, 60);
+        if (payload.data.native) loadNativeStatus(true);
         break;
       case "rules_changed":
         rules.value = await api.listRules();
@@ -105,6 +125,7 @@ export async function subscribeEvents(): Promise<() => void> {
         break;
       case "settings_changed":
         status.value = await api.getStatus();
+        loadNativeStatus();
         break;
       default:
         break;

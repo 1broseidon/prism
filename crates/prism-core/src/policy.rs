@@ -203,6 +203,7 @@ mod tests {
             posture,
             attention: Attention::Silent,
             client_id: None,
+            host: None,
         }
     }
 

@@ -3,7 +3,9 @@ import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { errorMessage, status, update, updateProgress } from "../state";
 import type { Settings, UpdateStatus } from "../types";
-import { Button, Label, Screen, Segmented, Switch, describeError } from "../ui";
+import { Button, Chip, Label, Screen, Segmented, Switch, describeError } from "../ui";
+import { native, push } from "../state";
+import { loadNativeStatus } from "../events";
 
 const RELEASES_URL = "https://github.com/1broseidon/prism/releases/latest";
 const releaseUrl = (version: string) => `https://github.com/1broseidon/prism/releases/tag/v${version}`;
@@ -155,6 +157,62 @@ function UpdatesSection() {
 }
 
 /** Operator-level knobs. Every control saves as soon as it changes. */
+function NativeSection() {
+  const st = native.value;
+  const [exported, setExported] = useState<string | null>(null);
+  const toggle = async (on: boolean) => {
+    try {
+      await api.setObserveNative(on);
+      loadNativeStatus();
+    } catch (err) {
+      errorMessage.value = describeError(err);
+    }
+  };
+  const exportReport = async () => {
+    try {
+      setExported(await api.exportNativeReport());
+    } catch (err) {
+      errorMessage.value = describeError(err);
+    }
+  };
+  return (
+    <section class="section">
+      <Label right={st?.last_event_at ? <Chip tone="ok">observed</Chip> : <Chip>MCP only</Chip>}>Native actions</Label>
+      <div class="list">
+        <div class="setting">
+          <div>
+            <div class="setting-title">Observe native actions</div>
+            <div class="hint">Record what Claude Code does outside MCP: commands, files, fetches. Nothing is held or changed.</div>
+          </div>
+          <Switch label="Observe native actions" checked={st?.observe_native ?? true} onChange={(v) => void toggle(v)} />
+        </div>
+        <div class="setting">
+          <div>
+            <div class="setting-title">This week</div>
+            <div class="hint">
+              {st ? (
+                <>
+                  <b>{st.actions_7d}</b> native actions seen. The deny list would have asked about <b>{st.would_hold_7d}</b>
+                  {st.by_reason.length ? ` (${st.by_reason.map((r) => `${r.reason.replace(/_/g, " ")} ${r.count}`).join(", ")})` : ""}.
+                </>
+              ) : (
+                "Not loaded."
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="actions update-actions">
+        <Button onClick={() => push({ kind: "host", agentId: "host:claude-code" })}>Set up Claude Code</Button>
+        <Button variant="quiet" onClick={() => void exportReport()}>
+          Export would-ask entries
+        </Button>
+      </div>
+      {exported ? <p class="hint">Saved to {exported}</p> : null}
+    </section>
+  );
+}
+
 export function SettingsScreen() {
   const [settings, setSettings] = useState<Settings | null>(null);
 
@@ -266,6 +324,7 @@ export function SettingsScreen() {
             </label>
           </div>
         </section>
+        <NativeSection />
         <UpdatesSection />
       </Screen>
     </div>

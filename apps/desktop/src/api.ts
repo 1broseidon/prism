@@ -16,6 +16,8 @@ import type {
   Decision,
   Attention,
   GatewayStatus,
+  HookInstallResult,
+  NativeStatus,
   NewRule,
   PendingCall,
   PendingSignIn,
@@ -144,4 +146,29 @@ export function checkUpdate() {
 
 export function installUpdate() {
   return invoke<void>("install_update");
+}
+
+export function getNativeStatus() {
+  return invoke<NativeStatus>("get_native_status");
+}
+
+export function setObserveNative(on: boolean) {
+  return invoke<void>("set_observe_native", { on });
+}
+
+export function rotateHookToken() {
+  return invoke<void>("rotate_hook_token");
+}
+
+export function getClaudeHookSnippet() {
+  return invoke<string>("get_claude_hook_snippet");
+}
+
+export function installClaudeHook() {
+  return invoke<HookInstallResult>("install_claude_hook");
+}
+
+/** Writes the would-have-asked entries to Downloads and returns the path. */
+export function exportNativeReport() {
+  return invoke<string>("export_native_report");
 }

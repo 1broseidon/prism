@@ -85,6 +85,10 @@ pub struct AgentConfig {
     /// The OAuth client this agent signs in as; absent for manually configured agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Set for an agent host observed through its hooks (`claude-code`). Such agents never hold
+    /// a token or an MCP session; their record exists for the coverage label and the feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// An OAuth client registered dynamically (RFC 7591). Registration is open; it grants
@@ -230,6 +234,10 @@ pub struct PrismConfig {
     /// How long a held call waits for a human.
     #[serde(default = "default_hold_timeout_secs")]
     pub hold_timeout_secs: u64,
+    /// Record native actions reported by agent hosts' hooks. Off keeps the hook route answering
+    /// but writes nothing.
+    #[serde(default = "default_true")]
+    pub observe_native: bool,
     #[serde(default)]
     pub clients: Vec<OAuthClient>,
     #[serde(default)]
@@ -262,6 +270,7 @@ impl Default for PrismConfig {
             do_not_disturb: false,
             rate_limit_per_minute: None,
             hold_timeout_secs: default_hold_timeout_secs(),
+            observe_native: true,
             clients: Vec::new(),
             tokens: Vec::new(),
         }
@@ -348,6 +357,7 @@ impl PrismConfig {
             posture: Posture::default(),
             attention: Attention::default(),
             client_id: Some(client.client_id.clone()),
+            host: None,
         };
         self.agents.push(agent.clone());
         (agent, true)
@@ -380,6 +390,7 @@ mod tests {
         let original = PrismConfig {
             listen_port: 9099,
             auto_open_on_pending: false,
+            observe_native: true,
             panel_anchor: PanelAnchor::BottomLeft,
             servers: vec![ServerConfig {
                 id: "srv-1".into(),
@@ -401,6 +412,7 @@ mod tests {
                 posture: Posture::Guided,
                 attention: Attention::Notify,
                 client_id: None,
+                host: None,
             }],
             rules: vec![
                 Rule {

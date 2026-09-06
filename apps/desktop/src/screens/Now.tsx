@@ -1,9 +1,9 @@
 import { useEffect } from "preact/hooks";
 import * as api from "../api";
-import { agents, audit, errorMessage, pending, signins, status } from "../state";
+import { agents, audit, errorMessage, feedFilter, pending, signins, status } from "../state";
 import { clock, mmss, now, relative, secondsUntil } from "../time";
 import type { AgentConfig, AuditEntry, Decision, PendingCall, PendingSignIn } from "../types";
-import { Button, CodeBlock, Empty, Label, Screen, describeError } from "../ui";
+import { Button, CodeBlock, Empty, Label, Screen, Segmented, describeError } from "../ui";
 
 /** Fallback when a call carries no deadline; mirrors DEFAULT_HOLD_TIMEOUT in prism-core. */
 const HOLD_SECONDS = 120;
@@ -192,9 +192,34 @@ function sourceText(entry: AuditEntry): string {
       return entry.source.posture.replace("_", " ");
     case "do_not_disturb":
       return "dnd";
+    case "observed":
+      return "seen";
     default:
       return "timeout";
   }
+}
+
+/** The tool as a short label. Claude Code's names are already short; MCP tools drop the server. */
+function nativeTool(entry: AuditEntry): string {
+  const t = entry.tool;
+  if (t.startsWith("mcp__")) return t.split("__").slice(2).join("__") || t;
+  return t;
+}
+
+function NativeRow({ entry }: { entry: AuditEntry }) {
+  const n = entry.native!;
+  const reason = n.would_hold ? `Would have asked: ${n.would_hold.replace(/_/g, " ")}` : undefined;
+  return (
+    <div class={`row native ${n.would_hold ? "would-hold" : ""}`} title={reason}>
+      <time dateTime={entry.at}>{clock(entry.at)}</time>
+      <span class="who">
+        <span class={`dot ${n.would_hold ? "accent" : ""}`} />
+        <b>{nativeTool(entry)}</b>
+        <span class="subject">{n.subject}</span>
+      </span>
+      <span class="src">{n.would_hold ? "would ask" : entry.agent_name.toLowerCase()}</span>
+    </div>
+  );
 }
 
 export function NowScreen() {
@@ -202,6 +227,11 @@ export function NowScreen() {
   const calls = pending.value;
   const requests = agents.value.filter((a) => a.status === "pending");
   const logins = signins.value;
+  const filter = feedFilter.value;
+  const visible = audit.value
+    .filter((e) => !(e.native?.via_prism))
+    .filter((e) => (filter === "all" ? true : filter === "native" ? !!e.native : !e.native))
+    .slice(0, 40);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -261,10 +291,25 @@ export function NowScreen() {
         >
           Recent
         </Label>
-        {audit.value.length === 0 ? (
+        {audit.value.some((e) => e.native) ? (
+          <Segmented
+            small
+            label="Feed filter"
+            value={feedFilter.value}
+            options={[
+              { value: "all", label: "All" },
+              { value: "mcp", label: "MCP" },
+              { value: "native", label: "Native" },
+            ]}
+            onChange={(v) => (feedFilter.value = v)}
+          />
+        ) : null}
+        {visible.length === 0 ? (
           <div class="muted small">No calls yet.</div>
         ) : (
-          audit.value.map((entry) => (
+          visible.map((entry) => entry.native ? (
+            <NativeRow key={entry.id} entry={entry} />
+          ) : (
             <div class="row" key={entry.id}>
               <time dateTime={entry.at}>{clock(entry.at)}</time>
               <span class="who">

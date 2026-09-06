@@ -13,7 +13,9 @@ use crate::config::{Attention, Posture};
 use crate::error::Result;
 use crate::events::{EventSender, GatewayEvent};
 
-const RING_CAP: usize = 1000;
+// Native actions arrive by the hundreds an hour; the ring must hold a day of them without
+// pushing MCP entries out. The file, rotation and retention are unchanged.
+const RING_CAP: usize = 5000;
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 const ARCHIVES: usize = 3;
 const RETENTION_DAYS: i64 = 30;
@@ -47,6 +49,28 @@ pub enum AuditSource {
     },
     /// Do-not-disturb was on, so the call resolved by the timeout behaviour without a hold.
     DoNotDisturb,
+    /// A native action reported by an agent host's hook. Recorded, never decided.
+    Observed,
+}
+
+/// What the record keeps about a native action beyond the tool name. `subject` is one redacted
+/// line (a command, a path, an origin); the raw tool input is never stored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeDetail {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub subject: String,
+    /// Shadow deny-list rule id this action would have tripped. Nothing was held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub would_hold: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// An MCP tool Prism itself serves, seen again through the host's hook.
+    #[serde(default)]
+    pub via_prism: bool,
 }
 
 /// One audited tool-call attempt.
@@ -65,6 +89,9 @@ pub struct AuditEntry {
     /// How loudly the desktop should surface this entry. Silent for anything a human already saw.
     #[serde(default)]
     pub attention: Attention,
+    /// Present for native actions observed through a host hook; absent for MCP calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeDetail>,
 }
 
 /// In-memory ring plus private, redacted, size- and age-bounded JSONL files.
@@ -100,6 +127,22 @@ fn sanitize(entry: &mut AuditEntry) {
         &mut entry.server_id,
     ] {
         *value = value.chars().take(512).collect();
+    }
+    if let Some(native) = entry.native.as_mut() {
+        for value in [&mut native.host, &mut native.subject] {
+            *value = value.chars().take(512).collect();
+        }
+        for value in [
+            &mut native.session,
+            &mut native.cwd,
+            &mut native.would_hold,
+            &mut native.agent_type,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *value = value.chars().take(512).collect();
+        }
     }
 }
 
@@ -187,16 +230,38 @@ fn rotate(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Refill the ring from the current file so the feed and the weekly counts survive a restart.
+/// Only the live file is read; `maintain` has already dropped expired and oversized lines.
+fn preload(path: &Path) -> VecDeque<AuditEntry> {
+    let mut ring = VecDeque::with_capacity(RING_CAP);
+    let Ok(file) = crate::storage::read(path) else {
+        return ring;
+    };
+    for line in BufReader::new(file).lines().map_while(|l| l.ok()) {
+        if line.len() > MAX_RECORD_BYTES {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<AuditEntry>(&line) {
+            if ring.len() == RING_CAP {
+                ring.pop_front();
+            }
+            ring.push_back(entry);
+        }
+    }
+    ring
+}
+
 impl AuditLog {
     pub fn new(path: impl AsRef<Path>, events: EventSender) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         crate::storage::prepare(&path)?;
         maintain(&path)?;
+        let ring = preload(&path);
         let file = crate::storage::append(&path)?;
         let bytes = file.metadata()?.len();
         Ok(Self {
             path,
-            ring: Mutex::new(VecDeque::with_capacity(RING_CAP)),
+            ring: Mutex::new(ring),
             writer: Mutex::new(AuditWriter {
                 file: Some(file),
                 bytes,
@@ -304,7 +369,23 @@ mod tests {
             duration_ms: 1,
             error: Some("Bearer secret-token password=hidden".into()),
             attention: Attention::Silent,
+            native: None,
         }
+    }
+
+    #[test]
+    fn reopening_refills_the_ring_from_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let (events, _) = crate::events::channel();
+        {
+            let audit = AuditLog::new(&path, events.clone()).unwrap();
+            audit.record(entry(Utc::now() - chrono::Duration::minutes(2), "older"));
+            audit.record(entry(Utc::now(), "newer"));
+        }
+        let audit = AuditLog::new(&path, events).unwrap();
+        let ids: Vec<String> = audit.list(10).into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["newer".to_string(), "older".to_string()]);
     }
 
     #[test]
