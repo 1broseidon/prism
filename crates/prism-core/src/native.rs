@@ -23,8 +23,10 @@ use tracing::warn;
 
 use crate::gateway::Gateway;
 
-/// Host id for Claude Code; also the suffix of its agent record id.
+/// Host ids; each is also the suffix of the host's agent record id (`host:<id>`).
 pub const HOST_CLAUDE_CODE: &str = "claude-code";
+pub const HOST_CODEX: &str = "codex";
+pub const HOSTS: &[&str] = &[HOST_CLAUDE_CODE, HOST_CODEX];
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 const SUBJECT_MAX_CHARS: usize = 240;
 const EVENTS_PER_MINUTE: usize = 1000;
@@ -57,13 +59,23 @@ pub struct ShadowRule {
 /// What the panel needs for the Agents coverage label and the Settings "This week" line.
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeStatus {
-    pub hook_url: String,
     pub observe_native: bool,
+    /// Most recent event across hosts.
     pub last_event_at: Option<DateTime<Utc>>,
     pub actions_7d: usize,
     pub would_hold_7d: usize,
     pub by_reason: Vec<ReasonCount>,
     pub rules: Vec<ShadowRule>,
+    pub hosts: Vec<HostStatus>,
+}
+
+/// One host's share of the record.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostStatus {
+    pub host: String,
+    pub hook_url: String,
+    pub last_event_at: Option<DateTime<Utc>>,
+    pub actions_7d: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,23 +111,26 @@ impl EventBudget {
 
 pub(crate) fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
-        .route("/hooks/claude-code/{token}", post(claude_code_hook))
+        .route("/hooks/{host}/{token}", post(host_hook))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(gateway)
 }
 
-async fn claude_code_hook(
+async fn host_hook(
     State(gateway): State<Arc<Gateway>>,
-    RoutePath(token): RoutePath<String>,
+    RoutePath((host, token)): RoutePath<(String, String)>,
     body: Result<Json<HookEvent>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    let Some(host) = HOSTS.iter().copied().find(|h| *h == host) else {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    };
     if !gateway.hook_token_matches(&token) {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let Ok(Json(event)) = body else {
         return (StatusCode::BAD_REQUEST, "").into_response();
     };
-    match gateway.record_native(HOST_CLAUDE_CODE, event).await {
+    match gateway.record_native(host, event).await {
         Ok(()) => Json(serde_json::json!({})).into_response(),
         Err(crate::Error::NotFound(_)) => (StatusCode::FORBIDDEN, "").into_response(),
         Err(err) => {
@@ -148,17 +163,59 @@ fn str_field<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(Value::as_str)
 }
 
+/// The shell command as one line. Codex may send `command` as an argv array.
+fn command_text(input: &Value) -> Option<String> {
+    match input.get("command")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        _ => None,
+    }
+}
+
+/// File paths named by an `apply_patch` body: the `*** Add/Update/Delete File:` headers only.
+/// The patch content itself is never kept.
+pub fn patch_paths(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+        })
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 /// The one line the record keeps about an action. Never the raw input.
 pub fn subject(tool: &str, input: &Value, cwd: Option<&Path>, home: Option<&Path>) -> String {
     let text = match tool {
-        "Bash" => str_field(input, "command").map(redact).unwrap_or_default(),
+        "Bash" | "shell" | "local_shell" | "exec_command" => {
+            command_text(input).map(|c| redact(&c)).unwrap_or_default()
+        }
+        "apply_patch" => command_text(input)
+            .map(|body| {
+                patch_paths(&body)
+                    .iter()
+                    .map(|p| display_path(p, cwd, home))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default(),
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => str_field(input, "file_path")
             .or_else(|| str_field(input, "notebook_path"))
-            .map(|p| display_path(p, home))
+            .map(|p| display_path(p, cwd, home))
             .unwrap_or_default(),
         "Glob" | "Grep" => str_field(input, "path")
-            .map(|p| display_path(p, home))
-            .or_else(|| cwd.map(|c| display_path(&c.to_string_lossy(), home)))
+            .map(|p| display_path(p, cwd, home))
+            .or_else(|| cwd.map(|c| display_path(&c.to_string_lossy(), None, home)))
             .unwrap_or_default(),
         "WebFetch" => str_field(input, "url").map(origin_of).unwrap_or_default(),
         "WebSearch" => "web search".to_string(),
@@ -181,7 +238,15 @@ fn cap(text: &str, max: usize) -> String {
     out
 }
 
-fn display_path(path: &str, home: Option<&Path>) -> String {
+fn display_path(path: &str, cwd: Option<&Path>, home: Option<&Path>) -> String {
+    if let Some(cwd) = cwd {
+        if let Ok(rest) = Path::new(path).strip_prefix(cwd) {
+            let rest = rest.to_string_lossy();
+            if !rest.is_empty() {
+                return rest.into_owned();
+            }
+        }
+    }
     if let Some(home) = home {
         if let Ok(rest) = Path::new(path).strip_prefix(home) {
             let rest = rest.to_string_lossy();
@@ -294,9 +359,21 @@ pub mod shadow {
         home: Option<&Path>,
     ) -> Option<&'static str> {
         match tool {
-            "Bash" => {
-                let command = str_field(input, "command")?;
-                evaluate_command(command, cwd, home)
+            "Bash" | "shell" | "local_shell" | "exec_command" => {
+                let command = command_text(input)?;
+                evaluate_command(&command, cwd, home)
+            }
+            "apply_patch" => {
+                let body = command_text(input)?;
+                let mut outside = false;
+                for raw in patch_paths(&body) {
+                    let path = resolve(&raw, cwd, home);
+                    if is_sensitive_write(&path, home) {
+                        return Some("sensitive_write");
+                    }
+                    outside |= is_outside_cwd(&path, cwd) && !is_temp(&path);
+                }
+                outside.then_some("write_outside_cwd")
             }
             "Read" => {
                 let path = resolve(str_field(input, "file_path")?, cwd, home);
@@ -561,7 +638,7 @@ mod tests {
                 "Write",
                 serde_json::json!({"file_path": "/home/u/proj/a.rs"})
             ),
-            "~/proj/a.rs"
+            "a.rs"
         );
         assert_eq!(
             s("Read", serde_json::json!({"file_path": "/etc/hosts"})),
@@ -696,6 +773,53 @@ mod tests {
             Some("sensitive_write")
         );
         assert_eq!(file("Write", "/home/u/proj/.zshrc"), None);
+    }
+
+    #[test]
+    fn codex_shapes() {
+        let s = |tool: &str, input: Value| subject(tool, &input, Some(&cwd()), Some(&home()));
+        let e =
+            |tool: &str, input: Value| shadow::evaluate(tool, &input, Some(&cwd()), Some(&home()));
+        assert_eq!(
+            s(
+                "Bash",
+                serde_json::json!({"command": ["bash", "-lc", "ls -la"]})
+            ),
+            "bash -lc ls -la"
+        );
+        let patch = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-a\n+b\n*** Add File: /home/u/.zshrc\n+export X=1\n*** End Patch";
+        assert_eq!(
+            s("apply_patch", serde_json::json!({"command": patch})),
+            "src/main.rs, ~/.zshrc"
+        );
+        let absolute = format!(
+            "*** Begin Patch\n*** Update File: {}/notes.txt\n*** End Patch",
+            cwd().display()
+        );
+        assert_eq!(
+            s("apply_patch", serde_json::json!({"command": absolute})),
+            "notes.txt"
+        );
+        let inside_cwd = serde_json::json!({"file_path": cwd().join("src/x.rs")});
+        assert_eq!(s("Write", inside_cwd), "src/x.rs");
+        assert_eq!(
+            e("apply_patch", serde_json::json!({"command": patch})),
+            Some("sensitive_write")
+        );
+        let outside = "*** Begin Patch\n*** Update File: ../other/x.rs\n*** End Patch";
+        assert_eq!(
+            e("apply_patch", serde_json::json!({"command": outside})),
+            Some("write_outside_cwd")
+        );
+        let inside = "*** Begin Patch\n*** Update File: src/x.rs\n*** End Patch";
+        assert_eq!(
+            e("apply_patch", serde_json::json!({"command": inside})),
+            None
+        );
+        assert_eq!(
+            e("Bash", serde_json::json!({"command": ["sudo", "ls"]})),
+            Some("sudo")
+        );
     }
 
     #[test]

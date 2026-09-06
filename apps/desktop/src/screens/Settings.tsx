@@ -203,7 +203,8 @@ function NativeSection() {
         </div>
       </div>
       <div class="actions update-actions">
-        <Button onClick={() => push({ kind: "host", agentId: "host:claude-code" })}>Set up Claude Code</Button>
+        <Button onClick={() => push({ kind: "host", agentId: "host:claude-code" })}>Claude Code</Button>
+        <Button onClick={() => push({ kind: "host", agentId: "host:codex" })}>Codex</Button>
         <Button variant="quiet" onClick={() => void exportReport()}>
           Export would-ask entries
         </Button>

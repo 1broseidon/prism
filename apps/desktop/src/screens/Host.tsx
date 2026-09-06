@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { loadNativeStatus } from "../events";
+import { hostOf, hostSetup, hostStatus } from "../hosts";
 import { agents, errorMessage, native, status } from "../state";
 import { relative } from "../time";
 import { Button, Chip, CodeBlock, Label, Screen, describeError } from "../ui";
@@ -8,15 +9,24 @@ import { Button, Chip, CodeBlock, Label, Screen, describeError } from "../ui";
 /** One agent host: how to connect its hooks, whether they are talking, and what is being recorded. */
 export function HostScreen({ agentId }: { agentId: string }) {
   const agent = agents.value.find((a) => a.id === agentId);
+  const known = hostOf(agentId);
+  const host = known?.host ?? agent?.host ?? "";
+  const name = known?.name ?? agent?.name ?? "This host";
   const st = native.value;
+  const hs = hostStatus(st, host);
+  const setup = hostSetup(st, host);
   const [snippet, setSnippet] = useState<string>("");
   const [wrote, setWrote] = useState<{ path: string; backup: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.getClaudeHookSnippet().then(setSnippet).catch(() => setSnippet(""));
+    if (!host) return;
+    api
+      .getHostHookSnippet(host)
+      .then(setSnippet)
+      .catch(() => setSnippet(""));
     loadNativeStatus();
-  }, [st?.hook_url]);
+  }, [host, hs?.hook_url]);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -32,7 +42,7 @@ export function HostScreen({ agentId }: { agentId: string }) {
 
   const install = () =>
     run(async () => {
-      setWrote(await api.installClaudeHook());
+      setWrote(await api.installHostHook(host));
     });
   const rotate = () =>
     run(async () => {
@@ -47,12 +57,21 @@ export function HostScreen({ agentId }: { agentId: string }) {
     });
 
   const revoked = agent?.status === "denied";
+  const installed = setup?.hook_installed ?? false;
   const coverage = revoked ? (
     <Chip tone="danger">revoked</Chip>
-  ) : st?.observe_native && st.last_event_at ? (
+  ) : st?.observe_native && hs?.last_event_at ? (
     <Chip tone="ok">observed</Chip>
   ) : (
     <Chip>MCP only</Chip>
+  );
+  const isCodex = host === "codex";
+  const defaultPath = isCodex ? "~/.codex/hooks.json" : "~/.claude/settings.json";
+  const needsReview = installed && setup?.hook_trusted === false;
+  const hookChip = !installed ? null : needsReview ? (
+    <Chip tone="warn">review in Codex</Chip>
+  ) : (
+    <Chip tone="ok">installed</Chip>
   );
 
   return (
@@ -63,23 +82,26 @@ export function HostScreen({ agentId }: { agentId: string }) {
           <p class="hint">
             {revoked
               ? "Prism refuses this host's hook events. Restore it to start recording again."
-              : st?.last_event_at
-                ? `Recording. Last action ${relative(st.last_event_at)}, ${st.actions_7d} this week. Nothing is held or changed; Claude Code's own permissions still apply.`
-                : st?.hook_installed
-                  ? "The hook is in place. The first action Claude Code takes will show up in the Now feed."
+              : hs?.last_event_at
+                ? `Recording. Last action ${relative(hs.last_event_at)}, ${hs.actions_7d} this week. Nothing is held or changed; ${name}'s own permissions still apply.`
+                : needsReview
+                  ? "The hook is written but Codex has not run it yet. Codex reviews new hooks: open /hooks in a Codex session and trust the Prism entry. Until then Codex skips it."
+                  : installed
+                    ? `The hook is in place. The first action ${name} takes will show up in the Now feed.`
                   : "Only MCP calls through Prism are visible. Add the hook below and every command, file edit and fetch is recorded too."}
           </p>
         </section>
 
         <section class="section">
-          <Label right={st?.hook_installed ? <Chip tone="ok">installed</Chip> : null}>Hook</Label>
+          <Label right={hookChip}>Hook</Label>
           <p class="hint">
-            Claude Code posts each action to Prism before it runs and carries on regardless of the answer. Prism
-            keeps one line per action, redacted; never the raw input.
+            {isCodex
+              ? "Codex runs a one-line curl before each tool call, bounded to a few milliseconds on loopback, and carries on regardless of the answer. Prism keeps one line per action, redacted; never the raw input or the patch text."
+              : "Claude Code posts each action to Prism before it runs and carries on regardless of the answer. Prism keeps one line per action, redacted; never the raw input."}
           </p>
           <div class="actions update-actions">
             <Button variant="primary" busy={busy} onClick={() => void install()}>
-              {st?.hook_installed ? "Rewrite the hook" : "Write it for me"}
+              {installed ? "Rewrite the hook" : "Write it for me"}
             </Button>
             <Button variant="quiet" busy={busy} onClick={() => void rotate()}>
               Rotate token
@@ -88,11 +110,15 @@ export function HostScreen({ agentId }: { agentId: string }) {
           {wrote ? (
             <p class="hint">
               Written to {wrote.path}
-              {wrote.backup ? `, previous file kept as ${wrote.backup}` : ""}. Running Claude Code sessions pick
-              it up on their next action.
+              {wrote.backup ? `, previous file kept as ${wrote.backup}` : ""}.{" "}
+              {isCodex
+                ? "Codex asks you to review new hooks: open /hooks in your next Codex session and trust the Prism entry."
+                : `Running ${name} sessions pick it up on their next action.`}
             </p>
           ) : (
-            <p class="hint">Merges into {st?.settings_path ?? "~/.claude/settings.json"} and keeps a backup. Or paste this yourself:</p>
+            <p class="hint">
+              Merges into {setup?.settings_path ?? defaultPath} and keeps a backup. Or paste this yourself:
+            </p>
           )}
           <CodeBlock text={snippet} copyable emptyText="Loading…" />
         </section>
@@ -131,7 +157,7 @@ export function HostScreen({ agentId }: { agentId: string }) {
             )}
           </div>
           <p class="hint">
-            Coverage depends on Claude Code honouring its own hooks. Prism shows what it can see and never claims
+            Coverage depends on {name} honouring its own hooks. Prism shows what it can see and never claims
             more; it does not sandbox anything.
           </p>
         </section>

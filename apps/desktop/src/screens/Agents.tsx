@@ -1,5 +1,6 @@
 import * as api from "../api";
 import { agents, errorMessage, native, push, status } from "../state";
+import { HOSTS, hostSetup, hostStatus, placeholderHost } from "../hosts";
 import { postureLabel } from "../policy";
 import { relative } from "../time";
 import type { AgentConfig } from "../types";
@@ -65,19 +66,22 @@ function AgentRow({ agent }: { agent: AgentConfig }) {
 /** Coverage in one word. Enforced arrives with phase 2; nothing claims it yet. */
 export function coverageChip(agent: AgentConfig) {
   const st = native.value;
+  const hs = hostStatus(st, agent.host ?? "");
   if (agent.status === "denied") return <Chip tone="danger">revoked</Chip>;
-  if (st?.observe_native && st.last_event_at) return <Chip tone="ok">observed</Chip>;
+  if (st?.observe_native && hs?.last_event_at) return <Chip tone="ok">observed</Chip>;
   return <Chip>MCP only</Chip>;
 }
 
 function HostRow({ agent }: { agent: AgentConfig }) {
   const st = native.value;
+  const hs = hostStatus(st, agent.host ?? "");
+  const setup = hostSetup(st, agent.host ?? "");
   const sub =
     agent.status === "denied"
       ? "Its hook events are refused"
-      : st?.last_event_at
-        ? `Last action ${relative(st.last_event_at)} · ${st.actions_7d} this week`
-        : st?.hook_installed
+      : hs?.last_event_at
+        ? `Last action ${relative(hs.last_event_at)} · ${hs.actions_7d} this week`
+        : setup?.hook_installed
           ? "Hook installed · waiting for the first action"
           : "Set up the hook to see what it does";
   return (
@@ -95,29 +99,10 @@ function HostRow({ agent }: { agent: AgentConfig }) {
   );
 }
 
-/** The hosts Prism knows how to observe, whether or not they have reported yet. */
-const HOSTS = [{ id: "host:claude-code", name: "Claude Code", host: "claude-code" }];
-
 export function AgentsScreen() {
   const all = agents.value;
   const list = all.filter((a) => !a.host);
-  const hosts = HOSTS.map(
-    (h) =>
-      all.find((a) => a.id === h.id) ?? {
-        id: h.id,
-        name: h.name,
-        client_name: h.host,
-        client_version: null,
-        status: "approved" as const,
-        created_at: new Date(0).toISOString(),
-        decided_at: null,
-        posture: "trusted" as const,
-        attention: "silent" as const,
-        host: h.host,
-        connected: false,
-        tokens: [],
-      },
-  );
+  const hosts = HOSTS.map((h) => all.find((a) => a.id === h.id) ?? placeholderHost(h));
 
   return (
     <div class="screen">

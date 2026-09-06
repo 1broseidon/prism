@@ -60,6 +60,7 @@ if (hashScreen === "add" && tab.value === "servers") stack.value = [{ kind: "add
 if (hashScreen === "connect" && tab.value === "agents") stack.value = [{ kind: "connect-agent" }];
 if (hashScreen === "settings") stack.value = [{ kind: "settings" }];
 if (hashScreen === "host") stack.value = [{ kind: "host", agentId: "host:claude-code" }];
+if (hashScreen === "host-codex") stack.value = [{ kind: "host", agentId: "host:codex" }];
 if (hashScreen && hashScreen.startsWith("a") && tab.value === "agents" && hashScreen !== "connect") {
   const [agentId, serverId] = hashScreen.split(":");
   stack.value = serverId ? [{ kind: "agent", agentId }, { kind: "agent-server", agentId, serverId }] : [{ kind: "agent", agentId }];

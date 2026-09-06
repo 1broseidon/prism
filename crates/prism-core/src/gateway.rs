@@ -134,7 +134,7 @@ pub struct Gateway {
     hook_token: std::sync::RwLock<String>,
     hook_token_path: PathBuf,
     native_budget: std::sync::Mutex<crate::native::EventBudget>,
-    native_last: std::sync::Mutex<Option<chrono::DateTime<Utc>>>,
+    native_last: std::sync::Mutex<HashMap<String, chrono::DateTime<Utc>>>,
 }
 
 impl Gateway {
@@ -214,7 +214,7 @@ impl Gateway {
             hook_token: std::sync::RwLock::new(hook_token),
             hook_token_path,
             native_budget: std::sync::Mutex::new(Default::default()),
-            native_last: std::sync::Mutex::new(None),
+            native_last: std::sync::Mutex::new(HashMap::new()),
         });
 
         for server in config.servers.into_iter().filter(|s| s.enabled) {
@@ -757,7 +757,13 @@ impl Gateway {
         let observe_native = self.config.read().await.observe_native;
         let cutoff = Utc::now() - chrono::Duration::days(7);
         let mut actions = 0usize;
+        let mut per_host: HashMap<String, usize> = HashMap::new();
         let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut last = self
+            .native_last
+            .lock()
+            .map(|l| l.clone())
+            .unwrap_or_default();
         for entry in self.audit.list(usize::MAX) {
             let Some(native) = entry.native.as_ref() else {
                 continue;
@@ -766,23 +772,35 @@ impl Gateway {
                 continue;
             }
             actions += 1;
+            *per_host.entry(native.host.clone()).or_default() += 1;
+            let seen = last.entry(native.host.clone()).or_insert(entry.at);
+            *seen = (*seen).max(entry.at);
             if let Some(reason) = &native.would_hold {
                 *counts.entry(reason.clone()).or_default() += 1;
             }
         }
+        let hosts = crate::native::HOSTS
+            .iter()
+            .map(|host| crate::native::HostStatus {
+                host: host.to_string(),
+                hook_url: self.hook_url(host),
+                last_event_at: last.get(*host).copied(),
+                actions_7d: per_host.get(*host).copied().unwrap_or(0),
+            })
+            .collect();
         let mut by_reason: Vec<crate::native::ReasonCount> = counts
             .into_iter()
             .map(|(reason, count)| crate::native::ReasonCount { reason, count })
             .collect();
         by_reason.sort_by(|a, b| b.count.cmp(&a.count).then(a.reason.cmp(&b.reason)));
         crate::native::NativeStatus {
-            hook_url: self.hook_url(crate::native::HOST_CLAUDE_CODE),
             observe_native,
-            last_event_at: self.native_last.lock().ok().and_then(|l| *l),
+            last_event_at: last.values().max().copied(),
             actions_7d: actions,
             would_hold_7d: by_reason.iter().map(|r| r.count).sum(),
             by_reason,
             rules: crate::native::shadow::RULES.to_vec(),
+            hosts,
         }
     }
 
@@ -888,7 +906,7 @@ impl Gateway {
             false
         };
         if let Ok(mut last) = self.native_last.lock() {
-            *last = Some(now);
+            last.insert(host.to_string(), now);
         }
         self.audit.record(AuditEntry {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1583,6 +1601,7 @@ fn rule_summary(rule: &Rule) -> String {
 fn host_display_name(host: &str) -> String {
     match host {
         crate::native::HOST_CLAUDE_CODE => "Claude Code".into(),
+        crate::native::HOST_CODEX => "Codex".into(),
         other => other.into(),
     }
 }

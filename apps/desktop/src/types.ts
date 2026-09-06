@@ -188,17 +188,31 @@ export interface ShadowRule {
   summary: string;
 }
 
-export interface NativeStatus {
+export interface HostStatus {
+  host: string;
   hook_url: string;
+  last_event_at: string | null;
+  actions_7d: number;
+}
+
+/** Desktop only: where a host's user-level hooks file lives and whether the current hook URL is in it. */
+export interface HostSetup {
+  host: string;
+  settings_path: string;
+  hook_installed: boolean;
+  /** Codex only: it reviews new hooks in `/hooks` and skips them until trusted. Null for hosts without that step. */
+  hook_trusted: boolean | null;
+}
+
+export interface NativeStatus {
   observe_native: boolean;
   last_event_at: string | null;
   actions_7d: number;
   would_hold_7d: number;
   by_reason: { reason: string; count: number }[];
   rules: ShadowRule[];
-  /** Desktop only: where Claude Code's user settings live and whether the current hook URL is in them. */
-  settings_path: string;
-  hook_installed: boolean;
+  hosts: HostStatus[];
+  setup: HostSetup[];
 }
 
 export interface HookInstallResult {

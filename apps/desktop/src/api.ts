@@ -160,12 +160,12 @@ export function rotateHookToken() {
   return invoke<void>("rotate_hook_token");
 }
 
-export function getClaudeHookSnippet() {
-  return invoke<string>("get_claude_hook_snippet");
+export function getHostHookSnippet(host: string) {
+  return invoke<string>("get_host_hook_snippet", { host });
 }
 
-export function installClaudeHook() {
-  return invoke<HookInstallResult>("install_claude_hook");
+export function installHostHook(host: string) {
+  return invoke<HookInstallResult>("install_host_hook", { host });
 }
 
 /** Writes the would-have-asked entries to Downloads and returns the path. */

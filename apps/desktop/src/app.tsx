@@ -7,6 +7,7 @@ import { AgentToolsScreen } from "./screens/AgentTools";
 import { AgentsScreen } from "./screens/Agents";
 import { ConnectAgentScreen } from "./screens/ConnectAgent";
 import { HostScreen } from "./screens/Host";
+import { hostName } from "./hosts";
 import { NowScreen } from "./screens/Now";
 import { RulesScreen } from "./screens/Rules";
 import { ServersScreen } from "./screens/Servers";
@@ -35,7 +36,7 @@ function titleOf(screen: Screen): string {
     case "agent-server":
       return servers.value.find((s) => s.id === screen.serverId)?.name ?? "Server";
     case "host":
-      return agents.value.find((a) => a.id === screen.agentId)?.name ?? (screen.agentId === "host:claude-code" ? "Claude Code" : "Agent host");
+      return agents.value.find((a) => a.id === screen.agentId)?.name ?? hostName(screen.agentId);
   }
 }
 

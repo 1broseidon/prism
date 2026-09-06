@@ -585,14 +585,24 @@ async fn get_connect_snippet(state: State<'_, AppState>) -> Result<ConnectSnippe
 
 // ----- native actions (observe) ---------------------------------------------------------
 
-/// Core status plus what only the desktop knows: where Claude Code's settings live and whether
-/// the current hook URL is in them.
+/// Core status plus what only the desktop knows per host: where its hook file lives and
+/// whether the current hook URL is in it.
 #[derive(Serialize)]
 struct NativeStatusDto {
     #[serde(flatten)]
     status: prism_core::NativeStatus,
+    setup: Vec<HostSetupDto>,
+}
+
+#[derive(Serialize)]
+struct HostSetupDto {
+    host: String,
     settings_path: String,
     hook_installed: bool,
+    /// Codex only: whether `~/.codex/config.toml` holds a trust entry for the group the Prism hook
+    /// sits in. Codex reviews new and changed hooks in `/hooks` and skips them until trusted. The
+    /// entry is matched by position, so a rotated token still needs a fresh review.
+    hook_trusted: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -601,11 +611,46 @@ struct HookInstallResult {
     backup: Option<String>,
 }
 
-fn claude_settings_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
+fn home_path() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .ok_or_else(|| "home directory not found".to_string())?;
-    Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "home directory not found".to_string())
+}
+
+/// Where each host reads its user-level hooks from. Both files share the `{"hooks": {...}}` shape.
+fn host_settings_path(host: &str) -> Result<PathBuf, String> {
+    let home = home_path()?;
+    match host {
+        prism_core::native::HOST_CLAUDE_CODE => Ok(home.join(".claude").join("settings.json")),
+        prism_core::native::HOST_CODEX => Ok(home.join(".codex").join("hooks.json")),
+        other => Err(format!("unknown agent host {other}")),
+    }
+}
+
+/// The hook entry for one host. Claude Code posts natively; Codex has no HTTP hook type, so a
+/// one-line curl does the post. It is synchronous: Codex 0.147 skips hooks marked `async`, so the
+/// timeouts are tight instead. A loopback post is milliseconds, a stopped Prism refuses at once,
+/// and a hung one is cut off by `-m`.
+fn host_hook_entry(host: &str, url: &str) -> Result<serde_json::Value, String> {
+    match host {
+        prism_core::native::HOST_CLAUDE_CODE => Ok(serde_json::json!({
+            "type": "http", "url": url, "timeout": 5
+        })),
+        prism_core::native::HOST_CODEX => {
+            let post = |null: &str| {
+                format!("curl -s --connect-timeout 1 -m 3 -o {null} -X POST -H Content-Type:application/json --data-binary @- {url}")
+            };
+            Ok(serde_json::json!({
+                "type": "command",
+                "command": post("/dev/null"),
+                "commandWindows": post("NUL").replacen("curl ", "curl.exe ", 1),
+                "timeout": 5,
+                "statusMessage": "Prism"
+            }))
+        }
+        other => Err(format!("unknown agent host {other}")),
+    }
 }
 
 fn read_settings_json(path: &PathBuf) -> Result<serde_json::Value, String> {
@@ -624,45 +669,98 @@ fn read_settings_json(path: &PathBuf) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
+/// Any hook that points at a Prism hook route, whatever the token: the one to replace.
 fn is_prism_hook(hook: &serde_json::Value) -> bool {
-    hook.get("type").and_then(|t| t.as_str()) == Some("http")
-        && hook
-            .get("url")
-            .and_then(|u| u.as_str())
-            .is_some_and(|u| u.contains("/hooks/claude-code/"))
+    ["url", "command", "commandWindows"].iter().any(|key| {
+        hook.get(key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v.contains("/hooks/") && v.contains("127.0.0.1"))
+    })
 }
 
-fn hook_installed(settings: &serde_json::Value, url: &str) -> bool {
+/// The index of the PreToolUse group holding the hook for `url`, if any.
+fn prism_group_index(settings: &serde_json::Value, url: &str) -> Option<usize> {
     settings
         .pointer("/hooks/PreToolUse")
-        .and_then(|v| v.as_array())
-        .is_some_and(|groups| {
-            groups.iter().any(|group| {
-                group
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .is_some_and(|hooks| {
-                        hooks.iter().any(|hook| {
-                            is_prism_hook(hook)
-                                && hook.get("url").and_then(|u| u.as_str()) == Some(url)
-                        })
+        .and_then(|v| v.as_array())?
+        .iter()
+        .position(|group| {
+            group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|hooks| {
+                    hooks.iter().any(|hook| {
+                        is_prism_hook(hook)
+                            && ["url", "command"].iter().any(|key| {
+                                hook.get(key)
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(|v| v.contains(url))
+                            })
                     })
-            })
+                })
         })
+}
+
+
+/// Codex keeps hook trust in `config.toml` as
+/// `[hooks.state."<hooks.json>:pre_tool_use:<group>:<hook>"]` with a `trusted_hash`, and
+/// `enabled = false` when the user switched it off. Read, never written: trusting is the user's
+/// review step inside Codex.
+fn codex_hook_trusted(hooks_path: &std::path::Path, group: usize) -> bool {
+    let Some(dir) = hooks_path.parent() else {
+        return false;
+    };
+    let Ok(config) = std::fs::read_to_string(dir.join("config.toml")) else {
+        return false;
+    };
+    let header = format!(
+        "[hooks.state.\"{}:pre_tool_use:{group}:0\"]",
+        hooks_path.display()
+    );
+    let mut in_section = false;
+    let mut trusted = false;
+    let mut enabled = true;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            if in_section {
+                break;
+            }
+            in_section = line == header;
+            continue;
+        }
+        if in_section {
+            if line.starts_with("trusted_hash") {
+                trusted = true;
+            } else if line.starts_with("enabled") && line.ends_with("false") {
+                enabled = false;
+            }
+        }
+    }
+    trusted && enabled
 }
 
 #[tauri::command]
 async fn get_native_status(state: State<'_, AppState>) -> Result<NativeStatusDto, String> {
     let status = state.gateway.native_status().await;
-    let path = claude_settings_path()?;
-    let installed = read_settings_json(&path)
-        .map(|settings| hook_installed(&settings, &status.hook_url))
-        .unwrap_or(false);
-    Ok(NativeStatusDto {
-        status,
-        settings_path: path.display().to_string(),
-        hook_installed: installed,
-    })
+    let mut setup = Vec::new();
+    for host in &status.hosts {
+        let path = host_settings_path(&host.host)?;
+        let group = read_settings_json(&path)
+            .ok()
+            .and_then(|settings| prism_group_index(&settings, &host.hook_url));
+        let hook_trusted = match (host.host.as_str(), group) {
+            (prism_core::native::HOST_CODEX, Some(group)) => Some(codex_hook_trusted(&path, group)),
+            (prism_core::native::HOST_CODEX, None) => Some(false),
+            _ => None,
+        };
+        setup.push(HostSetupDto {
+            host: host.host.clone(),
+            settings_path: path.display().to_string(),
+            hook_installed: group.is_some(),
+            hook_trusted,
+        });
+    }
+    Ok(NativeStatusDto { status, setup })
 }
 
 #[tauri::command]
@@ -675,32 +773,32 @@ async fn rotate_hook_token(state: State<'_, AppState>) -> Result<(), String> {
     state.gateway.rotate_hook_token().await.map_err(map_err)
 }
 
-/// The exact `hooks` entry for `~/.claude/settings.json`, for the copy button.
+/// The exact `hooks` entry for the host's file, for the copy button.
 #[tauri::command]
-async fn get_claude_hook_snippet(state: State<'_, AppState>) -> Result<String, String> {
-    let url = state.gateway.hook_url(prism_core::native::HOST_CLAUDE_CODE);
+async fn get_host_hook_snippet(state: State<'_, AppState>, host: String) -> Result<String, String> {
+    let url = state.gateway.hook_url(&host);
     let value = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [
-                { "hooks": [ { "type": "http", "url": url, "timeout": 5 } ] }
-            ]
-        }
+        "hooks": { "PreToolUse": [ { "hooks": [ host_hook_entry(&host, &url)? ] } ] }
     });
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
 }
 
-/// Merge the hook into `~/.claude/settings.json`. Every other key and every other hook is left
-/// alone; an earlier Prism hook (an old token, say) is replaced. The previous file is kept as
-/// `settings.json.bak`.
+/// Merge the hook into the host's user-level hooks file. Every other key and every other hook
+/// is left alone; an earlier Prism hook (an old token, say) is replaced. The previous file is
+/// kept beside it as `.bak`.
 #[tauri::command]
-async fn install_claude_hook(state: State<'_, AppState>) -> Result<HookInstallResult, String> {
-    let url = state.gateway.hook_url(prism_core::native::HOST_CLAUDE_CODE);
-    let path = claude_settings_path()?;
+async fn install_host_hook(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<HookInstallResult, String> {
+    let url = state.gateway.hook_url(&host);
+    let entry = host_hook_entry(&host, &url)?;
+    let path = host_settings_path(&host)?;
     let mut settings = read_settings_json(&path)?;
     let root = settings.as_object_mut().expect("object checked above");
     let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
     if !hooks.is_object() {
-        return Err("\"hooks\" in settings.json is not an object".into());
+        return Err("\"hooks\" in the hooks file is not an object".into());
     }
     let pre = hooks
         .as_object_mut()
@@ -708,7 +806,7 @@ async fn install_claude_hook(state: State<'_, AppState>) -> Result<HookInstallRe
         .entry("PreToolUse")
         .or_insert_with(|| serde_json::json!([]));
     let Some(groups) = pre.as_array_mut() else {
-        return Err("\"hooks.PreToolUse\" in settings.json is not an array".into());
+        return Err("\"hooks.PreToolUse\" in the hooks file is not an array".into());
     };
     for group in groups.iter_mut() {
         if let Some(list) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
@@ -721,9 +819,7 @@ async fn install_claude_hook(state: State<'_, AppState>) -> Result<HookInstallRe
             .and_then(|h| h.as_array())
             .is_none_or(|list| !list.is_empty())
     });
-    groups.push(serde_json::json!({
-        "hooks": [ { "type": "http", "url": url, "timeout": 5 } ]
-    }));
+    groups.push(serde_json::json!({ "hooks": [ entry ] }));
     let backup = if path.exists() {
         let bak = path.with_extension("json.bak");
         std::fs::copy(&path, &bak).map_err(|err| err.to_string())?;
@@ -1235,8 +1331,8 @@ pub fn run() {
             get_native_status,
             set_observe_native,
             rotate_hook_token,
-            get_claude_hook_snippet,
-            install_claude_hook,
+            get_host_hook_snippet,
+            install_host_hook,
             export_native_report,
         ]);
 

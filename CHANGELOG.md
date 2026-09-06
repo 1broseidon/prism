@@ -5,7 +5,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 ## [Unreleased]
 
 ### Added
-- Native actions, observed. Claude Code can post every shell command, file edit and fetch to Prism through an HTTP hook; **Agents → Claude Code** writes the hook into `~/.claude/settings.json`. Each action becomes a redacted one-line audit entry, the Now feed shows them beside MCP calls, and a short deny list runs in shadow to count what a real gate would have held. Nothing is held or changed in this phase.
+- Native actions, observed. Claude Code and Codex can report every shell command, file edit and fetch to Prism through their hooks; **Agents → Claude Code** writes an HTTP hook into `~/.claude/settings.json` and **Agents → Codex** writes a `curl` hook into `~/.codex/hooks.json`, which Codex asks you to trust in `/hooks` before it runs. Each action becomes a redacted one-line audit entry (a Codex patch is recorded by the paths it touches, never its content), the Now feed shows them beside MCP calls, and a short deny list runs in shadow to count what a real gate would have held. Nothing is held or changed in this phase.
 
 ### Fixed
 - Update notes in Settings showed raw changelog markdown. Headings, bullets, code and bold now render, and the card links to the full release notes.
