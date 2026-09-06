@@ -11,6 +11,7 @@ mod gateway;
 mod http_security;
 mod oauth;
 mod policy;
+mod shell_path;
 mod storage;
 
 pub use approval::{
@@ -33,3 +34,4 @@ pub use oauth::{
     TokenResponse, TokenView,
 };
 pub use policy::{evaluate, glob_match, Decider, Evaluation, ToolAnnotations, Verdict};
+pub use shell_path::adopt_login_shell_path;

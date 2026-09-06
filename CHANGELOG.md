@@ -4,7 +4,10 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-06
+
 ### Fixed
+- macOS and Linux: launched from the menu, Prism only saw the session PATH, so a server installed by `go install`, Homebrew, cargo or pnpm was "not found" even though it ran from a terminal. Prism now asks the login shell for its PATH at startup and uses that to find servers.
 - Linux: the deb and rpm desktop entry had no category, so menus that group by category (Cinnamon, KDE) did not list Prism. It now sits under Development.
 
 ## [0.2.0] - 2026-09-06
@@ -28,6 +31,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - Rotating, redacted audit log with 30-day retention.
 - Loopback-only HTTP with Host and Origin checks, request limits and a strict panel CSP.
 
-[Unreleased]: https://github.com/1broseidon/prism/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/1broseidon/prism/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/1broseidon/prism/releases/tag/v0.2.1
 [0.2.0]: https://github.com/1broseidon/prism/releases/tag/v0.2.0
 [0.1.0]: https://github.com/1broseidon/prism/releases/tag/v0.1.0

@@ -914,6 +914,10 @@ pub fn run() {
         )
         .try_init();
 
+    // Menu launches get the session PATH, which lacks the shell's additions; servers are found
+    // by name on PATH, so ask the login shell before anything spawns.
+    prism_core::adopt_login_shell_path();
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
