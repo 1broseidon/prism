@@ -4,6 +4,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Fixed
+- Windows: the panel opened below the screen from a bottom taskbar. It now anchors to the tray icon's rectangle, above a bottom bar or below a top bar, and stays inside the work area on every edge. The positioner plugin is gone.
+
 ## [0.1.0] - 2026-09-05
 
 ### Added

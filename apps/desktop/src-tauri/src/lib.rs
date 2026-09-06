@@ -19,7 +19,6 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
-use tauri_plugin_positioner::{Position, WindowExt};
 use tracing::{error, warn};
 
 const TRAY_ID: &str = "prism-tray";
@@ -40,6 +39,10 @@ static SEEN_FOCUS: AtomicBool = AtomicBool::new(false);
 static UNSEEN: AtomicU64 = AtomicU64::new(0);
 /// Last cursor position when opening from the tray, reused for later auto-opens.
 static TRAY_HINT: Mutex<Option<PhysicalPosition<f64>>> = Mutex::new(None);
+/// The tray icon's rectangle from the last tray event, on the platforms that report it (macOS and
+/// Windows). Physical pixels. Linux tray events carry no usable rect.
+static TRAY_RECT: Mutex<Option<(PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>> =
+    Mutex::new(None);
 
 #[derive(Clone, Serialize)]
 struct ConnectSnippetDto {
@@ -59,7 +62,8 @@ fn panel_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
 }
 
 /// Place the panel next to the tray. macOS and Windows report the icon's rect through tray
-/// events, so the positioner plugin can anchor to it. Linux uses the cursor position when
+/// events, so the panel anchors to it: below a top bar, above a bottom taskbar, clamped to the
+/// work area so it never covers the bar or leaves the screen. Linux uses the cursor position when
 /// opening from the tray menu, falling back to the desktop panel's reserved work area.
 fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
     let anchor = app
@@ -67,15 +71,15 @@ fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
         .map(|s| s.gateway.panel_anchor())
         .unwrap_or_default();
 
-    if anchor == PanelAnchor::Auto
-        && !cfg!(target_os = "linux")
-        && (window.move_window(Position::TrayBottomCenter).is_ok()
-            || window.move_window(Position::TrayCenter).is_ok())
-    {
-        return;
-    }
-
     if anchor == PanelAnchor::Auto {
+        let rect = TRAY_RECT.lock().ok().and_then(|r| *r);
+        if let Some((tray_pos, tray_size)) = rect {
+            match position_by_tray_rect(app, window, tray_pos, tray_size) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(err) => warn!(%err, "tray-anchored positioning failed"),
+            }
+        }
         let hint = TRAY_HINT.lock().ok().and_then(|h| *h);
         if let Some(point) = hint {
             match position_by_cursor(app, window, point) {
@@ -122,6 +126,48 @@ fn position_by_cursor(
         py - win.height as i32 - margin
     };
     let y = y.clamp(top.min(bottom), bottom.max(top));
+    window.set_position(PhysicalPosition::new(x, y))?;
+    Ok(true)
+}
+
+/// Anchor the panel to the tray icon itself. An icon in the top half of its monitor means a top
+/// bar, so the panel hangs below the work area's top edge; an icon in the bottom half means a
+/// taskbar, so the panel sits on the work area's bottom edge. Horizontally it centres on the icon.
+/// Every edge clamps to the work area, so a taskbar on any side is never covered.
+fn position_by_tray_rect(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+    tray_pos: PhysicalPosition<i32>,
+    tray_size: tauri::PhysicalSize<u32>,
+) -> tauri::Result<bool> {
+    let centre_x = tray_pos.x as f64 + tray_size.width as f64 / 2.0;
+    let centre_y = tray_pos.y as f64 + tray_size.height as f64 / 2.0;
+    let monitor = match app.monitor_from_point(centre_x, centre_y)? {
+        Some(m) => m,
+        None => return Ok(false),
+    };
+    let pos = *monitor.position();
+    let size = *monitor.size();
+    let work = monitor.work_area();
+    let win = window.outer_size()?;
+    let margin = (8.0 * monitor.scale_factor()).round() as i32;
+
+    let work_left = work.position.x + margin;
+    let work_top = work.position.y + margin;
+    let work_right = work.position.x + work.size.width as i32 - win.width as i32 - margin;
+    let work_bottom = work.position.y + work.size.height as i32 - win.height as i32 - margin;
+
+    let x = (centre_x.round() as i32 - win.width as i32 / 2)
+        .clamp(work_left.min(work_right), work_right.max(work_left));
+    let icon_in_top_half = centre_y < pos.y as f64 + size.height as f64 / 2.0;
+    let y = if icon_in_top_half {
+        // Below the icon, or the work area's top if the bar is reserved.
+        (tray_pos.y + tray_size.height as i32 + margin).max(work_top)
+    } else {
+        // Above the icon, or the work area's bottom if the taskbar is reserved.
+        (tray_pos.y - win.height as i32 - margin).min(work_bottom)
+    };
+    let y = y.clamp(work_top.min(work_bottom), work_bottom.max(work_top));
     window.set_position(PhysicalPosition::new(x, y))?;
     Ok(true)
 }
@@ -184,6 +230,25 @@ fn remember_tray_hint(app: &AppHandle) {
         if let Ok(mut hint) = TRAY_HINT.lock() {
             *hint = Some(pos);
         }
+    }
+}
+
+/// Keep the icon's rectangle from a tray event in physical pixels. The rect arrives logical on
+/// macOS and physical on Windows; the monitor under the cursor supplies the scale either way.
+fn remember_tray_rect(app: &AppHandle, rect: &tauri::Rect) {
+    let scale = app
+        .cursor_position()
+        .ok()
+        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let pos = rect.position.to_physical::<i32>(scale);
+    let size = rect.size.to_physical::<u32>(scale);
+    if size.width == 0 && size.height == 0 {
+        return;
+    }
+    if let Ok(mut slot) = TRAY_RECT.lock() {
+        *slot = Some((pos, size));
     }
 }
 
@@ -623,7 +688,12 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
+            match &event {
+                TrayIconEvent::Click { rect, .. }
+                | TrayIconEvent::Enter { rect, .. }
+                | TrayIconEvent::Move { rect, .. } => remember_tray_rect(tray.app_handle(), rect),
+                _ => {}
+            }
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -655,7 +725,6 @@ pub fn run() {
         .try_init();
 
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {

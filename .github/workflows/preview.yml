@@ -1,0 +1,71 @@
+name: preview build
+
+# Manual: build the bundles for one target from any ref and attach them to the run as an artifact.
+# For trying a change on a platform you don't have at hand, without tagging a release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Target to build
+        required: true
+        type: choice
+        default: windows
+        options: [windows, macos-arm64, macos-x86_64, linux]
+
+jobs:
+  build:
+    runs-on: ${{ inputs.target == 'windows' && 'windows-latest' || startsWith(inputs.target, 'macos') && 'macos-latest' || 'ubuntu-22.04' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            libdbus-1-dev libssl-dev libxdo-dev pkg-config build-essential file
+      - name: Frontend deps
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+      - name: Build bundles
+        working-directory: apps/desktop
+        env:
+          # Ad-hoc on macOS so the preview opens with right-click > Open; releases sign properly.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        run: |
+          if [ "${{ inputs.target }}" = "macos-x86_64" ]; then
+            pnpm tauri build --target x86_64-apple-darwin --ci
+          else
+            pnpm tauri build --ci
+          fi
+      - name: Collect
+        run: |
+          mkdir -p out
+          find target -path '*/release/bundle/*' -type f \
+            \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp {} out/ \;
+          ls -la out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prism-preview-${{ inputs.target }}-${{ github.sha }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
