@@ -4,6 +4,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Changed
+- On the page after an OAuth sign-in, the mark's second facet now refracts before it settles: a spectral band sweeps through it, the verdict colour rises where the light left, then the pool behind the mark lights and the words follow. Reduced motion skips straight to the settled page.
+
 ## [0.4.0] - 2026-09-06
 
 ### Changed

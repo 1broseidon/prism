@@ -25,6 +25,8 @@
     --glow-warn: light-dark(oklch(55% 0.19 25 / 0.12), oklch(72% 0.17 25 / 0.10));
     --glow-quiet: light-dark(oklch(19% 0.012 60 / 0.06), oklch(96% 0.008 80 / 0.05));
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    /* One beat for the light to pass through the mark before the verdict settles. */
+    --dur: 2600ms;
   }
   html, body { height: 100%; }
   body {
@@ -70,7 +72,9 @@
     color: var(--ink);
     filter: drop-shadow(0 12px 28px oklch(0% 0 0 / 0.16));
   }
+  .mark { overflow: visible; }
   .mark .lit { fill: var(--facet); }
+  .mark .band { opacity: 0; }
   .eyebrow {
     display: inline-flex;
     align-items: center;
@@ -99,23 +103,57 @@
   .lede { margin: 0; color: var(--ink-2); font-size: 16px; max-width: 26rem; text-wrap: balance; }
   .lede b { color: var(--ink); font-weight: 600; }
   .close { margin: 22px 0 0; color: var(--ink-3); font-size: 13.5px; }
+  /* The mark lands in ink. A spectral band sweeps through the second facet at the prism's own angle,
+   * and the verdict colour rises where the light left. The pool behind it lights once the colour has
+   * settled, and only then do the words rise. Everything keys off --dur. */
   @media (prefers-reduced-motion: no-preference) {
-    .mark { animation: land 640ms var(--ease-out) both; }
-    .eyebrow, h1, .lede, .close { animation: rise 520ms var(--ease-out) both; }
-    .eyebrow { animation-delay: 60ms; }
-    h1 { animation-delay: 90ms; }
-    .lede { animation-delay: 120ms; }
-    .close { animation-delay: 150ms; }
+    .mark { animation: land calc(var(--dur) * 0.6) var(--ease-out) both; }
+    .mark .band { animation: sweep var(--dur) cubic-bezier(0.3, 0, 0.2, 1) both; }
+    .mark .lit { animation: settle var(--dur) linear both; }
+    body::before { animation: pool calc(var(--dur) * 0.8) var(--ease-out) both; animation-delay: calc(var(--dur) * 0.75); }
+    .eyebrow, h1, .lede, .close { animation: rise calc(var(--dur) * 0.5) var(--ease-out) both; }
+    .eyebrow { animation-delay: calc(var(--dur) * 0.45); }
+    h1 { animation-delay: calc(var(--dur) * 0.5); }
+    .lede { animation-delay: calc(var(--dur) * 0.55); }
+    .close { animation-delay: calc(var(--dur) * 0.6); }
   }
   @keyframes land { from { opacity: 0.35; transform: translateY(-14px) scale(0.94); } to { opacity: 1; transform: none; } }
-  @keyframes rise { from { transform: translateY(10px); } to { transform: none; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes pool { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes sweep {
+    0%   { transform: translateX(-46px); opacity: 1; }
+    70%  { opacity: 1; }
+    100% { transform: translateX(46px); opacity: 0; }
+  }
+  @keyframes settle {
+    0%   { fill: var(--ink); }
+    45%  { fill: var(--ink); }
+    85%  { fill: var(--facet); }
+    100% { fill: var(--facet); }
+  }
 </style>
 </head>
 <body data-state="{{state}}">
 <main>
   <svg class="mark" viewBox="8 12 48 38" aria-hidden="true" fill="currentColor">
+    <defs>
+      <clipPath id="facet"><polygon points="42,50 30,12 52,18 56,50" /></clipPath>
+      <linearGradient id="spectrum" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0"    stop-color="oklch(72% 0.17 25 / 0)" />
+        <stop offset="0.1"  stop-color="oklch(72% 0.17 25)" />
+        <stop offset="0.28" stop-color="oklch(78% 0.17 65)" />
+        <stop offset="0.42" stop-color="oklch(85% 0.16 105)" />
+        <stop offset="0.56" stop-color="oklch(74% 0.15 150)" />
+        <stop offset="0.7"  stop-color="oklch(76% 0.13 210)" />
+        <stop offset="0.84" stop-color="oklch(66% 0.17 275)" />
+        <stop offset="1"    stop-color="oklch(66% 0.17 320 / 0)" />
+      </linearGradient>
+    </defs>
     <polygon points="8,50 30,12 38,50" />
-    <polygon class="lit" points="42,50 30,12 52,18 56,50" />
+    <g clip-path="url(#facet)">
+      <polygon class="lit" points="42,50 30,12 52,18 56,50" />
+      <g class="band"><rect x="20" y="0" width="52" height="64" fill="url(#spectrum)" transform="skewX(-22)" /></g>
+    </g>
   </svg>
   <div class="eyebrow {{eyebrow_class}}">{{eyebrow}}</div>
   <h1>{{title}}</h1>
