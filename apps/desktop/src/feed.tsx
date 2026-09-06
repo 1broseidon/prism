@@ -49,7 +49,7 @@ function Details({ entry }: { entry: AuditEntry }) {
   const lines: [string, string][] = n
     ? [
         ["subject", n.subject],
-        ...(n.would_hold ? ([["would have asked", reasonText(n.would_hold)]] as [string, string][]) : []),
+        ...(n.would_hold ? ([["matched", reasonText(n.would_hold)]] as [string, string][]) : []),
         ...(n.cwd ? ([["in", n.cwd]] as [string, string][]) : []),
         ...(n.session ? ([["session", n.session.slice(0, 8)]] as [string, string][]) : []),
       ]

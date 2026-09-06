@@ -119,7 +119,7 @@ export function HostScreen({ agentId }: { agentId: string }) {
         </section>
 
         <section class="section">
-          <Label right={<span class={asked ? "accent" : ""}>{asked}</span>}>Would have asked</Label>
+          <Label right={<span class={asked ? "accent" : ""}>{asked}</span>}>Watch list</Label>
           <ul class="shadow-rules">
             {(st?.rules ?? []).map((rule) => {
               const count = st?.by_reason.find((r) => r.reason === rule.id)?.count ?? 0;
