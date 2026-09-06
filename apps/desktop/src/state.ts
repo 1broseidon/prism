@@ -8,6 +8,8 @@ import type {
   PendingSignIn,
   Rule,
   ServerView,
+  UpdateEvent,
+  UpdateInfo,
 } from "./types";
 
 export const status = signal<GatewayStatus | null>(null);
@@ -20,6 +22,10 @@ export const audit = signal<AuditEntry[]>([]);
 export const lastCreatedSnippet = signal<ConnectSnippet | null>(null);
 export const lastCreatedAgentId = signal<string | null>(null);
 export const errorMessage = signal<string | null>(null);
+/** A newer release, once a check has found one. Drives the dot on the settings button. */
+export const update = signal<UpdateInfo | null>(null);
+/** Live progress while an update downloads and installs. */
+export const updateProgress = signal<UpdateEvent | null>(null);
 
 export type Tab = "now" | "servers" | "agents" | "rules";
 const TABS: Tab[] = ["now", "servers", "agents", "rules"];

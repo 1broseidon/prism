@@ -4,6 +4,12 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-06
+
+### Added
+- Built-in updater. Prism checks the latest release after launch and every six hours, marks the settings icon when something newer exists, and **Settings → Updates** installs it in place and restarts. Update files are minisign-signed and verified against the key built into the app. Works for the DMG, AppImage, deb, rpm, MSI and setup exe; other installs get a link to the release page.
+- Releases publish `latest.json` and a `.sig` beside every installer.
+
 ### Fixed
 - Windows: the panel opened below the screen from a bottom taskbar. It now anchors to the tray icon's rectangle, above a bottom bar or below a top bar, and stays inside the work area on every edge. The positioner plugin is gone.
 
@@ -19,5 +25,6 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - Rotating, redacted audit log with 30-day retention.
 - Loopback-only HTTP with Host and Origin checks, request limits and a strict panel CSP.
 
-[Unreleased]: https://github.com/1broseidon/prism/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/1broseidon/prism/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/1broseidon/prism/releases/tag/v0.2.0
 [0.1.0]: https://github.com/1broseidon/prism/releases/tag/v0.1.0

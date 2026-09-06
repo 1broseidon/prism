@@ -153,8 +153,13 @@ jobs:
             echo "Not notarizing."
           fi
 
+      # The updater key signs every bundle (minisign). Without it `createUpdaterArtifacts` fails
+      # the build, so the release cannot ship unsigned update files by accident.
       - name: Build bundles
         working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --target ${{ matrix.target }} --ci
 
       - name: Collect and rename
@@ -163,19 +168,21 @@ jobs:
           B="target/${{ matrix.target }}/release/bundle"
           OUT=out; mkdir -p "$OUT"
           S="${{ matrix.os }}_${{ matrix.arch }}"
+          # take <glob> <name>: copies the bundle and its updater signature under the release name.
+          take() { cp "$1" "$OUT/$2"; cp "$1.sig" "$OUT/$2.sig"; }
           case "${{ matrix.os }}" in
             darwin)
               cp "$B"/dmg/*.dmg "$OUT/prism_${V}_${S}.dmg"
-              (cd "$B/macos" && tar czf "$OLDPWD/$OUT/prism_${V}_${S}.app.tar.gz" Prism.app)
+              take "$B"/macos/Prism.app.tar.gz "prism_${V}_${S}.app.tar.gz"
               ;;
             linux)
-              cp "$B"/appimage/*.AppImage "$OUT/prism_${V}_${S}.AppImage"
-              cp "$B"/deb/*.deb "$OUT/prism_${V}_${S}.deb"
-              cp "$B"/rpm/*.rpm "$OUT/prism_${V}_${S}.rpm"
+              take "$B"/appimage/*.AppImage "prism_${V}_${S}.AppImage"
+              take "$B"/deb/*.deb "prism_${V}_${S}.deb"
+              take "$B"/rpm/*.rpm "prism_${V}_${S}.rpm"
               ;;
             windows)
-              cp "$B"/msi/*.msi "$OUT/prism_${V}_${S}.msi"
-              cp "$B"/nsis/*-setup.exe "$OUT/prism_${V}_${S}-setup.exe"
+              take "$B"/msi/*.msi "prism_${V}_${S}.msi"
+              take "$B"/nsis/*-setup.exe "prism_${V}_${S}-setup.exe"
               ;;
           esac
           ls -la "$OUT"
@@ -198,13 +205,40 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: cd dist && sha256sum prism_* > checksums.txt && cat checksums.txt
+        run: cd dist && sha256sum $(ls prism_* | grep -v '\.sig$') > checksums.txt && cat checksums.txt
       - name: Release notes from changelog
         run: |
           V="${{ needs.verify.outputs.version }}"
           awk -v v="$V" '/^## \[/ { if (on) exit; if (index($0, "## [" v "]") == 1) { on = 1; next } } on { print }' CHANGELOG.md \
             | sed '/./,$!d' > dist/notes.md
           awk 'NF { f = 1 } END { exit f ? 0 : 1 }' dist/notes.md || { echo "empty changelog section for $V" >&2; exit 1; }
+      # latest.json is what installed copies poll. Keys are the updater's `{os}-{arch}` with an
+      # optional `-{installer}` suffix; the bare key is the fallback for that platform.
+      - name: Update manifest
+        run: |
+          V="${{ needs.verify.outputs.version }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/${{ needs.verify.outputs.tag }}"
+          entry() {  # entry <platform key> <file>
+            [ -f "dist/$2.sig" ] || { echo "missing signature for $2" >&2; exit 1; }
+            jq -n --arg k "$1" --arg u "$BASE/$2" --arg s "$(cat "dist/$2.sig")" '{($k): {url: $u, signature: $s}}'
+          }
+          {
+            entry darwin-aarch64       "prism_${V}_darwin_arm64.app.tar.gz"
+            entry darwin-x86_64        "prism_${V}_darwin_x86_64.app.tar.gz"
+            entry linux-x86_64         "prism_${V}_linux_x86_64.AppImage"
+            entry linux-x86_64-deb     "prism_${V}_linux_x86_64.deb"
+            entry linux-x86_64-rpm     "prism_${V}_linux_x86_64.rpm"
+            entry linux-aarch64        "prism_${V}_linux_arm64.AppImage"
+            entry linux-aarch64-deb    "prism_${V}_linux_arm64.deb"
+            entry linux-aarch64-rpm    "prism_${V}_linux_arm64.rpm"
+            entry windows-x86_64       "prism_${V}_windows_x86_64-setup.exe"
+            entry windows-x86_64-nsis  "prism_${V}_windows_x86_64-setup.exe"
+            entry windows-x86_64-msi   "prism_${V}_windows_x86_64.msi"
+          } | jq -s 'add' > dist/platforms.json
+          jq -n --arg v "$V" --rawfile notes dist/notes.md --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile p dist/platforms.json \
+            '{version: $v, notes: $notes, pub_date: $date, platforms: $p[0]}' > dist/latest.json
+          jq '.platforms | keys' dist/latest.json
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.verify.outputs.tag }}
@@ -213,3 +247,4 @@ jobs:
           files: |
             dist/prism_*
             dist/checksums.txt
+            dist/latest.json

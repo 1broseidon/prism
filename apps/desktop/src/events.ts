@@ -9,8 +9,10 @@ import {
   servers,
   signins,
   status,
+  update,
+  updateProgress,
 } from "./state";
-import type { GatewayEvent } from "./types";
+import type { GatewayEvent, UpdateEvent } from "./types";
 
 export async function loadAll(): Promise<void> {
   try {
@@ -36,8 +38,33 @@ export async function loadAll(): Promise<void> {
   }
 }
 
+export async function loadUpdateStatus(): Promise<void> {
+  try {
+    const st = await api.getUpdateStatus();
+    update.value = st.available;
+  } catch {
+    // The updater is optional; a missing command in dev is not an error worth showing.
+  }
+}
+
 export async function subscribeEvents(): Promise<() => void> {
   if (!("__TAURI_INTERNALS__" in window)) return () => {};
+  const unlistenUpdate = await listen<UpdateEvent>("prism://update", (event) => {
+    const p = event.payload;
+    switch (p.state) {
+      case "available":
+        update.value = { version: p.version, current: p.current, notes: p.notes, date: p.date, installable: p.installable };
+        updateProgress.value = null;
+        break;
+      case "up_to_date":
+        update.value = null;
+        updateProgress.value = null;
+        break;
+      default:
+        updateProgress.value = p;
+        break;
+    }
+  });
   const unlisten = await listen<GatewayEvent>("prism://event", async (event) => {
     const payload = event.payload;
     switch (payload.type) {
@@ -83,5 +110,8 @@ export async function subscribeEvents(): Promise<() => void> {
         break;
     }
   });
-  return unlisten;
+  return () => {
+    unlisten();
+    unlistenUpdate();
+  };
 }

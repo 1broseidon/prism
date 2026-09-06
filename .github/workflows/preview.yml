@@ -50,6 +50,8 @@ jobs:
         env:
           # Ad-hoc on macOS so the preview opens with right-click > Open; releases sign properly.
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [ "${{ inputs.target }}" = "macos-x86_64" ]; then
             pnpm tauri build --target x86_64-apple-darwin --ci
@@ -60,7 +62,7 @@ jobs:
         run: |
           mkdir -p out
           find target -path '*/release/bundle/*' -type f \
-            \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) \
+            \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.sig' \) \
             -exec cp {} out/ \;
           ls -la out
       - uses: actions/upload-artifact@v7

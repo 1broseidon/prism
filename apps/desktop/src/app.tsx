@@ -1,6 +1,6 @@
 import { useEffect } from "preact/hooks";
 import * as api from "./api";
-import { loadAll, subscribeEvents } from "./events";
+import { loadAll, loadUpdateStatus, subscribeEvents } from "./events";
 import { AddServerScreen } from "./screens/AddServer";
 import { AgentScreen } from "./screens/Agent";
 import { AgentToolsScreen } from "./screens/AgentTools";
@@ -10,7 +10,7 @@ import { NowScreen } from "./screens/Now";
 import { RulesScreen } from "./screens/Rules";
 import { ServersScreen } from "./screens/Servers";
 import { SettingsScreen } from "./screens/Settings";
-import { agents, errorMessage, pending, pop, push, servers, stack, status, tab } from "./state";
+import { agents, errorMessage, pending, pop, push, servers, stack, status, tab, update } from "./state";
 import type { Screen } from "./state";
 import { Button, Notice } from "./ui";
 
@@ -55,6 +55,7 @@ const SlidersIcon = () => (
 export function App() {
   useEffect(() => {
     void loadAll();
+    void loadUpdateStatus();
     let stop: (() => void) | undefined;
     void subscribeEvents().then((unlisten) => {
       stop = unlisten;
@@ -98,7 +99,13 @@ export function App() {
         )}
         <span class="spacer" />
         {top ? null : (
-          <Button variant="icon" aria-label="Settings" title="Settings" onClick={() => push({ kind: "settings" })}>
+          <Button
+            variant="icon"
+            class={update.value ? "has-update" : ""}
+            aria-label={update.value ? `Settings, update to ${update.value.version} available` : "Settings"}
+            title={update.value ? `Prism ${update.value.version} is ready` : "Settings"}
+            onClick={() => push({ kind: "settings" })}
+          >
             <SlidersIcon />
           </Button>
         )}

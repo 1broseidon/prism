@@ -184,3 +184,26 @@ export type GatewayEvent =
   | { type: "server_status"; data: { server_id: string; status: BackendStatus } }
   | { type: "audit"; data: AuditEntry }
   | { type: "rules_changed" };
+
+/** A newer release than the running one. `installable` is false for package-manager installs on Linux. */
+export interface UpdateInfo {
+  version: string;
+  current: string;
+  notes: string | null;
+  date: string | null;
+  installable: boolean;
+}
+
+export interface UpdateStatus {
+  current: string;
+  available: UpdateInfo | null;
+  checked_at: string | null;
+  installable: boolean;
+}
+
+export type UpdateEvent =
+  | { state: "available"; version: string; current: string; notes: string | null; date: string | null; installable: boolean }
+  | { state: "up_to_date" }
+  | { state: "downloading"; downloaded: number; total: number | null }
+  | { state: "installing" }
+  | { state: "error"; message: string };

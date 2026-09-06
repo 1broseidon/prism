@@ -1075,6 +1075,78 @@ textarea.input {
   color: inherit;
 }
 
+/* Updates: one tonal card when a release is waiting, the amber dot on the settings button meanwhile. */
+.btn.icon.has-update {
+  position: relative;
+}
+
+.btn.icon.has-update::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-surface);
+}
+
+.update {
+  padding: 14px var(--space-4) var(--space-4);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+}
+
+.update-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+}
+
+.update-notes {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.update .hint {
+  margin-top: 6px;
+}
+
+.update .hint.danger {
+  color: var(--color-danger);
+}
+
+.update-progress {
+  height: 4px;
+  margin-top: var(--space-3);
+  border-radius: 2px;
+  background: var(--color-well);
+  overflow: hidden;
+}
+
+.update-progress span {
+  display: block;
+  height: 100%;
+  background: var(--color-accent);
+  transition: width var(--dur-short) var(--ease-out);
+}
+
+.update-actions {
+  margin-top: var(--space-3);
+}
+
+.update-actions .btn,
+.update-actions a.btn {
+  height: var(--btn-h);
+  border-radius: var(--radius-md);
+  font-size: var(--text-lg);
+  text-decoration: none;
+  flex: 1;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

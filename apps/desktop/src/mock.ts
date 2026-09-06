@@ -130,6 +130,15 @@ export const mock = {
   list_server_tools: (a: { serverId: string }) => delay(tools[a.serverId] ?? []),
   list_audit: (a: { limit: number }) => delay(audit.slice(0, a.limit)),
   hide_panel: () => delay(undefined),
+  get_update_status: () =>
+    delay({
+      current: "0.2.0",
+      available: { version: "0.3.0", current: "0.2.0", notes: "Example release notes.", date: null, installable: true },
+      checked_at: new Date().toISOString(),
+      installable: true,
+    }),
+  check_update: () => delay({ version: "0.3.0", current: "0.2.0", notes: "Example release notes.", date: null, installable: true }),
+  install_update: () => delay(undefined),
   get_connect_snippet: (): Promise<ConnectSnippet> =>
     delay({
       url: "http://127.0.0.1:9086/mcp",

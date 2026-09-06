@@ -24,6 +24,8 @@ import type {
   ServerView,
   Settings,
   ToolInfo,
+  UpdateInfo,
+  UpdateStatus,
 } from "./types";
 
 export function getStatus() {
@@ -130,4 +132,16 @@ export function createManualAgent(name: string) {
 
 export function replaceManualToken(agentId: string) {
   return invoke<import("./types").ManualToken>("replace_manual_token", { agentId });
+}
+
+export function getUpdateStatus() {
+  return invoke<UpdateStatus>("get_update_status");
+}
+
+export function checkUpdate() {
+  return invoke<UpdateInfo | null>("check_update");
+}
+
+export function installUpdate() {
+  return invoke<void>("install_update");
 }

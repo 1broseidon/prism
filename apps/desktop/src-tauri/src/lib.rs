@@ -19,6 +19,7 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
 use tracing::{error, warn};
 
 const TRAY_ID: &str = "prism-tray";
@@ -30,6 +31,42 @@ const PANEL_SIZE: (f64, f64) = (432.0, 632.0);
 struct AppState {
     gateway: Arc<Gateway>,
 }
+
+/// What the panel needs to know about a newer release. `installable` is false on Linux outside an
+/// AppImage, where the updater cannot replace a package-manager install; the panel links to the
+/// release instead.
+#[derive(Clone, Serialize)]
+struct UpdateInfo {
+    version: String,
+    current: String,
+    notes: Option<String>,
+    date: Option<String>,
+    installable: bool,
+}
+
+/// Progress of an update, for the panel. Emitted on `prism://update`.
+#[derive(Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum UpdateEvent {
+    Available(UpdateInfo),
+    UpToDate,
+    Downloading { downloaded: u64, total: Option<u64> },
+    Installing,
+    Error { message: String },
+}
+
+#[derive(Default)]
+struct UpdateState {
+    update: Mutex<Option<tauri_plugin_updater::Update>>,
+    info: Mutex<Option<UpdateInfo>>,
+    checked_at: Mutex<Option<String>>,
+    busy: AtomicBool,
+}
+
+const UPDATE_EVENT: &str = "prism://update";
+/// Startup delay before the first check, then the interval between checks.
+const UPDATE_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(20);
+const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 
 static LAST_SHOW_MS: AtomicU64 = AtomicU64::new(0);
 static IGNORE_FOCUS_LOSS: AtomicBool = AtomicBool::new(false);
@@ -665,6 +702,159 @@ async fn attention(app: &AppHandle, gateway: &Gateway, body: &str) {
     }
 }
 
+/// Whether the updater can replace this install by itself. The bundler stamps the bundle type
+/// into the binary; a bare `cargo build` or an unknown package manager gets the release page instead.
+/// Deb and rpm installs go through `pkexec`, so the user sees a privilege prompt on those.
+fn update_installable() -> bool {
+    use tauri::utils::{config::BundleType, platform::bundle_type};
+    if cfg!(target_os = "linux") {
+        matches!(
+            bundle_type(),
+            Some(BundleType::AppImage | BundleType::Deb | BundleType::Rpm)
+        )
+    } else {
+        true
+    }
+}
+
+/// Ask the release endpoint whether something newer exists. Remembers the answer for the panel and
+/// tells it through the update event. Errors are reported, never fatal: an offline check is normal.
+async fn check_for_update(app: &AppHandle, announce: bool) -> Result<Option<UpdateInfo>, String> {
+    let state = app.state::<UpdateState>();
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let result = updater.check().await;
+    if let Ok(mut at) = state.checked_at.lock() {
+        *at = Some(chrono::Utc::now().to_rfc3339());
+    }
+    match result {
+        Ok(Some(update)) => {
+            let info = UpdateInfo {
+                version: update.version.clone(),
+                current: update.current_version.clone(),
+                notes: update.body.clone(),
+                date: update.date.map(|d| d.to_string()),
+                installable: update_installable(),
+            };
+            if let Ok(mut slot) = state.update.lock() {
+                *slot = Some(update);
+            }
+            if let Ok(mut slot) = state.info.lock() {
+                *slot = Some(info.clone());
+            }
+            if announce {
+                let _ = app.emit(UPDATE_EVENT, UpdateEvent::Available(info.clone()));
+            }
+            Ok(Some(info))
+        }
+        Ok(None) => {
+            if let Ok(mut slot) = state.update.lock() {
+                *slot = None;
+            }
+            if let Ok(mut slot) = state.info.lock() {
+                *slot = None;
+            }
+            if announce {
+                let _ = app.emit(UPDATE_EVENT, UpdateEvent::UpToDate);
+            }
+            Ok(None)
+        }
+        Err(err) => {
+            warn!(%err, "update check failed");
+            if announce {
+                let _ = app.emit(
+                    UPDATE_EVENT,
+                    UpdateEvent::Error {
+                        message: err.to_string(),
+                    },
+                );
+            }
+            Err(err.to_string())
+        }
+    }
+}
+
+fn start_update_checks(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(UPDATE_FIRST_CHECK).await;
+        loop {
+            let _ = check_for_update(&app, true).await;
+            tokio::time::sleep(UPDATE_INTERVAL).await;
+        }
+    });
+}
+
+#[derive(Clone, Serialize)]
+struct UpdateStatusDto {
+    current: String,
+    available: Option<UpdateInfo>,
+    checked_at: Option<String>,
+    installable: bool,
+}
+
+#[tauri::command]
+fn get_update_status(app: AppHandle, state: State<'_, UpdateState>) -> UpdateStatusDto {
+    UpdateStatusDto {
+        current: app.package_info().version.to_string(),
+        available: state.info.lock().ok().and_then(|i| i.clone()),
+        checked_at: state.checked_at.lock().ok().and_then(|c| c.clone()),
+        installable: update_installable(),
+    }
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    check_for_update(&app, false).await
+}
+
+/// Download, install and relaunch. The panel watches `prism://update` for progress. On Windows the
+/// installer takes over and the process exits; elsewhere Prism restarts itself.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<UpdateState>();
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Err("an update is already installing".into());
+    }
+    let update = state.update.lock().ok().and_then(|u| u.clone());
+    let Some(update) = update else {
+        state.busy.store(false, Ordering::SeqCst);
+        return Err("no update has been found yet".into());
+    };
+    if !update_installable() {
+        state.busy.store(false, Ordering::SeqCst);
+        return Err("this install cannot update itself; download the new release instead".into());
+    }
+    let progress_app = app.clone();
+    let mut downloaded: u64 = 0;
+    let result = update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ =
+                    progress_app.emit(UPDATE_EVENT, UpdateEvent::Downloading { downloaded, total });
+            },
+            || {},
+        )
+        .await;
+    match result {
+        Ok(()) => {
+            let _ = app.emit(UPDATE_EVENT, UpdateEvent::Installing);
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            app.restart();
+        }
+        Err(err) => {
+            state.busy.store(false, Ordering::SeqCst);
+            let message = err.to_string();
+            let _ = app.emit(
+                UPDATE_EVENT,
+                UpdateEvent::Error {
+                    message: message.clone(),
+                },
+            );
+            Err(message)
+        }
+    }
+}
+
 fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let open = MenuItem::with_id(app, "open", "Open Prism", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -727,6 +917,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(UpdateState::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -765,6 +957,7 @@ pub fn run() {
 
             build_tray(app.handle())?;
             forward_events(app.handle().clone(), gateway);
+            start_update_checks(app.handle().clone());
 
             // Dev affordance: `PRISM_SHOW_PANEL=1 cargo tauri dev` opens the panel without a tray click.
             if std::env::var_os("PRISM_SHOW_PANEL").is_some() {
@@ -850,6 +1043,9 @@ pub fn run() {
             list_audit,
             hide_panel,
             get_connect_snippet,
+            get_update_status,
+            check_update,
+            install_update,
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

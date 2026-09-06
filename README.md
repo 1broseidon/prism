@@ -33,7 +33,7 @@ Download the build for your machine from the [latest release](https://github.com
 
 **Linux requirements.** Prism needs a session D-Bus and an unlocked Secret Service provider such as GNOME Keyring or KWallet, because that is where server credentials live. GNOME users also need an AppIndicator extension for the tray icon to appear. Ubuntu and Fedora desktops ship both.
 
-A Homebrew cask via `1broseidon/tap` follows the first tagged release.
+A Homebrew cask via `1broseidon/tap` is coming. Installed copies update themselves; see [Updates](#updates).
 
 ### From source
 
@@ -122,6 +122,12 @@ Every answer you give from a held-call card becomes one of these: allow once res
 - **Hold timeout.** How long a call waits for you. Default two minutes.
 - **Rate tripwire.** When an agent runs hot, its allowed calls turn into asks until it calms down.
 
+## Updates
+
+Prism checks the [latest release](https://github.com/1broseidon/prism/releases/latest) shortly after launch and every six hours. When something newer exists, the settings icon shows an amber dot and **Settings → Updates** has the notes and an **Install and restart** button. Nothing installs on its own, and the only thing sent is the request for the release manifest.
+
+Every update file is signed with Prism's minisign key and checked against the public key built into the app before it is installed, on top of Apple notarization on macOS. The DMG, AppImage, deb, rpm, MSI and setup exe can all update in place. Deb and rpm installs ask for your password through `pkexec`. A copy built from source, or installed by some other route, gets a link to the release page instead.
+
 ## What the audit log keeps
 
 Agent, tool, timestamp, verdict and what decided it (you, a rule, the posture, do-not-disturb, or a timeout). Tool arguments and results are never persisted, and raw error text is dropped because servers echo credentials. The current file is capped at 5 MiB with three archives, and entries older than 30 days are removed at startup and hourly. The panel shows the last 1,000.
@@ -169,6 +175,8 @@ git tag vX.Y.Z && git push --tags
 ```
 
 The release workflow checks the three versions against the tag, builds the DMG, MSI, NSIS installer, AppImage, deb and rpm for five targets, writes `checksums.txt`, and publishes a GitHub release with the changelog section as its notes. macOS signing and notarization use six repository secrets: `APPLE_CERTIFICATE` (base64 Developer ID Application p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and the App Store Connect key as `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_P8`. Without the certificate the bundle is ad-hoc signed.
+
+Update files are signed with the minisign key in `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; its public half is `plugins.updater.pubkey` in `tauri.conf.json`. The release job writes `latest.json` next to the assets, which is what installed copies poll. Losing that private key means shipping a release that existing installs refuse, so keep it with the Apple material.
 
 ## License
 
