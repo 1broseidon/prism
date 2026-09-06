@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import {
+  activity,
   agents,
   audit,
   errorMessage,
@@ -35,6 +36,7 @@ export async function loadAll(): Promise<void> {
     audit.value = au;
     errorMessage.value = null;
     loadNativeStatus();
+    loadActivity();
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : String(err);
   }
@@ -53,6 +55,23 @@ export function loadNativeStatus(debounce = false): void {
     return;
   }
   api.getNativeStatus().then((st) => (native.value = st)).catch(() => {
+    // Optional in dev; the panel works without it.
+  });
+}
+
+let activityTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** The summary on the Now tab. Refreshed a beat after any audit entry, never more than once a second. */
+export function loadActivity(debounce = false): void {
+  if (debounce) {
+    if (activityTimer) return;
+    activityTimer = setTimeout(() => {
+      activityTimer = null;
+      loadActivity();
+    }, 1000);
+    return;
+  }
+  api.getActivity().then((summary) => (activity.value = summary)).catch(() => {
     // Optional in dev; the panel works without it.
   });
 }
@@ -102,6 +121,7 @@ export async function subscribeEvents(): Promise<() => void> {
       case "audit":
         audit.value = [payload.data, ...audit.value].slice(0, 60);
         if (payload.data.native) loadNativeStatus(true);
+        loadActivity(true);
         break;
       case "rules_changed":
         rules.value = await api.listRules();

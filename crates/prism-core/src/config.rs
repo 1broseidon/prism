@@ -221,6 +221,10 @@ pub struct PrismConfig {
     /// Where the panel opens. `auto` infers the tray edge from the monitor's work area.
     #[serde(default)]
     pub panel_anchor: PanelAnchor,
+    /// The global key that toggles the panel, in `Ctrl+Alt+P` form. Unset means the default;
+    /// an empty string turns the shortcut off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_shortcut: Option<String>,
     /// What a held call becomes when nobody answers in time.
     #[serde(default)]
     pub on_timeout: TimeoutBehavior,
@@ -266,6 +270,7 @@ impl Default for PrismConfig {
             listen_port: default_listen_port(),
             auto_open_on_pending: true,
             panel_anchor: PanelAnchor::Auto,
+            panel_shortcut: None,
             on_timeout: TimeoutBehavior::Deny,
             do_not_disturb: false,
             rate_limit_per_minute: None,
@@ -392,6 +397,7 @@ mod tests {
             auto_open_on_pending: false,
             observe_native: true,
             panel_anchor: PanelAnchor::BottomLeft,
+            panel_shortcut: Some("Ctrl+Alt+P".into()),
             servers: vec![ServerConfig {
                 id: "srv-1".into(),
                 name: "files".into(),

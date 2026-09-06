@@ -4,6 +4,7 @@ import { loadAll, loadUpdateStatus, subscribeEvents } from "./events";
 import { AddServerScreen } from "./screens/AddServer";
 import { AgentScreen } from "./screens/Agent";
 import { AgentToolsScreen } from "./screens/AgentTools";
+import { ActivityScreen } from "./screens/Activity";
 import { AgentsScreen } from "./screens/Agents";
 import { ConnectAgentScreen } from "./screens/ConnectAgent";
 import { HostScreen } from "./screens/Host";
@@ -37,6 +38,8 @@ function titleOf(screen: Screen): string {
       return servers.value.find((s) => s.id === screen.serverId)?.name ?? "Server";
     case "host":
       return agents.value.find((a) => a.id === screen.agentId)?.name ?? hostName(screen.agentId);
+    case "activity":
+      return screen.agentId ? (agents.value.find((a) => a.id === screen.agentId)?.name ?? hostName(screen.agentId)) : "Every action";
   }
 }
 
@@ -150,6 +153,7 @@ export function App() {
         {top?.kind === "settings" ? <SettingsScreen /> : null}
         {top?.kind === "agent" ? <AgentScreen agentId={top.agentId} /> : null}
         {top?.kind === "host" ? <HostScreen agentId={top.agentId} /> : null}
+        {top?.kind === "activity" ? <ActivityScreen agentId={top.agentId} /> : null}
         {top?.kind === "agent-server" ? <AgentToolsScreen agentId={top.agentId} serverId={top.serverId} /> : null}
         {!top && tab.value === "now" ? <NowScreen /> : null}
         {!top && tab.value === "servers" ? <ServersScreen /> : null}

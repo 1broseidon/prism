@@ -7,7 +7,13 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 ### Added
 - Native actions, observed. Claude Code and Codex can report every shell command, file edit and fetch to Prism through their hooks; **Agents → Claude Code** writes an HTTP hook into `~/.claude/settings.json` and **Agents → Codex** writes a `curl` hook into `~/.codex/hooks.json`, which Codex asks you to trust in `/hooks` before it runs. Each action becomes a redacted one-line audit entry (a Codex patch is recorded by the paths it touches, never its content), the Now feed shows them beside MCP calls, and a short deny list runs in shadow to count what a real gate would have held. Nothing is held or changed in this phase.
 
+### Changed
+- The Now tab sums up the last seven days instead of listing every call: actions, how many needed a person, a bar per day, and the busiest agents. Tap an agent or **Every action** for the list.
+
 ### Fixed
+- The panel shortcut was `Ctrl+Shift+Space` (`Cmd+Shift+Space` on macOS), which 1Password takes on every platform. It is now `Ctrl+Alt+P`, and `panel_shortcut` in `prism.json` overrides it.
+- Scrollbars no longer show on ordinary screens; only the action log keeps one.
+- The panel opened wherever the window manager put it when it was not opened from a tray click, such as from the keyboard shortcut. It now lands in a fixed corner of the tray's monitor: below a top bar, above a bottom one, top right when nothing is reserved, and always inside the work area. Where the desktop reserves nothing for its bar, the last tray click (remembered between runs) says which edge the bar is on and the panel keeps clear of it. The position is reapplied after the window maps for window managers that place it themselves.
 - Update notes in Settings showed raw changelog markdown. Headings, bullets, code and bold now render, and the card links to the full release notes.
 
 ## [0.2.1] - 2026-09-06

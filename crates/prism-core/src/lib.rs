@@ -1,5 +1,6 @@
 //! Headless Prism MCP gateway: policy, stdio backends, approvals, and audit.
 
+pub mod activity;
 mod approval;
 mod audit;
 mod backend;

@@ -11,6 +11,7 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 }
 import type {
   AgentConfig,
+  ActivitySummary,
   AuditEntry,
   ConnectSnippet,
   Decision,
@@ -116,8 +117,12 @@ export function listServerTools(serverId: string) {
   return invoke<ToolInfo[]>("list_server_tools", { serverId });
 }
 
-export function listAudit(limit = 20) {
-  return invoke<AuditEntry[]>("list_audit", { limit });
+export function listAudit(limit = 20, agentId?: string) {
+  return invoke<AuditEntry[]>("list_audit", { limit, agentId });
+}
+
+export function getActivity(days = 7) {
+  return invoke<ActivitySummary>("get_activity", { days });
 }
 
 export function hidePanel() {

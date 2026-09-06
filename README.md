@@ -56,7 +56,7 @@ pnpm tauri build          # bundles land in target/release/bundle
 
 ## First run
 
-Prism starts in the tray and stays there. Click the icon on macOS and Windows, or pick **Open Prism** from the menu on Linux. `Ctrl+Shift+Space` (`Cmd+Shift+Space` on macOS) toggles the panel from anywhere.
+Prism starts in the tray and stays there. Click the icon on macOS and Windows, or pick **Open Prism** from the menu on Linux. `Ctrl+Alt+P` toggles the panel from anywhere; set `panel_shortcut` in `prism.json` to change it (`"Super+Shift+P"`, say) or to `""` to turn it off.
 
 The gateway listens on `127.0.0.1:9086`. Change it with `listen_port` in `prism.json`, which is written on first launch:
 
@@ -158,7 +158,7 @@ Prism does not sandbox the servers it launches. A server necessarily receives it
 - **No tray icon on GNOME.** Install an AppIndicator extension, then log out and back in.
 - **Servers show "failed" on Linux at login.** The keyring was still locked when Prism started. Unlock it and restart the server from the Servers tab.
 - **The agent sees no tools.** It is pending. Open the panel and approve it; Prism pushes a `tools/list_changed` notification so the client refetches.
-- **The panel opens in the wrong corner on Linux.** Set `panel_anchor` in `prism.json` to `top-right`, `top-left`, `bottom-right` or `bottom-left`. `auto` follows the cursor from the tray menu.
+- **The panel opens in the wrong corner on Linux.** Set `panel_anchor` in `prism.json` to `top-right`, `top-left`, `bottom-right` or `bottom-left`. `auto` follows the cursor when opened from the tray and otherwise picks the corner the desktop's reserved bar points at, top right when nothing is reserved.
 
 ## Development
 

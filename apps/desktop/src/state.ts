@@ -1,5 +1,6 @@
 import { signal } from "@preact/signals";
 import type {
+  ActivitySummary,
   AgentConfig,
   AuditEntry,
   ConnectSnippet,
@@ -20,6 +21,8 @@ export const pending = signal<PendingCall[]>([]);
 export const signins = signal<PendingSignIn[]>([]);
 export const rules = signal<Rule[]>([]);
 export const audit = signal<AuditEntry[]>([]);
+/** The week at a glance for the Now tab. Null until loaded. */
+export const activity = signal<ActivitySummary | null>(null);
 export const lastCreatedSnippet = signal<ConnectSnippet | null>(null);
 /** Coverage and this week's counts for native actions. Null until loaded. */
 export const native = signal<NativeStatus | null>(null);
@@ -42,6 +45,7 @@ export type Screen =
   | { kind: "agent"; agentId: string }
   | { kind: "agent-server"; agentId: string; serverId: string }
   | { kind: "host"; agentId: string }
+  | { kind: "activity"; agentId?: string }
   | { kind: "settings" };
 export const stack = signal<Screen[]>([]);
 
@@ -59,6 +63,7 @@ export const tab = signal<Tab>(TABS.includes(hashTab as Tab) ? (hashTab as Tab) 
 if (hashScreen === "add" && tab.value === "servers") stack.value = [{ kind: "add-server" }];
 if (hashScreen === "connect" && tab.value === "agents") stack.value = [{ kind: "connect-agent" }];
 if (hashScreen === "settings") stack.value = [{ kind: "settings" }];
+if (hashScreen === "activity") stack.value = [{ kind: "activity" }];
 if (hashScreen === "host") stack.value = [{ kind: "host", agentId: "host:claude-code" }];
 if (hashScreen === "host-codex") stack.value = [{ kind: "host", agentId: "host:codex" }];
 if (hashScreen && hashScreen.startsWith("a") && tab.value === "agents" && hashScreen !== "connect") {

@@ -119,10 +119,11 @@ export function Switch({ checked, onChange, label }: { checked: boolean; onChang
 }
 
 /** A screen owns its own scroll region and an optional action bar pinned to the bottom, phone-style. */
-export function Screen({ children, footer }: { children: ComponentChildren; footer?: ComponentChildren }) {
+/** `log` marks a screen that is a long list by nature and so shows a scrollbar; others scroll without one. */
+export function Screen({ children, footer, log }: { children: ComponentChildren; footer?: ComponentChildren; log?: boolean }) {
   return (
     <>
-      <div class="screen-body">{children}</div>
+      <div class={`screen-body ${log ? "log" : ""}`}>{children}</div>
       {footer ? <div class="screen-footer">{footer}</div> : null}
     </>
   );

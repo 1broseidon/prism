@@ -1,5 +1,8 @@
 /** Fixture backend for `pnpm dev` in a plain browser, where Tauri's invoke is absent. Never used inside the app. */
 import type {
+  ActivitySummary,
+  AgentActivity,
+  DayActivity,
   AgentConfig,
   AuditEntry,
   ConnectSnippet,
@@ -68,6 +71,55 @@ const nativeStatus = {
   ],
 };
 const nat = (host: string, subject: string, extra: Partial<import("./types").NativeDetail> = {}) => ({ host, subject, cwd: "/home/george/Projects/prism", session: "s-1", via_prism: false, ...extra });
+/** A week that looks lived in: today's rows come from the feed above, earlier days are made up. */
+function activitySummary(): ActivitySummary {
+  const seen = audit.filter((e) => !e.native?.via_prism);
+  const flagged = (e: AuditEntry) => (e.native ? !!e.native.would_hold : e.source.kind === "human" || e.source.kind === "timeout" || e.verdict === "denied");
+  const byAgent = new Map<string, AgentActivity>();
+  for (const e of seen) {
+    const a = byAgent.get(e.agent_id) ?? { id: e.agent_id, name: e.agent_name, host: !!e.native, total: 0, attention: 0 };
+    a.total += 1;
+    if (flagged(e)) a.attention += 1;
+    byAgent.set(e.agent_id, a);
+  }
+  const earlier = [
+    [41, 2],
+    [63, 0],
+    [12, 1],
+    [88, 4],
+    [57, 1],
+    [9, 0],
+  ];
+  const todayFlagged = seen.filter(flagged).length;
+  const daily: DayActivity[] = earlier.map(([routine, attention], i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    return { date: d.toISOString().slice(0, 10), routine, attention };
+  });
+  daily.push({ date: new Date().toISOString().slice(0, 10), routine: seen.length - todayFlagged, attention: todayFlagged });
+  const agents = [...byAgent.values()].sort((x, y) => y.total - x.total);
+  const priorTotal = earlier.reduce((n, [r, a]) => n + r + a, 0);
+  const priorAttention = earlier.reduce((n, [, a]) => n + a, 0);
+  if (agents[0]) {
+    agents[0].total += priorTotal;
+    agents[0].attention += priorAttention;
+  }
+  const mcp = seen.filter((e) => !e.native);
+  return {
+    days: 7,
+    total: seen.length + priorTotal,
+    attention: todayFlagged + priorAttention,
+    mcp: {
+      allowed: mcp.filter((e) => e.verdict === "allowed").length + 140,
+      denied: mcp.filter((e) => e.verdict === "denied").length + 2,
+      asked: mcp.filter((e) => e.source.kind === "human" || e.source.kind === "timeout").length + 3,
+      errors: mcp.filter((e) => e.verdict === "error").length,
+    },
+    agents,
+    daily,
+  };
+}
+
 let audit: AuditEntry[] = [
   { id: "n1", at: iso(30), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "Bash", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "cargo test -p prism-core") },
   { id: "n2", at: iso(55), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "Edit", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "~/Projects/prism/crates/prism-core/src/native.rs") },
@@ -165,7 +217,9 @@ export const mock = {
   get_settings: () => delay(settings),
   set_settings: (a: { settings: Settings }) => { settings = { ...a.settings }; return delay(undefined); },
   list_server_tools: (a: { serverId: string }) => delay(tools[a.serverId] ?? []),
-  list_audit: (a: { limit: number }) => delay(audit.slice(0, a.limit)),
+  list_audit: (a: { limit: number; agentId?: string }) =>
+    delay(audit.filter((e) => !a.agentId || e.agent_id === a.agentId).slice(0, a.limit)),
+  get_activity: () => delay(activitySummary()),
   get_native_status: () => delay(nativeStatus),
   set_observe_native: (a: { on: boolean }) => { nativeStatus.observe_native = a.on; return delay(undefined); },
   rotate_hook_token: () => { for (const s of nativeStatus.setup) s.hook_installed = false; return delay(undefined); },

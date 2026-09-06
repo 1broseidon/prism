@@ -1,9 +1,9 @@
 import { useEffect } from "preact/hooks";
 import * as api from "../api";
-import { agents, audit, errorMessage, feedFilter, pending, signins, status } from "../state";
-import { clock, mmss, now, relative, secondsUntil } from "../time";
-import type { AgentConfig, AuditEntry, Decision, PendingCall, PendingSignIn } from "../types";
-import { Button, CodeBlock, Empty, Label, Screen, Segmented, describeError } from "../ui";
+import { activity, agents, errorMessage, pending, push, signins, status } from "../state";
+import { mmss, now, relative, secondsUntil } from "../time";
+import type { ActivitySummary, AgentConfig, DayActivity, Decision, PendingCall, PendingSignIn } from "../types";
+import { Button, CodeBlock, Empty, Label, Screen, describeError } from "../ui";
 
 /** Fallback when a call carries no deadline; mirrors DEFAULT_HOLD_TIMEOUT in prism-core. */
 const HOLD_SECONDS = 120;
@@ -167,58 +167,85 @@ function HoldCard({ call, first }: { call: PendingCall; first: boolean }) {
   );
 }
 
-function verdictTone(entry: AuditEntry): string {
-  switch (entry.verdict) {
-    case "allowed":
-      return "ok";
-    case "denied":
-      return "danger";
-    case "timeout":
-      return "warn";
-    default:
-      return "danger";
-  }
+function dayLabel(day: DayActivity, today: boolean): string {
+  if (today) return "Now";
+  return new Date(`${day.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "narrow" });
 }
 
-function sourceText(entry: AuditEntry): string {
-  switch (entry.source.kind) {
-    case "human":
-      return "you";
-    case "rule":
-      return "rule";
-    case "unapproved":
-      return "unapproved";
-    case "posture":
-      return entry.source.posture.replace("_", " ");
-    case "do_not_disturb":
-      return "dnd";
-    case "observed":
-      return "seen";
-    default:
-      return "timeout";
-  }
-}
-
-/** The tool as a short label. Claude Code's names are already short; MCP tools drop the server. */
-function nativeTool(entry: AuditEntry): string {
-  const t = entry.tool;
-  if (t.startsWith("mcp__")) return t.split("__").slice(2).join("__") || t;
-  return t;
-}
-
-function NativeRow({ entry }: { entry: AuditEntry }) {
-  const n = entry.native!;
-  const reason = n.would_hold ? `Would have asked: ${n.would_hold.replace(/_/g, " ")}` : undefined;
+/** One bar per day. Routine actions in ink, the ones that needed a person in amber on top. */
+function DailyChart({ days }: { days: DayActivity[] }) {
+  const max = Math.max(1, ...days.map((d) => d.routine + d.attention));
+  const last = days.length - 1;
   return (
-    <div class={`row native ${n.would_hold ? "would-hold" : ""}`} title={reason}>
-      <time dateTime={entry.at}>{clock(entry.at)}</time>
-      <span class="who">
-        <span class={`dot ${n.would_hold ? "accent" : ""}`} />
-        <b>{nativeTool(entry)}</b>
-        <span class="subject">{n.subject}</span>
-      </span>
-      <span class="src">{n.would_hold ? "would ask" : entry.agent_name.toLowerCase()}</span>
+    <div class="daily" role="img" aria-label="Actions per day">
+      {days.map((d, i) => {
+        const total = d.routine + d.attention;
+        const title = `${d.date}: ${total} action${total === 1 ? "" : "s"}${d.attention ? `, ${d.attention} needed attention` : ""}`;
+        return (
+          <div class={`day ${i === last ? "today" : ""}`} key={d.date} title={title}>
+            <div class="bar">
+              <span class="attention" style={{ height: `${(d.attention / max) * 100}%` }} />
+              <span class="routine" style={{ height: `${(d.routine / max) * 100}%` }} />
+            </div>
+            <span class="lbl">{dayLabel(d, i === last)}</span>
+          </div>
+        );
+      })}
     </div>
+  );
+}
+
+/** The week at a glance. Every number is a door into the list, not the list itself. */
+function ActivityBlock({ summary }: { summary: ActivitySummary }) {
+  const top = summary.agents.slice(0, 3);
+  const widest = Math.max(1, ...top.map((a) => a.total));
+  const mcpBits = [
+    `${summary.mcp.allowed} allowed`,
+    summary.mcp.asked ? `${summary.mcp.asked} asked you` : null,
+    summary.mcp.denied ? `${summary.mcp.denied} denied` : null,
+    summary.mcp.errors ? `${summary.mcp.errors} failed` : null,
+  ].filter(Boolean);
+  return (
+    <>
+      <div class="activity-head">
+        <div class="stat">
+          <b>{summary.total}</b>
+          <span>actions</span>
+        </div>
+        <div class="stat">
+          <b class={summary.attention ? "accent" : ""}>{summary.attention}</b>
+          <span>needed attention</span>
+        </div>
+      </div>
+      <DailyChart days={summary.daily} />
+      <div class="agent-bars">
+        {top.map((a) => (
+          <button
+            type="button"
+            class="agent-bar"
+            key={a.id}
+            title={`${a.total} actions, ${a.attention} needed attention. Show them.`}
+            onClick={() => push({ kind: "activity", agentId: a.id })}
+          >
+            <span class="name">
+              {a.name}
+              {a.host ? <span class="kind"> native</span> : null}
+            </span>
+            <span class="track">
+              <span class="share" style={{ width: `${(a.total / widest) * 100}%` }} />
+              <span class="attention" style={{ width: `${(a.attention / widest) * 100}%` }} />
+            </span>
+            <span class="agent-count">{a.total}</span>
+          </button>
+        ))}
+      </div>
+      <div class="activity-foot">
+        <span class="hint">{summary.mcp.allowed + summary.mcp.denied + summary.mcp.asked ? `MCP: ${mcpBits.join(" · ")}` : "No MCP calls yet"}</span>
+        <Button variant="quiet" onClick={() => push({ kind: "activity" })}>
+          Every action
+        </Button>
+      </div>
+    </>
   );
 }
 
@@ -227,11 +254,7 @@ export function NowScreen() {
   const calls = pending.value;
   const requests = agents.value.filter((a) => a.status === "pending");
   const logins = signins.value;
-  const filter = feedFilter.value;
-  const visible = audit.value
-    .filter((e) => !(e.native?.via_prism))
-    .filter((e) => (filter === "all" ? true : filter === "native" ? !!e.native : !e.native))
-    .slice(0, 40);
+  const summary = activity.value;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -279,7 +302,7 @@ export function NowScreen() {
         </>
       )}
 
-      <div class="section feed">
+      <div class="section activity">
         <Label
           right={
             st ? (
@@ -289,38 +312,14 @@ export function NowScreen() {
             ) : null
           }
         >
-          Recent
+          Last {summary?.days ?? 7} days
         </Label>
-        {audit.value.some((e) => e.native) ? (
-          <Segmented
-            small
-            label="Feed filter"
-            value={feedFilter.value}
-            options={[
-              { value: "all", label: "All" },
-              { value: "mcp", label: "MCP" },
-              { value: "native", label: "Native" },
-            ]}
-            onChange={(v) => (feedFilter.value = v)}
-          />
-        ) : null}
-        {visible.length === 0 ? (
-          <div class="muted small">No calls yet.</div>
+        {summary === null ? (
+          <div class="muted small">Loading…</div>
+        ) : summary.total === 0 ? (
+          <div class="muted small">No actions yet. Connect an agent, or set up a host hook under Agents.</div>
         ) : (
-          visible.map((entry) => entry.native ? (
-            <NativeRow key={entry.id} entry={entry} />
-          ) : (
-            <div class="row" key={entry.id}>
-              <time dateTime={entry.at}>{clock(entry.at)}</time>
-              <span class="who">
-                <span class={`dot ${verdictTone(entry)}`} />
-                <b>{entry.agent_name}</b>
-                <code>{entry.tool}</code>
-              </span>
-              <span class="src">{sourceText(entry)}</span>
-              {entry.error ? <span class="err">{entry.error}</span> : null}
-            </div>
-          ))
+          <ActivityBlock summary={summary} />
         )}
       </div>
       </Screen>

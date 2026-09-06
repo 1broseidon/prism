@@ -708,6 +708,11 @@ impl Gateway {
         self.audit.list(limit)
     }
 
+    /// The last `days` local days summed up: totals, what needed a person, per agent, per day.
+    pub async fn activity(&self, days: u32) -> crate::activity::ActivitySummary {
+        crate::activity::summarize(self.audit.list(usize::MAX).iter(), days, Utc::now())
+    }
+
     // ----- native actions (observe) ------------------------------------------------------
 
     pub(crate) fn hook_token_matches(&self, candidate: &str) -> bool {
@@ -939,6 +944,14 @@ impl Gateway {
             .try_read()
             .map(|c| c.panel_anchor)
             .unwrap_or_default()
+    }
+
+    /// The configured panel shortcut, if the user set one.
+    pub fn panel_shortcut(&self) -> Option<String> {
+        self.config
+            .try_read()
+            .ok()
+            .and_then(|c| c.panel_shortcut.clone())
     }
 
     pub fn subscribe(&self) -> EventReceiver {

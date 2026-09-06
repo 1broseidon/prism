@@ -262,3 +262,30 @@ export type UpdateEvent =
   | { state: "downloading"; downloaded: number; total: number | null }
   | { state: "installing" }
   | { state: "error"; message: string };
+
+/** The last few days summed up. `attention` counts held calls, denials and would-ask native actions. */
+export interface ActivitySummary {
+  days: number;
+  total: number;
+  attention: number;
+  mcp: { allowed: number; denied: number; asked: number; errors: number };
+  /** Busiest first. */
+  agents: AgentActivity[];
+  /** Oldest first, today last. */
+  daily: DayActivity[];
+}
+
+export interface AgentActivity {
+  id: string;
+  name: string;
+  host: boolean;
+  total: number;
+  attention: number;
+}
+
+export interface DayActivity {
+  /** Local calendar day, YYYY-MM-DD. */
+  date: string;
+  routine: number;
+  attention: number;
+}

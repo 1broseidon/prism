@@ -199,8 +199,28 @@ kbd {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 var(--space-4) var(--space-5);
+  /* Screens are laid out to fit. Where one runs long it still scrolls, without a bar; only a
+     list that is meant to be long (the action log) shows one. */
+  scrollbar-width: none;
+}
+
+.screen-body::-webkit-scrollbar {
+  display: none;
+}
+
+.screen-body.log {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line-strong) transparent;
+}
+
+.screen-body.log::-webkit-scrollbar {
+  display: block;
+  width: 6px;
+}
+
+.screen-body.log::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 3px;
 }
 
 .screen-footer {
@@ -1276,4 +1296,186 @@ textarea.input {
 
 .shadow-rules .shadow-count.hit {
   color: var(--color-accent);
+}
+
+/* ---- Activity: the week at a glance ------------------------------------------------------ */
+
+.activity-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin: var(--space-2) 0 var(--space-3);
+}
+
+.activity-head .stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.activity-head .stat b {
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-head .stat b.accent {
+  color: var(--color-accent-text);
+}
+
+.activity-head .stat span {
+  color: var(--color-ink-3);
+  font-size: var(--text-sm);
+}
+
+.daily {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: var(--space-2);
+  height: 64px;
+  margin-bottom: var(--space-3);
+}
+
+.daily .day {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.daily .bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.daily .bar span {
+  display: block;
+  min-height: 0;
+}
+
+.daily .bar .routine {
+  background: var(--color-ink-3);
+  opacity: 0.5;
+  border-radius: 2px 2px 0 0;
+}
+
+.daily .bar .attention {
+  background: var(--color-accent);
+  border-radius: 2px 2px 0 0;
+}
+
+.daily .bar .attention + .routine {
+  border-radius: 0;
+}
+
+.daily .lbl {
+  text-align: center;
+  color: var(--color-ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.daily .day.today .lbl {
+  color: var(--color-ink);
+}
+
+.agent-bars {
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 38%) minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-3);
+  width: 100%;
+  min-height: var(--row-h);
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid var(--color-line);
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-bar:last-child {
+  border-bottom: 0;
+}
+
+.agent-bar:hover .name,
+.agent-bar:focus-visible .name {
+  color: var(--color-ink);
+}
+
+.agent-bar:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+.agent-bar .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-ink-2);
+}
+
+.agent-bar .track {
+  position: relative;
+  height: 6px;
+  background: var(--color-well);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.agent-bar .track span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+}
+
+.agent-bar .track .share {
+  background: var(--color-ink-2);
+  opacity: 0.85;
+}
+
+.agent-bar .track .attention {
+  background: var(--color-accent);
+}
+
+.agent-bar .agent-count {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.activity-foot .hint {
+  margin: 0;
+  min-width: 0;
+}
+
+.agent-bar .name .kind {
+  color: var(--color-ink-3);
+  font-size: var(--text-sm);
 }
