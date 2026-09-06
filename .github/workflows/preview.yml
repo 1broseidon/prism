@@ -45,11 +45,45 @@ jobs:
       - name: Frontend deps
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
+      # Use the same Apple identity and notarization as tagged releases when configured.
+      - name: Apple signing secrets
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+              echo "::add-mask::${!name}"
+              echo "$name=${!name}" >> "$GITHUB_ENV"
+            done
+            echo "Signing as: $APPLE_SIGNING_IDENTITY"
+          else
+            # Tauri skips codesign entirely without an identity, and an unsigned bundle shows as
+            # "damaged" on Apple silicon. "-" ad-hoc signs, which downgrades that to the
+            # "unidentified developer" dialog that right-click > Open can pass.
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "No Developer ID certificate; bundle will be ad-hoc signed."
+          fi
+          if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_KEY_P8" ] && [ -n "$APPLE_CERTIFICATE" ]; then
+            keypath="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$keypath"
+            chmod 600 "$keypath"
+            echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+            echo "APPLE_API_KEY_PATH=$keypath" >> "$GITHUB_ENV"
+            echo "Notarizing with API key $APPLE_API_KEY."
+          else
+            echo "Not notarizing."
+          fi
+
       - name: Build bundles
         working-directory: apps/desktop
         env:
-          # Ad-hoc on macOS so the preview opens with right-click > Open; releases sign properly.
-          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
