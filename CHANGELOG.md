@@ -4,6 +4,8 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-06
+
 ### Changed
 - A harness is one agent. Every OAuth client that names Claude Code or Codex, from user settings or any project, now joins that harness's single entry alongside its hooks: one posture, one attention level, one rule set. The Agents tab is one list, a harness row shows its connections and hook coverage, and its screen lists each registration under **Connections** with **Forget** per registration and **Sign out everywhere**. A further registration of an approved harness asks once, as a **wants to connect from a new place** card. Agents that earlier versions made per registration are folded into the harness entry on first start, with their tokens, rules, posture and attention. Each client records where it registered from, so a harness on another machine will be its own entry when remote access lands.
 - The page the browser lands on after an OAuth sign-in matches the panel: the Prism mark centred with a green facet, "Signed in.", the server's name, and "You can close this tab." A refused sign-in shows the same page in red, a stale one in muted ink. It loads nothing from the network.
