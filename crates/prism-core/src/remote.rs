@@ -253,6 +253,41 @@ pub(crate) struct SignIn {
 #[derive(Clone)]
 struct CallbackState {
     tx: Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    server_name: String,
+}
+
+/// The page the browser lands on. Same tokens as the panel; nothing loaded from anywhere.
+const CALLBACK_PAGE: &str = include_str!("callback.html");
+
+fn html_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Fill the callback page for one outcome. `lede` may carry the escaped server name in a `<b>`.
+fn callback_page(
+    state: &str,
+    eyebrow_class: &str,
+    eyebrow: &str,
+    title: &str,
+    lede: &str,
+) -> String {
+    CALLBACK_PAGE
+        .replace("{{state}}", state)
+        .replace("{{eyebrow_class}}", eyebrow_class)
+        .replace("{{eyebrow}}", eyebrow)
+        .replace("{{title}}", title)
+        .replace("{{lede}}", lede)
 }
 
 async fn callback(
@@ -271,17 +306,39 @@ async fn callback(
         .and_then(|mut slot| slot.take())
         .map(|tx| tx.send(query).is_ok())
         .unwrap_or(false);
-    let body = if params.contains_key("error") {
-        "<p>The sign-in was refused. You can close this tab.</p>"
+    let name = html_escape(&state.server_name);
+    let page = if params.contains_key("error") {
+        callback_page(
+            "refused",
+            "warn",
+            "Not connected",
+            "Sign-in refused.",
+            &format!(
+                "<b>{name}</b> did not grant access, so Prism has nothing stored. The server stays as \
+                 <b>needs sign-in</b> until you try again from the panel."
+            ),
+        )
     } else if delivered {
-        "<p>Signed in. You can close this tab.</p>"
+        callback_page(
+            "ok",
+            "",
+            "Connected",
+            "Signed in.",
+            &format!(
+                "Prism has what it needs from <b>{name}</b>. Its tools appear in the Servers tab in a \
+                 moment, available to your agents through the rules you set."
+            ),
+        )
     } else {
-        "<p>This sign-in already finished. You can close this tab.</p>"
+        callback_page(
+            "done",
+            "quiet",
+            "Already finished",
+            "This sign-in already finished.",
+            "Prism took the code the first time this page opened. Check the Servers tab for the result.",
+        )
     };
-    Html(format!(
-        "<!doctype html><meta charset=utf-8><title>Prism</title><body style=\"font-family:system-ui;margin:3rem\"><h1>Prism</h1>{body}</body>"
-    ))
-    .into_response()
+    Html(page).into_response()
 }
 
 fn urlencode(raw: &str) -> String {
@@ -335,6 +392,7 @@ pub(crate) async fn begin_sign_in(
         .route("/callback", get(callback))
         .with_state(CallbackState {
             tx: Arc::new(std::sync::Mutex::new(Some(query_tx))),
+            server_name: config.name.clone(),
         });
     let server_name = config.name.clone();
     tokio::spawn(async move {
@@ -408,6 +466,26 @@ mod tests {
         assert!(transport_config("https://x.example/mcp", &headers).is_ok());
         headers.insert("bad header".to_string(), "x".to_string());
         assert!(transport_config("https://x.example/mcp", &headers).is_err());
+    }
+
+    #[test]
+    fn callback_page_escapes_the_server_name_and_marks_the_outcome() {
+        let name = html_escape("acme <b>&</b> \"co\"");
+        let page = callback_page(
+            "ok",
+            "",
+            "Connected",
+            "Signed in.",
+            &format!("from <b>{name}</b>"),
+        );
+        assert!(page.contains("data-state=\"ok\""));
+        assert!(page.contains("<h1>Signed in.</h1>"));
+        assert!(page.contains("from <b>acme &lt;b&gt;&amp;&lt;/b&gt; &quot;co&quot;</b>"));
+        assert!(!page.contains("{{"), "every placeholder is filled");
+        assert!(
+            !page.contains("http"),
+            "the page loads nothing from anywhere"
+        );
     }
 
     #[test]
@@ -698,7 +776,10 @@ mod tests {
         assert!(location.contains("/callback?"), "{location}");
         let landed = browser.get(&location).send().await.unwrap();
         assert_eq!(landed.status(), 200);
-        assert!(landed.text().await.unwrap().contains("Signed in"));
+        let landed = landed.text().await.unwrap();
+        assert!(landed.contains("Signed in"));
+        assert!(landed.contains("data-state=\"ok\""));
+        assert!(landed.contains("<b>upstream</b>"), "{landed}");
 
         let status = wait_for(&gateway, &added.id, "running", |s| {
             matches!(s, BackendStatus::Running { .. })

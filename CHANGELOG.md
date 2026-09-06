@@ -4,6 +4,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Changed
+- The page the browser lands on after an OAuth sign-in matches the panel: the Prism mark centred with a green facet, "Signed in.", the server's name, and "You can close this tab." A refused sign-in shows the same page in red, a stale one in muted ink. It loads nothing from the network.
+
 ## [0.3.0] - 2026-09-06
 
 ### Added
