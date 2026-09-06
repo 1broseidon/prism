@@ -169,7 +169,8 @@ function NativeSection() {
   };
   const exportReport = async () => {
     try {
-      setExported(await api.exportNativeReport());
+      const report = await api.exportNativeReport();
+      setExported(`${report.total} matches. ${report.path}`);
     } catch (err) {
       errorMessage.value = describeError(err);
     }
@@ -188,10 +189,11 @@ function NativeSection() {
       </div>
       <div class="actions update-actions">
         <Button variant="quiet" onClick={() => void exportReport()}>
-          Export needed attention, 30 days
+          Export observed matches
         </Button>
       </div>
-      {exported ? <p class="hint">Saved to {exported}</p> : null}
+      <p class="hint">Retained history: up to 30 days / 20 MiB. Coverage file included.</p>
+      {exported ? <p class="hint">Saved {exported}</p> : null}
     </section>
   );
 }

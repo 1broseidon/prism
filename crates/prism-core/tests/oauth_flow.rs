@@ -178,6 +178,83 @@ async fn start() -> (std::sync::Arc<Gateway>, u16, tempfile::TempDir) {
 }
 
 #[tokio::test]
+async fn discovery_supports_stateless_requests_and_legacy_sessions() {
+    let (gateway, port, _dir) = start().await;
+    let (_, access) = signed_in_agent(&gateway, port, "discovery-client").await;
+    let bearer = format!("Bearer {access}");
+
+    // Discovery and modern tools requests work without initialize or a session.
+    let discovery = http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+            ("Authorization", &bearer),
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "server/discover"),
+        ],
+        r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+    )
+    .await;
+    assert_eq!(discovery.status, 200, "{}", discovery.body);
+    assert!(discovery.body.contains("2026-07-28"), "{}", discovery.body);
+    assert!(discovery.body.contains("2025-11-25"), "{}", discovery.body);
+    assert!(discovery.body.contains("Prism"), "{}", discovery.body);
+    assert!(!discovery.headers.contains_key("mcp-session-id"));
+    let modern = modern_request(port, &access, "tools/list", serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(modern.status(), 200);
+    assert!(!modern.headers().contains_key("mcp-session-id"));
+    let modern = rpc_response(modern).await;
+    assert_eq!(modern["result"]["resultType"], "complete");
+    assert_eq!(modern["result"]["ttlMs"], 0);
+    assert_eq!(modern["result"]["cacheScope"], "private");
+    assert_eq!(modern["result"]["tools"], serde_json::json!([]));
+
+    // Follow discovery with the legacy handshake and a real tools request.
+    let init = http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+            ("Authorization", &bearer),
+        ],
+        &INIT.replace("2025-06-18", "2025-11-25"),
+    )
+    .await;
+    assert_eq!(init.status, 200, "{}", init.body);
+    assert!(init.body.contains("2025-11-25"), "{}", init.body);
+    let session = &init.headers["mcp-session-id"];
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json, text/event-stream"),
+        ("Authorization", bearer.as_str()),
+        ("MCP-Protocol-Version", "2025-11-25"),
+        ("MCP-Session-Id", session.as_str()),
+    ];
+    let notified = http(
+        port,
+        "POST",
+        "/mcp",
+        &headers,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    )
+    .await;
+    assert_eq!(notified.status, 202, "{}", notified.body);
+    let tools = http(port, "POST", "/mcp", &headers, LIST_TOOLS).await;
+    assert_eq!(tools.status, 200, "{}", tools.body);
+    assert!(tools.body.contains(r#""tools":[]"#), "{}", tools.body);
+    assert!(!tools.body.contains("error"), "{}", tools.body);
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn authorize_accepts_origin_resource_and_rejects_a_foreign_one() {
     let (gateway, port, _dir) = start().await;
     let reg = http(
@@ -1185,4 +1262,658 @@ async fn oauth_http_limits_reject_floods_and_large_bodies() {
         .clients
         .is_empty());
     gateway.shutdown().await;
+}
+
+/// Modern requests deliberately all claim the same clientInfo: the bearer,
+/// never the client's self-description, must decide policy and audit identity.
+fn modern_request(
+    port: u16,
+    token: &str,
+    method: &str,
+    mut params: serde_json::Value,
+) -> reqwest::RequestBuilder {
+    params["_meta"] = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name":"spoofed-client", "version":"1"},
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let mut request = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/mcp"))
+        .bearer_auth(token)
+        .header("Accept", "application/json, text/event-stream")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    if let Some(name) = params.get("name").and_then(|n| n.as_str()) {
+        request = request.header("Mcp-Name", name);
+    }
+    request.json(&serde_json::json!({"jsonrpc":"2.0", "id":42, "method":method, "params":params}))
+}
+
+async fn rpc_response(response: reqwest::Response) -> serde_json::Value {
+    let text = tokio::time::timeout(Duration::from_secs(5), response.text())
+        .await
+        .unwrap()
+        .unwrap();
+    if text.starts_with('{') {
+        return serde_json::from_str(&text).unwrap();
+    }
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value.get("result").is_some() || value.get("error").is_some())
+        .unwrap_or_else(|| panic!("no JSON-RPC response: {text}"))
+}
+
+#[derive(Clone)]
+struct CountingTool(
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    rmcp::model::ProtocolVersion,
+);
+
+impl rmcp::ServerHandler for CountingTool {
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        std::borrow::Cow::Owned(vec![self.1.clone()])
+    }
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+    }
+    async fn list_tools(
+        &self,
+        _: Option<rmcp::model::PaginatedRequestParams>,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let mut result = rmcp::model::ListToolsResult::default();
+        result.tools.push(rmcp::model::Tool::new(
+            "ping",
+            "Count an execution",
+            serde_json::json!({"type":"object"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ));
+        Ok(result)
+    }
+    async fn call_tool(
+        &self,
+        _: rmcp::model::CallToolRequestParams,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("pong")])
+                .into(),
+        )
+    }
+}
+
+struct ToolFixture {
+    config: prism_core::ServerConfig,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for ToolFixture {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl ToolFixture {
+    async fn start() -> Self {
+        Self::with_version(rmcp::model::ProtocolVersion::V_2025_11_25).await
+    }
+    async fn with_version(version: rmcp::model::ProtocolVersion) -> Self {
+        use rmcp::transport::streamable_http_server::{
+            session::local::LocalSessionManager, tower::StreamableHttpService,
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = CountingTool(calls.clone(), version);
+        let service = StreamableHttpService::new(
+            move || Ok(tool.clone()),
+            std::sync::Arc::new(LocalSessionManager::default()),
+            rmcp::transport::StreamableHttpServerConfig::default().disable_allowed_hosts(),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+                .await
+                .unwrap();
+        });
+        let config = serde_json::from_value(serde_json::json!({"id":"fixture", "name":"fixture", "url":format!("http://127.0.0.1:{port}/mcp"), "enabled":true})).unwrap();
+        Self {
+            config,
+            calls,
+            task,
+        }
+    }
+}
+
+async fn wait_for_call(gateway: &Gateway) -> prism_core::PendingCall {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(call) = gateway.pending().await.into_iter().next() {
+                break call;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn stateless_calls_preserve_bearer_identity_policy_and_audit() {
+    for version in [
+        rmcp::model::ProtocolVersion::V_2025_11_25,
+        rmcp::model::ProtocolVersion::V_2026_07_28,
+    ] {
+        assert_stateless_calls_through_upstream(version).await;
+    }
+}
+
+async fn assert_stateless_calls_through_upstream(version: rmcp::model::ProtocolVersion) {
+    let (gateway, port, _dir) = start().await;
+    let fixture = ToolFixture::with_version(version).await;
+    gateway.add_server(fixture.config.clone()).await.unwrap();
+    let (agent_a, token_a) = signed_in_agent(&gateway, port, "modern-a").await;
+    let (agent_b, token_b) = signed_in_agent(&gateway, port, "modern-b").await;
+    let call = serde_json::json!({"name":"fixture__ping", "arguments":{}});
+
+    for (agent, token, verdict) in [(&agent_a, &token_a, "allow"), (&agent_b, &token_b, "deny")] {
+        let request = modern_request(port, token, "tools/call", call.clone());
+        let response = tokio::spawn(async move { request.send().await.unwrap() });
+        let pending = wait_for_call(&gateway).await;
+        assert_eq!(&pending.agent_id, agent);
+        gateway
+            .decide(
+                &pending.id,
+                serde_json::from_value(serde_json::json!({"verdict":verdict, "scope":"always"}))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(!response.headers().contains_key("mcp-session-id"));
+        let reply = rpc_response(response).await;
+        assert_eq!(reply["result"]["resultType"], "complete", "{reply}");
+        assert_eq!(
+            reply["result"]["isError"].as_bool().unwrap_or(false),
+            verdict == "deny"
+        );
+    }
+    assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let denied = modern_request(port, &token_b, "tools/call", call.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rpc_response(denied).await["result"]["isError"], true);
+    assert!(gateway.pending().await.is_empty());
+    assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let audit = gateway.audit(10).await;
+    assert_eq!(audit.len(), 3);
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|e| e.agent_id == agent_a && e.verdict == prism_core::AuditVerdict::Allowed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|e| e.agent_id == agent_b && e.verdict == prism_core::AuditVerdict::Denied)
+            .count(),
+        2
+    );
+    assert!(gateway
+        .agents()
+        .await
+        .iter()
+        .all(|a| a.agent.name != "spoofed-client"));
+
+    // The same upstream also serves an older downstream client. Preserve its
+    // legacy wire shape even when the upstream speaks the July protocol.
+    let bearer = format!("Bearer {token_a}");
+    let init = http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+            ("Authorization", &bearer),
+        ],
+        INIT,
+    )
+    .await;
+    assert_eq!(init.status, 200, "{}", init.body);
+    let session = &init.headers["mcp-session-id"];
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json, text/event-stream"),
+        ("Authorization", bearer.as_str()),
+        ("MCP-Session-Id", session.as_str()),
+        ("MCP-Protocol-Version", "2025-06-18"),
+    ];
+    let ready = http(
+        port,
+        "POST",
+        "/mcp",
+        &headers,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    )
+    .await;
+    assert_eq!(ready.status, 202);
+    let legacy = http(port, "POST", "/mcp", &headers, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fixture__ping","arguments":{}}}"#).await;
+    assert_eq!(legacy.status, 200, "{}", legacy.body);
+    assert!(legacy.body.contains("pong"), "{}", legacy.body);
+    assert!(!legacy.body.contains("resultType"), "{}", legacy.body);
+    assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    gateway.revoke_agent_tokens(&agent_a).await.unwrap();
+    assert_eq!(
+        modern_request(port, &token_a, "tools/call", call)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    gateway.shutdown().await;
+}
+
+async fn stream_until(response: &mut reqwest::Response, needle: &str) -> String {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut text = String::new();
+        loop {
+            let bytes = response.chunk().await.unwrap().expect("stream ended early");
+            text.push_str(&String::from_utf8_lossy(&bytes));
+            if text.contains(needle) {
+                break text;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn stateless_subscriptions_notify_and_end_on_revoke_or_disconnect() {
+    let (gateway, port, _dir) = start().await;
+    let token = gateway.create_manual_agent("listener").await.unwrap();
+    let mut response = modern_request(
+        port,
+        &token.token,
+        "subscriptions/listen",
+        serde_json::json!({"notifications":{"toolsListChanged":true,"promptsListChanged":true}}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+    let ack = stream_until(&mut response, "notifications/subscriptions/acknowledged").await;
+    assert!(ack.contains("toolsListChanged"));
+    assert!(!ack.contains("promptsListChanged"));
+    let fixture = ToolFixture::start().await;
+    gateway.add_server(fixture.config.clone()).await.unwrap();
+    stream_until(&mut response, "notifications/tools/list_changed").await;
+    assert!(
+        gateway
+            .agents()
+            .await
+            .into_iter()
+            .find(|a| a.agent.id == token.agent_id)
+            .unwrap()
+            .connected
+    );
+    gateway.revoke_token(&token.token).await;
+    tokio::time::timeout(Duration::from_secs(3), response.text())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        modern_request(port, &token.token, "tools/list", serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
+    let token2 = gateway
+        .create_manual_agent("disconnected-listener")
+        .await
+        .unwrap();
+    let mut response = modern_request(
+        port,
+        &token2.token,
+        "subscriptions/listen",
+        serde_json::json!({"notifications":{"toolsListChanged":true}}),
+    )
+    .send()
+    .await
+    .unwrap();
+    stream_until(&mut response, "notifications/subscriptions/acknowledged").await;
+    drop(response);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if gateway.agents().await.iter().all(|a| !a.connected) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn stateless_disconnect_cancels_pending_approval_without_executing() {
+    let (gateway, port, _dir) = start().await;
+    let fixture = ToolFixture::start().await;
+    gateway.add_server(fixture.config.clone()).await.unwrap();
+    let token = gateway
+        .create_manual_agent("cancelled-caller")
+        .await
+        .unwrap();
+    let mut events = gateway.subscribe();
+    let request = modern_request(
+        port,
+        &token.token,
+        "tools/call",
+        serde_json::json!({"name":"fixture__ping", "arguments":{}}),
+    );
+    let response = tokio::spawn(async move { request.send().await });
+    let pending = wait_for_call(&gateway).await;
+    response.abort();
+    let _ = response.await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let prism_core::GatewayEvent::CallCancelled { id } = events.recv().await.unwrap() {
+                assert_eq!(id, pending.id);
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(gateway.pending().await.is_empty());
+    assert!(gateway
+        .decide(
+            &pending.id,
+            serde_json::from_value(serde_json::json!({"verdict":"allow", "scope":"always"}))
+                .unwrap()
+        )
+        .await
+        .is_err());
+    assert!(gateway.rules().await.is_empty());
+    assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let audit = gateway.audit(10).await;
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].agent_id, token.agent_id);
+    assert!(matches!(
+        audit[0].source,
+        prism_core::AuditSource::Cancelled
+    ));
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn modern_requests_reject_missing_auth_and_mismatched_metadata() {
+    let (gateway, port, _dir) = start().await;
+    let token = gateway
+        .create_manual_agent("metadata-client")
+        .await
+        .unwrap();
+    let mut anonymous =
+        modern_request(port, &token.token, "server/discover", serde_json::json!({}))
+            .build()
+            .unwrap();
+    anonymous.headers_mut().remove("authorization");
+    assert_eq!(
+        reqwest::Client::new()
+            .execute(anonymous)
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    for (header, value) in [
+        ("Mcp-Method", "tools/call"),
+        ("MCP-Protocol-Version", "2025-11-25"),
+    ] {
+        let mut request = modern_request(port, &token.token, "tools/list", serde_json::json!({}))
+            .build()
+            .unwrap();
+        request.headers_mut().insert(
+            http::header::HeaderName::from_bytes(header.as_bytes()).unwrap(),
+            value.parse().unwrap(),
+        );
+        let response = reqwest::Client::new().execute(request).await.unwrap();
+        assert_eq!(response.status(), 400);
+    }
+    assert_eq!(
+        modern_request(port, "invalid", "tools/list", serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        modern_request(port, &token.token, "tools/list", serde_json::json!({}))
+            .header("Origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the Claude CLI; uses isolated settings and no model calls"]
+async fn claude_cli_negotiates_both_protocols() {
+    let (gateway, port, _dir) = start().await;
+    let (_, access) = signed_in_agent(&gateway, port, "claude-smoke").await;
+    let config = tempfile::tempdir().unwrap();
+    let path = config.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let server = serde_json::json!({"type":"http", "url":format!("http://127.0.0.1:{port}/mcp"), "headers":{"Authorization":format!("Bearer {access}")}});
+        let added = std::process::Command::new("claude").env("CLAUDE_CONFIG_DIR", &path).current_dir(&path)
+            .args(["mcp", "add-json", "prism-smoke", &server.to_string(), "--scope", "user"])
+            .output().unwrap();
+        assert!(added.status.success(), "isolated config failed");
+        for (generation, negotiation, expected) in [("v2", "auto", "modern"), ("v2", "legacy", "legacy"), ("v1", "legacy", "v1")] {
+            let log = path.join(format!("claude-{expected}.log")).to_string_lossy().into_owned();
+            let result = std::process::Command::new("claude")
+                .env("CLAUDE_CONFIG_DIR", &path).current_dir(&path)
+                .env("MCP_SDK_GENERATION", generation).env("MCP_PROTOCOL_NEGOTIATION", negotiation)
+                .args(["--debug-file", &log, "mcp", "get", "prism-smoke"])
+                .output().unwrap();
+            let output = String::from_utf8_lossy(&result.stdout);
+            for line in output.lines().filter(|l| l.contains("Status:") || l.contains("Issue:")) { println!("{expected}: {line}"); }
+            assert!(result.status.success());
+            assert!(output.contains("Connected") && !output.contains("failed"));
+            let log = std::fs::read_to_string(log).unwrap();
+            if generation == "v2" { assert!(log.contains(&format!("\"protocolEra\":\"{expected}\"")), "wrong protocol lifecycle"); }
+        }
+    }).await.unwrap();
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn browser_authorize_waits_privately_then_redirects_once() {
+    for approved in [true, false] {
+        let (gateway, port, _dir) = start().await;
+        let browser = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let client = gateway
+            .register_client(
+                serde_json::from_value(serde_json::json!({
+                    "client_name": "Browser <agent>", "redirect_uris": ["http://localhost:4444/cb"]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier));
+        let url = format!(
+            "http://127.0.0.1:{port}/authorize?{}",
+            form(&[
+                ("client_id", &client.client_id),
+                ("response_type", "code"),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+                ("state", "private-state&with=punctuation"),
+            ])
+        );
+        let page = tokio::time::timeout(
+            Duration::from_secs(2),
+            browser
+                .get(&url)
+                .header("Accept", "text/html,application/xhtml+xml;q=0.9")
+                .send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(page.status(), 200);
+        assert_eq!(page.headers()["cache-control"], "no-store");
+        assert_eq!(page.headers()["referrer-policy"], "no-referrer");
+        assert!(page.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'"));
+        let html = page.text().await.unwrap();
+        assert!(html.contains("Open Prism in your tray."));
+        assert!(html.contains("Browser &lt;agent&gt;"));
+        assert!(!html.contains("private-state"));
+        assert!(!html.contains(&challenge));
+        let req = html
+            .split("const request = \"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert_eq!(req.len(), 43); // independent 256-bit capability
+        let signin = wait_for_signin(&gateway).await;
+        assert_ne!(req, signin.id);
+        let status_url = format!("http://127.0.0.1:{port}/authorize/status?req={req}");
+        let finish_url = format!("http://127.0.0.1:{port}/authorize/finish?req={req}");
+        assert_eq!(browser.get(&status_url).send().await.unwrap().status(), 403);
+        assert_eq!(
+            browser
+                .get(&status_url)
+                .header("X-Prism-OAuth", "1")
+                .header("Sec-Fetch-Site", "cross-site")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            browser
+                .get(&finish_url)
+                .header("Origin", "https://evil.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        let pending = browser
+            .get(&status_url)
+            .header("X-Prism-OAuth", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            pending.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!({"status":"pending"})
+        );
+        assert_eq!(browser.get(&finish_url).send().await.unwrap().status(), 409);
+        gateway
+            .decide_agent(&signin.agent_id, approved)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let result = browser
+                    .get(&status_url)
+                    .header("X-Prism-OAuth", "1")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(result.headers()["cache-control"], "no-store");
+                let result = result.json::<serde_json::Value>().await.unwrap();
+                if result == serde_json::json!({"status":"ready"}) {
+                    break;
+                }
+                assert_eq!(result, serde_json::json!({"status":"pending"}));
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let redirect = browser.get(&finish_url).send().await.unwrap();
+        assert_eq!(redirect.status(), 303);
+        assert_eq!(redirect.headers()["referrer-policy"], "no-referrer");
+        let location =
+            reqwest::Url::parse(redirect.headers()["location"].to_str().unwrap()).unwrap();
+        let params: HashMap<_, _> = location.query_pairs().into_owned().collect();
+        assert_eq!(params["state"], "private-state&with=punctuation");
+        if approved {
+            assert!(!params.contains_key("error"));
+            let tokens = browser
+                .post(format!("http://127.0.0.1:{port}/token"))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(form(&[
+                    ("grant_type", "authorization_code"),
+                    ("code", params["code"].as_str()),
+                    ("code_verifier", verifier),
+                    ("client_id", &client.client_id),
+                ]))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(tokens.status(), 200);
+        } else {
+            assert_eq!(params["error"], "access_denied");
+            assert!(!params.contains_key("code"));
+        }
+        assert_eq!(browser.get(&finish_url).send().await.unwrap().status(), 410);
+        assert_eq!(
+            browser
+                .get(&status_url)
+                .header("X-Prism-OAuth", "1")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            410
+        );
+        assert!(gateway.pending_signins().is_empty());
+        gateway.shutdown().await;
+    }
 }

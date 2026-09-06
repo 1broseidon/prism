@@ -22,6 +22,7 @@ export const signins = signal<PendingSignIn[]>([]);
 export const rules = signal<Rule[]>([]);
 export const audit = signal<AuditEntry[]>([]);
 /** The week at a glance for the Now tab. Null until loaded. */
+export const activityError = signal<string | null>(null);
 export const activity = signal<ActivitySummary | null>(null);
 export const lastCreatedSnippet = signal<ConnectSnippet | null>(null);
 /** Coverage and this week's counts for native actions. Null until loaded. */
@@ -39,6 +40,9 @@ const TABS: Tab[] = ["now", "servers", "agents", "rules"];
 /** What the Actions list is narrowed to. Every field is a chip the reader can drop. */
 export interface ActivityFilter {
   agentId?: string;
+  days?: number;
+  at?: string;
+  nativeOnly?: boolean;
   attention?: boolean;
   /** Local calendar day, YYYY-MM-DD. */
   day?: string;
@@ -50,6 +54,7 @@ export interface ActivityFilter {
 export type Screen =
   | { kind: "add-server" }
   | { kind: "connect-agent" }
+  | { kind: "harness-setup"; host: string }
   | { kind: "agent"; agentId: string }
   | { kind: "agent-server"; agentId: string; serverId: string }
   | { kind: "host"; agentId: string }
@@ -83,3 +88,6 @@ if (hashScreen && hashScreen.startsWith("a") && tab.value === "agents" && hashSc
   const [agentId, serverId] = hashScreen.split(":");
   stack.value = serverId ? [{ kind: "agent", agentId }, { kind: "agent-server", agentId, serverId }] : [{ kind: "agent", agentId }];
 }
+
+if (hashScreen === "setup-codex") stack.value = [{ kind: "harness-setup", host: "codex" }];
+if (hashScreen === "setup-claude") stack.value = [{ kind: "harness-setup", host: "claude-code" }];

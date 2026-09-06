@@ -1,0 +1,36 @@
+<noscript>Enable JavaScript, then start sign-in again from Prism.</noscript>
+<script>
+(() => {
+  // Keep the authorization response in this closure only, never in the page markup.
+  let callbackUrl = location.href;
+  history.replaceState(null, "", location.pathname);
+  async function finish() {
+    try {
+      const response = await fetch(callbackUrl, {
+        headers: { "Accept": "application/json", "X-Prism-OAuth": "1" },
+        credentials: "same-origin", cache: "no-store", redirect: "error",
+        signal: AbortSignal.timeout(35000)
+      });
+      if (!response.headers.get("Content-Type")?.startsWith("text/html")) throw new Error("unavailable");
+      const result = new DOMParser().parseFromString(await response.text(), "text/html");
+      const main = result.querySelector("main");
+      const state = result.body.dataset.state;
+      if (!main || !["ok", "refused", "failed", "done"].includes(state)) throw new Error("unavailable");
+      // Only the same-origin server's escaped result markup is displayed. Scripts
+      // from the response are never copied or run; the original nonce CSP remains.
+      document.body.dataset.state = state;
+      document.querySelector("main").replaceWith(document.importNode(main, true));
+    } catch {
+      document.body.dataset.state = "failed";
+      document.querySelector(".eyebrow").textContent = "Result unavailable";
+      document.querySelector("h1").textContent = "Could not confirm sign-in.";
+      document.querySelector(".lede").textContent = "Check the Servers tab in Prism for the result. Start a new sign-in there if needed.";
+      document.querySelector(".close").textContent = "You can close this tab.";
+      // Never retry a possibly consumed authorization code automatically.
+    } finally {
+      callbackUrl = "";
+    }
+  }
+  finish();
+})();
+</script>

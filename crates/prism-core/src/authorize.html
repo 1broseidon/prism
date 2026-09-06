@@ -1,0 +1,43 @@
+<noscript>Enable JavaScript, then start sign-in again from your app.</noscript>
+<script>
+(() => {
+  const request = "{{req}}";
+  const statusUrl = "/authorize/status?req=" + request;
+  const finishUrl = "/authorize/finish?req=" + request;
+  // The server owns the consent deadline. Allow one extra minute to receive its result.
+  const deadline = Date.now() + 11 * 60 * 1000;
+  const lede = document.querySelector(".lede");
+  const original = lede.innerHTML;
+  function ended() {
+    document.body.dataset.state = "failed";
+    document.querySelector(".eyebrow").textContent = "Sign-in stopped";
+    document.querySelector("h1").textContent = "This sign-in has ended.";
+    lede.textContent = "Return to your app and start sign-in again.";
+    document.querySelector(".close").textContent = "You can close this tab.";
+  }
+  async function poll() {
+    if (Date.now() >= deadline) { ended(); return; }
+    let delay = 1000;
+    try {
+      const response = await fetch(statusUrl, {
+        credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { "X-Prism-OAuth": "1" }, signal: AbortSignal.timeout(5000)
+      });
+      if (response.status === 410 || response.status === 403) { ended(); return; }
+      if (response.status === 429) {
+        delay = Math.min(60000, Math.max(1000, Number(response.headers.get("Retry-After")) * 1000 || 1000));
+      } else {
+        if (!response.ok) throw new Error("unavailable");
+        const result = await response.json();
+        if (result.status === "ready") { location.replace(finishUrl); return; }
+        lede.innerHTML = original;
+      }
+    } catch {
+      lede.textContent = "Waiting to reach Prism. Keep the app open; this page will retry.";
+      delay = 2000;
+    }
+    setTimeout(poll, delay);
+  }
+  poll();
+})();
+</script>

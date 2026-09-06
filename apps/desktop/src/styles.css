@@ -1674,3 +1674,15 @@ textarea.input {
   color: var(--color-ink-3);
   font-size: var(--text-sm);
 }
+
+/* Compact harness setup; advanced config remains behind a disclosure. */
+.harness-choice { width: 100%; display: flex; align-items: center; gap: 12px; text-align: left; color: inherit; background: none; border: 0; cursor: pointer; }
+.harness-choice > span:nth-child(2) { flex: 1; }
+.harness-choice strong, .harness-choice small { display: block; }
+.harness-choice small { margin-top: 4px; color: var(--color-ink-2); font-size: 12px; }
+.harness-choice:hover { background: var(--color-surface); }
+.setup-status .hint { margin-bottom: 18px; }
+.setup-paths { overflow-wrap: anywhere; }
+
+.history-controls { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); }
+.history-controls select { font: inherit; font-size: var(--text-sm); color: var(--color-ink); background: var(--color-surface); border: 0; border-radius: var(--radius-xs); padding: var(--space-1) var(--space-2); }

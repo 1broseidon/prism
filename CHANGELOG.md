@@ -4,6 +4,17 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+
+- Global Claude Code and Codex setup for MCP and native observation, with backups, repair/removal, and readiness based on configuration and observed events.
+- Browser sign-in progress and confirmed outcomes, including the incoming approval wait.
+- Retained-history activity queries and exports with matching filters and pagination.
+- MCP 2026-07-28 over the same `/mcp` endpoint: authenticated stateless discovery and tool calls, private tool-list cache metadata, and `subscriptions/listen` for tool-list changes. Older clients continue to initialize and use bound sessions automatically. HTTP upstream connections also negotiate modern discovery with a legacy fallback.
+
+### Fixed
+- Modern Claude Code connections no longer fail after OAuth because of missing session initialization or notification support. Identity comes from each request's bearer token; approval rules and audit records apply in both protocol modes.
+- Disconnecting a held request removes its approval card and records cancellation. Expired or revoked tokens close modern notification streams. Tool results from legacy upstreams receive the modern response fields when needed.
+
 ## [0.4.1] - 2026-09-06
 
 ### Fixed
@@ -62,7 +73,10 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - Rotating, redacted audit log with 30-day retention.
 - Loopback-only HTTP with Host and Origin checks, request limits and a strict panel CSP.
 
-[Unreleased]: https://github.com/1broseidon/prism/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/1broseidon/prism/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/1broseidon/prism/releases/tag/v0.4.1
+[0.4.0]: https://github.com/1broseidon/prism/releases/tag/v0.4.0
+[0.3.0]: https://github.com/1broseidon/prism/releases/tag/v0.3.0
 [0.2.1]: https://github.com/1broseidon/prism/releases/tag/v0.2.1
 [0.2.0]: https://github.com/1broseidon/prism/releases/tag/v0.2.0
 [0.1.0]: https://github.com/1broseidon/prism/releases/tag/v0.1.0

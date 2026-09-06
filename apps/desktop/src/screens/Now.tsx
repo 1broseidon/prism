@@ -1,6 +1,7 @@
+import { loadActivity } from "../events";
 import { useEffect } from "preact/hooks";
 import * as api from "../api";
-import { activity, agents, errorMessage, pending, push, signins, status, tab } from "../state";
+import { activity, activityError, agents, errorMessage, pending, push, signins, status, tab } from "../state";
 import { mmss, now, relative, secondsUntil } from "../time";
 import type { ActivitySummary, AgentConfig, DayActivity, Decision, PendingCall, PendingSignIn } from "../types";
 import { Button, Chip, CodeBlock, Empty, Label, Screen, describeError } from "../ui";
@@ -176,7 +177,7 @@ function dayLabel(day: DayActivity, today: boolean): string {
 }
 
 /** One bar per day. Routine actions in ink, the ones that needed a person in amber on top. Each bar is a door. */
-function DailyChart({ days }: { days: DayActivity[] }) {
+function DailyChart({ days, at }: { days: DayActivity[]; at: string }) {
   const max = Math.max(1, ...days.map((d) => d.routine + d.attention));
   const last = days.length - 1;
   return (
@@ -191,7 +192,7 @@ function DailyChart({ days }: { days: DayActivity[] }) {
             key={d.date}
             title={title}
             disabled={total === 0}
-            onClick={() => push({ kind: "activity", day: d.date })}
+            onClick={() => push({ kind: "activity", day: d.date, at })}
           >
             <span class="bar">
               <span
@@ -201,7 +202,7 @@ function DailyChart({ days }: { days: DayActivity[] }) {
                 onClick={(e) => {
                   if (!d.attention) return;
                   e.stopPropagation();
-                  push({ kind: "activity", day: d.date, attention: true });
+                  push({ kind: "activity", day: d.date, attention: true, at });
                 }}
               />
               <span class="routine" style={{ height: `${(d.routine / max) * 100}%` }} />
@@ -216,21 +217,23 @@ function DailyChart({ days }: { days: DayActivity[] }) {
 
 /** The week at a glance. Every number is a door into the list, not the list itself. */
 function ActivityBlock({ summary }: { summary: ActivitySummary }) {
+  const at = summary.window.snapshot_at;
+  const days = summary.days;
   const top = summary.agents.slice(0, 3);
   const widest = Math.max(1, ...top.map((a) => a.total));
   return (
     <>
       <div class="activity-head">
-        <button type="button" class="stat" onClick={() => push({ kind: "activity" })}>
+        <button type="button" class="stat" onClick={() => push({ kind: "activity", at, days })}>
           <b>{summary.total}</b>
           <span>actions</span>
         </button>
-        <button type="button" class="stat" disabled={summary.attention === 0} onClick={() => push({ kind: "activity", attention: true })}>
+        <button type="button" class="stat" disabled={summary.attention === 0} onClick={() => push({ kind: "activity", attention: true, at, days })}>
           <b class={summary.attention ? "accent" : ""}>{summary.attention}</b>
           <span>needed attention</span>
         </button>
       </div>
-      <DailyChart days={summary.daily} />
+      <DailyChart days={summary.daily} at={at} />
       <div class="agent-bars">
         {top.map((a) => (
           <button
@@ -238,11 +241,11 @@ function ActivityBlock({ summary }: { summary: ActivitySummary }) {
             class="agent-bar"
             key={a.id}
             title={a.attention ? `${a.attention} of ${a.total} needed attention` : `${a.total} actions`}
-            onClick={() => push(a.attention ? { kind: "activity", agentId: a.id, attention: true } : { kind: "activity", agentId: a.id })}
+            onClick={() => push(a.attention ? { kind: "activity", agentId: a.id, attention: true, at, days } : { kind: "activity", agentId: a.id, at, days })}
           >
             <span class="name">
               {a.name}
-              {a.host ? <span class="kind"> native</span> : null}
+
             </span>
             <span class="track">
               <span class="share" style={{ width: `${(a.total / widest) * 100}%` }} />
@@ -257,7 +260,7 @@ function ActivityBlock({ summary }: { summary: ActivitySummary }) {
         ))}
       </div>
       <div class="activity-foot">
-        <button type="button" class="link" onClick={() => push({ kind: "activity" })}>
+        <button type="button" class="link" onClick={() => push({ kind: "activity", at, days })}>
           All {summary.total} ›
         </button>
       </div>
@@ -332,9 +335,11 @@ export function NowScreen() {
               ) : null
             }
           >
-            Last {summary?.days ?? 7} days
+            Last {summary?.days ?? 7} days · retained
           </Label>
-          {summary === null ? (
+          {activityError.value ? (
+            <Button variant="quiet" onClick={() => loadActivity()}>History unavailable · Retry</Button>
+          ) : summary === null ? (
             <div class="muted small">Loading…</div>
           ) : summary.total === 0 ? (
             <div class="muted small">No actions yet.</div>

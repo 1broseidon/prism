@@ -184,6 +184,7 @@ export interface AuditEntry {
     | { kind: "unapproved" }
     | { kind: "posture"; posture: Posture }
     | { kind: "do_not_disturb" }
+    | { kind: "cancelled" }
     | { kind: "observed" };
   duration_ms: number;
   error: string | null;
@@ -215,18 +216,29 @@ export interface HostStatus {
   hook_url: string;
   last_event_at: string | null;
   actions_7d: number;
+  by_reason: { reason: string; count: number }[];
 }
 
 /** Desktop only: where a host's user-level hooks file lives and whether the current hook URL is in it. */
 export interface HostSetup {
   host: string;
   settings_path: string;
+  mcp_path: string;
+  mcp_configured: boolean;
   hook_installed: boolean;
-  /** Codex only: it reviews new hooks in `/hooks` and skips them until trusted. Null for hosts without that step. */
-  hook_trusted: boolean | null;
+  hooks_disabled: boolean;
+  setup_present: boolean;
+  events_received: boolean;
+  problem: string | null;
+}
+
+export interface HarnessChanges {
+  paths: string[];
+  backups: string[];
 }
 
 export interface NativeStatus {
+  window: AuditWindow;
   observe_native: boolean;
   last_event_at: string | null;
   actions_7d: number;
@@ -250,6 +262,7 @@ export interface ConnectSnippet {
 export type GatewayEvent =
   | { type: "pending_call"; data: PendingCall }
   | { type: "call_decided"; data: { id: string; decision: Decision } }
+  | { type: "call_cancelled"; data: { id: string } }
   | { type: "agent_requested"; data: AgentConfig }
   | { type: "sign_in_requested"; data: PendingSignIn }
   | { type: "sign_in_decided"; data: { id: string; approved: boolean } }
@@ -287,6 +300,7 @@ export type UpdateEvent =
 
 /** The last few days summed up. `attention` counts held calls, denials and would-ask native actions. */
 export interface ActivitySummary {
+  window: AuditWindow;
   days: number;
   total: number;
   attention: number;
@@ -311,3 +325,28 @@ export interface DayActivity {
   routine: number;
   attention: number;
 }
+
+export interface AuditWindow {
+  days: number;
+  first_day: string;
+  last_day: string;
+  snapshot_at: string;
+  oldest_available_at: string | null;
+  newest_available_at: string | null;
+  retention_days: number;
+  archive_count: number;
+  max_file_bytes: number;
+  max_history_bytes: number;
+  retained_bytes: number;
+  size_limited: boolean;
+  full_window_guaranteed: boolean;
+}
+export interface AuditPage {
+  entries: AuditEntry[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  window: AuditWindow;
+}
+export interface ExportReport { path: string; metadata_path: string; total: number; }

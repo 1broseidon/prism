@@ -25,12 +25,12 @@ function statusChip(agent: AgentConfig) {
 /** Coverage in one word. Enforced arrives with phase 2; nothing claims it yet. */
 export function coverageChip(agent: AgentConfig) {
   const st = native.value;
-  const hs = hostStatus(st, agent.host ?? "");
   const setup = hostSetup(st, agent.host ?? "");
   if (agent.status === "denied") return null;
-  if (st?.observe_native && hs?.last_event_at) return <Chip tone="ok">observed</Chip>;
-  if (setup?.hook_installed) return <Chip tone="ok">hooked</Chip>;
-  return <Chip>not hooked</Chip>;
+  if (!st?.observe_native || setup?.hooks_disabled) return <Chip>observation off</Chip>;
+  if (setup?.events_received) return <Chip tone="ok">observed</Chip>;
+  if (setup?.hook_installed) return <Chip>configured</Chip>;
+  return <Chip>not configured</Chip>;
 }
 
 function plural(n: number, word: string) {

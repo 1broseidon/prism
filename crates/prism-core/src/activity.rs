@@ -1,16 +1,19 @@
 //! What agents did over the last few days, summed up: how much, how much needed a person, who,
 //! and when. The panel shows this instead of a list nobody reads; the list is one tap away.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde::Serialize;
 
-use crate::audit::{AuditEntry, AuditSource, AuditVerdict};
+use crate::audit::{
+    canonical_agent_id_excluding, AuditEntry, AuditSource, AuditVerdict, AuditWindow,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivitySummary {
     pub days: u32,
+    pub window: AuditWindow,
     /// Every action in the window, MCP and native, minus MCP calls seen twice through a hook.
     pub total: usize,
     /// The part of `total` that needed a person; see [`needs_attention`].
@@ -65,9 +68,20 @@ pub fn summarize<'a>(
     days: u32,
     now: DateTime<Utc>,
 ) -> ActivitySummary {
-    let days = days.max(1);
-    let today = now.with_timezone(&Local).date_naive();
-    let first = today - chrono::Duration::days(i64::from(days) - 1);
+    summarize_with_exclusions(entries, days, now, &HashSet::new())
+}
+
+/// Keep known manual registrations separate while grouping historical harness registrations.
+/// Exclusions affect presentation only; the entries' authenticated ids are never modified.
+pub(crate) fn summarize_with_exclusions<'a>(
+    entries: impl IntoIterator<Item = &'a AuditEntry>,
+    days: u32,
+    now: DateTime<Utc>,
+    exclusions: &HashSet<String>,
+) -> ActivitySummary {
+    let mut window = AuditWindow::new(days, now);
+    let days = window.days;
+    let first = window.first_day;
     let mut daily: Vec<DayActivity> = (0..days)
         .map(|i| DayActivity {
             date: first + chrono::Duration::days(i64::from(i)),
@@ -78,16 +92,26 @@ pub fn summarize<'a>(
     let mut total = 0;
     let mut attention = 0;
     let mut mcp = McpCounts::default();
-    let mut agents: HashMap<&str, AgentActivity> = HashMap::new();
+    let mut agents: HashMap<String, AgentActivity> = HashMap::new();
 
     for entry in entries {
         let date = entry.at.with_timezone(&Local).date_naive();
-        if date < first || date > today {
+        if !window.contains(entry) {
             continue;
         }
         if entry.native.as_ref().is_some_and(|n| n.via_prism) {
             continue;
         }
+        window.oldest_available_at = Some(
+            window
+                .oldest_available_at
+                .map_or(entry.at, |at| at.min(entry.at)),
+        );
+        window.newest_available_at = Some(
+            window
+                .newest_available_at
+                .map_or(entry.at, |at| at.max(entry.at)),
+        );
         let flagged = needs_attention(entry);
         total += 1;
         if flagged {
@@ -110,15 +134,24 @@ pub fn summarize<'a>(
         } else {
             day.routine += 1;
         }
-        let agent = agents
-            .entry(entry.agent_id.as_str())
-            .or_insert_with(|| AgentActivity {
-                id: entry.agent_id.clone(),
-                name: entry.agent_name.clone(),
-                host: entry.native.is_some(),
-                total: 0,
-                attention: 0,
-            });
+        let id = canonical_agent_id_excluding(entry, exclusions).into_owned();
+        let host = id.strip_prefix("host:").and_then(|id| {
+            crate::native::harness_for_client_name(id.split('@').next().unwrap_or(id))
+        });
+        let name = match host {
+            Some(host) if !id.contains('@') => {
+                crate::native::harness_display_name(host).to_string()
+            }
+            _ => entry.agent_name.clone(),
+        };
+        let agent = agents.entry(id.clone()).or_insert_with(|| AgentActivity {
+            id,
+            name,
+            host: host.is_some() || entry.native.is_some(),
+            total: 0,
+            attention: 0,
+        });
+        agent.host |= entry.native.is_some();
         agent.total += 1;
         if flagged {
             agent.attention += 1;
@@ -126,9 +159,15 @@ pub fn summarize<'a>(
     }
 
     let mut agents: Vec<AgentActivity> = agents.into_values().collect();
-    agents.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.name.cmp(&b.name)));
+    agents.sort_by(|a, b| {
+        b.total
+            .cmp(&a.total)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     ActivitySummary {
         days,
+        window,
         total,
         attention,
         mcp,
@@ -214,10 +253,76 @@ mod tests {
         assert_eq!(s.daily.len(), 7);
         assert_eq!(s.daily[6].routine + s.daily[6].attention, 5);
         assert_eq!(s.daily[0].routine + s.daily[0].attention, 0);
-        assert_eq!(s.agents[0].id, "a");
-        assert_eq!(s.agents[0].total, 2);
-        assert_eq!(s.agents[1].id, "host:codex");
-        assert!(s.agents[1].host);
-        assert_eq!(s.agents[1].attention, 1);
+        let mcp = s.agents.iter().find(|agent| agent.id == "a").unwrap();
+        assert_eq!(mcp.total, 2);
+        let host = s
+            .agents
+            .iter()
+            .find(|agent| agent.id == "host:codex")
+            .unwrap();
+        assert!(host.host);
+        assert_eq!(host.attention, 1);
+    }
+
+    #[test]
+    fn local_calendar_bounds_and_legacy_harness_rows_agree_with_queries() {
+        use crate::audit::AuditQuery;
+        use chrono::TimeZone;
+        let now = Local
+            .with_ymd_and_hms(2026, 9, 6, 12, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let first = Local
+            .with_ymd_and_hms(2026, 8, 31, 0, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut legacy = entry(first, "old-uuid", "allowed", "rule", None);
+        legacy.agent_name = "Claude Code 2.1".into();
+        let rows = [
+            legacy,
+            entry(
+                now,
+                "host:claude-code",
+                "allowed",
+                "observed",
+                Some(native(Some("sudo"), false)),
+            ),
+            entry(
+                first - chrono::Duration::milliseconds(1),
+                "old",
+                "allowed",
+                "rule",
+                None,
+            ),
+            entry(
+                now + chrono::Duration::milliseconds(1),
+                "future",
+                "denied",
+                "rule",
+                None,
+            ),
+        ];
+        let summary = summarize(&rows, 7, now);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.agents.len(), 1);
+        assert_eq!(summary.agents[0].id, "host:claude-code");
+        assert_eq!(summary.agents[0].name, "Claude Code");
+        assert_eq!(summary.agents[0].attention, 1);
+        assert!(summary.agents[0].host);
+        assert_eq!(summary.daily[0].routine, 1);
+        assert_eq!(summary.daily[6].attention, 1);
+        for day in &summary.daily {
+            let query = AuditQuery {
+                day: Some(day.date),
+                ..Default::default()
+            };
+            assert_eq!(
+                rows.iter()
+                    .filter(|entry| query.matches(entry, &summary.window))
+                    .count(),
+                day.routine + day.attention
+            );
+        }
+        assert_eq!(summarize(&rows, u32::MAX, now).daily.len(), 30);
     }
 }

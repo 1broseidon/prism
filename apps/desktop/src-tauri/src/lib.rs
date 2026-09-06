@@ -1,4 +1,5 @@
 //! Prism desktop tray app: hosts `prism-core`, tray panel, and Tauri commands.
+mod harness;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -753,35 +754,31 @@ async fn list_audit(
     day: Option<String>,
     reason: Option<String>,
 ) -> Result<Vec<prism_core::AuditEntry>, String> {
-    let limit = limit.unwrap_or(20);
-    let attention = attention.unwrap_or(false);
-    if agent_id.is_none() && !attention && day.is_none() && reason.is_none() {
-        return Ok(state.gateway.audit(limit).await);
-    }
+    let query = prism_core::AuditQuery {
+        limit: limit.unwrap_or(60),
+        agent_id,
+        attention,
+        reason,
+        day: day
+            .map(|d| d.parse())
+            .transpose()
+            .map_err(|_| "Invalid date")?,
+        ..Default::default()
+    };
     Ok(state
         .gateway
-        .audit(usize::MAX)
+        .audit_query(query)
         .await
-        .into_iter()
-        .filter(|entry| agent_id.as_deref().is_none_or(|id| entry.agent_id == id))
-        .filter(|entry| !attention || prism_core::activity::needs_attention(entry))
-        .filter(|entry| {
-            day.as_deref().is_none_or(|day| {
-                entry
-                    .at
-                    .with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d")
-                    .to_string()
-                    == day
-            })
-        })
-        .filter(|entry| {
-            reason.as_deref().is_none_or(|reason| {
-                entry.native.as_ref().and_then(|n| n.would_hold.as_deref()) == Some(reason)
-            })
-        })
-        .take(limit)
-        .collect())
+        .map_err(map_err)?
+        .entries)
+}
+
+#[tauri::command]
+async fn list_audit_page(
+    state: State<'_, AppState>,
+    query: prism_core::AuditQuery,
+) -> Result<prism_core::AuditPage, String> {
+    state.gateway.audit_query(query).await.map_err(map_err)
 }
 
 #[tauri::command]
@@ -789,7 +786,11 @@ async fn get_activity(
     state: State<'_, AppState>,
     days: Option<u32>,
 ) -> Result<prism_core::activity::ActivitySummary, String> {
-    Ok(state.gateway.activity(days.unwrap_or(7)).await)
+    state
+        .gateway
+        .activity(days.unwrap_or(7))
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -815,18 +816,7 @@ async fn get_connect_snippet(state: State<'_, AppState>) -> Result<ConnectSnippe
 struct NativeStatusDto {
     #[serde(flatten)]
     status: prism_core::NativeStatus,
-    setup: Vec<HostSetupDto>,
-}
-
-#[derive(Serialize)]
-struct HostSetupDto {
-    host: String,
-    settings_path: String,
-    hook_installed: bool,
-    /// Codex only: whether `~/.codex/config.toml` holds a trust entry for the group the Prism hook
-    /// sits in. Codex reviews new and changed hooks in `/hooks` and skips them until trusted. The
-    /// entry is matched by position, so a rotated token still needs a fresh review.
-    hook_trusted: Option<bool>,
+    setup: Vec<harness::Setup>,
 }
 
 #[derive(Serialize)]
@@ -842,148 +832,61 @@ fn home_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "home directory not found".to_string())
 }
 
-/// Where each host reads its user-level hooks from. Both files share the `{"hooks": {...}}` shape.
-fn host_settings_path(host: &str) -> Result<PathBuf, String> {
-    let home = home_path()?;
-    match host {
-        prism_core::native::HOST_CLAUDE_CODE => Ok(home.join(".claude").join("settings.json")),
-        prism_core::native::HOST_CODEX => Ok(home.join(".codex").join("hooks.json")),
-        other => Err(format!("unknown agent host {other}")),
-    }
-}
-
-/// The hook entry for one host. Claude Code posts natively; Codex has no HTTP hook type, so a
-/// one-line curl does the post. It is synchronous: Codex 0.147 skips hooks marked `async`, so the
-/// timeouts are tight instead. A loopback post is milliseconds, a stopped Prism refuses at once,
-/// and a hung one is cut off by `-m`.
-fn host_hook_entry(host: &str, url: &str) -> Result<serde_json::Value, String> {
-    match host {
-        prism_core::native::HOST_CLAUDE_CODE => Ok(serde_json::json!({
-            "type": "http", "url": url, "timeout": 5
-        })),
-        prism_core::native::HOST_CODEX => {
-            let post = |null: &str| {
-                format!("curl -s --connect-timeout 1 -m 3 -o {null} -X POST -H Content-Type:application/json --data-binary @- {url}")
-            };
-            Ok(serde_json::json!({
-                "type": "command",
-                "command": post("/dev/null"),
-                "commandWindows": post("NUL").replacen("curl ", "curl.exe ", 1),
-                "timeout": 5,
-                "statusMessage": "Prism"
-            }))
-        }
-        other => Err(format!("unknown agent host {other}")),
-    }
-}
-
-fn read_settings_json(path: &PathBuf) -> Result<serde_json::Value, String> {
-    if !path.exists() {
-        return Ok(serde_json::json!({}));
-    }
-    let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-    if text.trim().is_empty() {
-        return Ok(serde_json::json!({}));
-    }
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
-    if !value.is_object() {
-        return Err(format!("{} is not a JSON object", path.display()));
-    }
-    Ok(value)
-}
-
-/// Any hook that points at a Prism hook route, whatever the token: the one to replace.
-fn is_prism_hook(hook: &serde_json::Value) -> bool {
-    ["url", "command", "commandWindows"].iter().any(|key| {
-        hook.get(key)
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| v.contains("/hooks/") && v.contains("127.0.0.1"))
+#[tauri::command]
+async fn get_native_status(state: State<'_, AppState>) -> Result<NativeStatusDto, String> {
+    let status = state.gateway.native_status().await.map_err(map_err)?;
+    let url = state.gateway.connect_snippet().map_err(map_err)?.url;
+    let hosts = status.hosts.clone();
+    let setup = tauri::async_runtime::spawn_blocking(move || {
+        hosts
+            .iter()
+            .map(|host| {
+                let paths = harness::Paths::for_host(&host.host)?;
+                Ok(harness::inspect(
+                    &paths,
+                    &host.host,
+                    &url,
+                    &host.hook_url,
+                    host.last_event_at,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()
     })
+    .await
+    .map_err(|_| "Could not inspect client settings")??;
+    Ok(NativeStatusDto { status, setup })
 }
 
-/// The index of the PreToolUse group holding the hook for `url`, if any.
-fn prism_group_index(settings: &serde_json::Value, url: &str) -> Option<usize> {
-    settings
-        .pointer("/hooks/PreToolUse")
-        .and_then(|v| v.as_array())?
-        .iter()
-        .position(|group| {
-            group
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .is_some_and(|hooks| {
-                    hooks.iter().any(|hook| {
-                        is_prism_hook(hook)
-                            && ["url", "command"].iter().any(|key| {
-                                hook.get(key)
-                                    .and_then(|v| v.as_str())
-                                    .is_some_and(|v| v.contains(url))
-                            })
-                    })
-                })
-        })
-}
-
-/// Codex keeps hook trust in `config.toml` as
-/// `[hooks.state."<hooks.json>:pre_tool_use:<group>:<hook>"]` with a `trusted_hash`, and
-/// `enabled = false` when the user switched it off. Read, never written: trusting is the user's
-/// review step inside Codex.
-fn codex_hook_trusted(hooks_path: &std::path::Path, group: usize) -> bool {
-    let Some(dir) = hooks_path.parent() else {
-        return false;
-    };
-    let Ok(config) = std::fs::read_to_string(dir.join("config.toml")) else {
-        return false;
-    };
-    let header = format!(
-        "[hooks.state.\"{}:pre_tool_use:{group}:0\"]",
-        hooks_path.display()
-    );
-    let mut in_section = false;
-    let mut trusted = false;
-    let mut enabled = true;
-    for line in config.lines().map(str::trim) {
-        if line.starts_with('[') {
-            if in_section {
-                break;
-            }
-            in_section = line == header;
-            continue;
-        }
-        if in_section {
-            if line.starts_with("trusted_hash") {
-                trusted = true;
-            } else if line.starts_with("enabled") && line.ends_with("false") {
-                enabled = false;
-            }
-        }
-    }
-    trusted && enabled
+async fn configure_harness(
+    state: &AppState,
+    host: String,
+    remove: bool,
+    hooks_only: bool,
+) -> Result<harness::Changes, String> {
+    let url = state.gateway.connect_snippet().map_err(map_err)?.url;
+    let hook_url = state.gateway.hook_url(&host);
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = harness::Paths::for_host(&host)?;
+        harness::configure(&paths, &host, &url, &hook_url, remove, hooks_only)
+    })
+    .await
+    .map_err(|_| "Could not update client settings")?
 }
 
 #[tauri::command]
-async fn get_native_status(state: State<'_, AppState>) -> Result<NativeStatusDto, String> {
-    let status = state.gateway.native_status().await;
-    let mut setup = Vec::new();
-    for host in &status.hosts {
-        let path = host_settings_path(&host.host)?;
-        let group = read_settings_json(&path)
-            .ok()
-            .and_then(|settings| prism_group_index(&settings, &host.hook_url));
-        let hook_trusted = match (host.host.as_str(), group) {
-            (prism_core::native::HOST_CODEX, Some(group)) => Some(codex_hook_trusted(&path, group)),
-            (prism_core::native::HOST_CODEX, None) => Some(false),
-            _ => None,
-        };
-        setup.push(HostSetupDto {
-            host: host.host.clone(),
-            settings_path: path.display().to_string(),
-            hook_installed: group.is_some(),
-            hook_trusted,
-        });
-    }
-    Ok(NativeStatusDto { status, setup })
+async fn setup_harness(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<harness::Changes, String> {
+    configure_harness(&state, host, false, false).await
+}
+
+#[tauri::command]
+async fn remove_harness_setup(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<harness::Changes, String> {
+    configure_harness(&state, host, true, false).await
 }
 
 #[tauri::command]
@@ -1001,87 +904,76 @@ async fn rotate_hook_token(state: State<'_, AppState>) -> Result<(), String> {
 async fn get_host_hook_snippet(state: State<'_, AppState>, host: String) -> Result<String, String> {
     let url = state.gateway.hook_url(&host);
     let value = serde_json::json!({
-        "hooks": { "PreToolUse": [ { "hooks": [ host_hook_entry(&host, &url)? ] } ] }
+        "hooks": { "PreToolUse": [ { "hooks": [ harness::hook_entry(&host, &url)? ] } ] }
     });
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
 }
 
-/// Merge the hook into the host's user-level hooks file. Every other key and every other hook
-/// is left alone; an earlier Prism hook (an old token, say) is replaced. The previous file is
-/// kept beside it as `.bak`.
+/// Hook-only repair for installations created before the combined harness setup flow.
 #[tauri::command]
 async fn install_host_hook(
     state: State<'_, AppState>,
     host: String,
 ) -> Result<HookInstallResult, String> {
-    let url = state.gateway.hook_url(&host);
-    let entry = host_hook_entry(&host, &url)?;
-    let path = host_settings_path(&host)?;
-    let mut settings = read_settings_json(&path)?;
-    let root = settings.as_object_mut().expect("object checked above");
-    let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
-    if !hooks.is_object() {
-        return Err("\"hooks\" in the hooks file is not an object".into());
-    }
-    let pre = hooks
-        .as_object_mut()
-        .expect("checked")
-        .entry("PreToolUse")
-        .or_insert_with(|| serde_json::json!([]));
-    let Some(groups) = pre.as_array_mut() else {
-        return Err("\"hooks.PreToolUse\" in the hooks file is not an array".into());
-    };
-    for group in groups.iter_mut() {
-        if let Some(list) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-            list.retain(|hook| !is_prism_hook(hook));
-        }
-    }
-    groups.retain(|group| {
-        group
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .is_none_or(|list| !list.is_empty())
-    });
-    groups.push(serde_json::json!({ "hooks": [ entry ] }));
-    let backup = if path.exists() {
-        let bak = path.with_extension("json.bak");
-        std::fs::copy(&path, &bak).map_err(|err| err.to_string())?;
-        Some(bak.display().to_string())
-    } else {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
-        }
-        None
-    };
-    let text = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, format!("{text}\n")).map_err(|err| err.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|err| err.to_string())?;
+    let path = harness::Paths::for_host(&host)?.hooks.display().to_string();
+    let changes = configure_harness(&state, host, false, true).await?;
     Ok(HookInstallResult {
-        path: path.display().to_string(),
-        backup,
+        path,
+        backup: changes.backups.into_iter().next(),
     })
 }
 
-/// Write the would-have-asked entries of the last 30 days to the Downloads folder.
+#[derive(Serialize)]
+struct ExportReportDto {
+    path: String,
+    metadata_path: String,
+    total: usize,
+}
+
+/// Export retained matches and their exact retention window beside the JSONL.
 #[tauri::command]
 async fn export_native_report(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<String, String> {
-    let body = state.gateway.native_export(30).await;
+) -> Result<ExportReportDto, String> {
+    let report = state
+        .gateway
+        .audit_export(prism_core::AuditQuery {
+            days: 30,
+            native_only: true,
+            attention: Some(true),
+            ..Default::default()
+        })
+        .await
+        .map_err(map_err)?;
     let dir = app
         .path()
         .download_dir()
         .or_else(|_| app.path().home_dir())
-        .map_err(|err| err.to_string())?;
-    let name = format!(
-        "prism-native-{}.jsonl",
-        chrono::Utc::now().format("%Y-%m-%d")
-    );
-    let path = dir.join(name);
-    std::fs::write(&path, body).map_err(|err| err.to_string())?;
-    Ok(path.display().to_string())
+        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let stem = format!(
+            "prism-native-{}",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
+        );
+        let path = dir.join(format!("{stem}.jsonl"));
+        let metadata_path = dir.join(format!("{stem}.metadata.json"));
+        let metadata = serde_json::to_vec_pretty(
+            &serde_json::json!({"total":report.total,"window":report.window}),
+        )
+        .map_err(|e| e.to_string())?;
+        prism_core::write_client_config(&metadata_path, &metadata)
+            .map_err(|_| "Could not save report metadata")?;
+        prism_core::write_client_config(&path, report.jsonl.as_bytes())
+            .map_err(|_| "Could not save audit report")?;
+        Ok(ExportReportDto {
+            path: path.display().to_string(),
+            metadata_path: metadata_path.display().to_string(),
+            total: report.total,
+        })
+    })
+    .await
+    .map_err(|_| "Could not export report")?
 }
 
 fn config_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
@@ -1165,6 +1057,7 @@ async fn handle_gateway_event(app: &AppHandle, gateway: &Gateway, event: &Gatewa
             }
         }
         GatewayEvent::CallDecided { .. }
+        | GatewayEvent::CallCancelled { .. }
         | GatewayEvent::Audit(_)
         | GatewayEvent::AgentDecided { .. }
         | GatewayEvent::SignInDecided { .. } => {
@@ -1562,6 +1455,7 @@ pub fn run() {
             set_settings,
             list_server_tools,
             list_audit,
+            list_audit_page,
             hide_panel,
             get_connect_snippet,
             get_update_status,
@@ -1572,6 +1466,8 @@ pub fn run() {
             rotate_hook_token,
             get_host_hook_snippet,
             install_host_hook,
+            setup_harness,
+            remove_harness_setup,
             get_activity,
             export_native_report,
         ]);

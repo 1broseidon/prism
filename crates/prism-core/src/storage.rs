@@ -117,6 +117,29 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Replace a user-owned client config without changing permissions on its existing directory.
+/// The replacement itself is private on Unix and Windows, just like Prism's own secrets.
+pub fn write_client_config(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("config needs a directory"))?;
+    if !parent.exists() {
+        private_dir(parent)?;
+    }
+    reject_link(parent)?;
+    if fs::symlink_metadata(path).is_ok() {
+        reject_link(path)?;
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    protect(temp.path())?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|err| err.error)?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 #[cfg(windows)]
 fn windows_private_acl(path: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;

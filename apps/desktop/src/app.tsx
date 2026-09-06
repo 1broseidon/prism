@@ -7,6 +7,7 @@ import { AgentToolsScreen } from "./screens/AgentTools";
 import { ActivityScreen } from "./screens/Activity";
 import { AgentsScreen } from "./screens/Agents";
 import { ConnectAgentScreen } from "./screens/ConnectAgent";
+import { HarnessSetupScreen } from "./screens/HarnessSetup";
 import { hostName } from "./hosts";
 import { NowScreen } from "./screens/Now";
 import { RulesScreen } from "./screens/Rules";
@@ -27,6 +28,8 @@ function titleOf(screen: Screen): string {
   switch (screen.kind) {
     case "add-server":
       return "Add server";
+    case "harness-setup":
+      return screen.host === "codex" ? "Set up Codex" : "Set up Claude Code";
     case "connect-agent":
       return "Connect an agent";
     case "settings":
@@ -154,6 +157,7 @@ export function App() {
       <main class="body" key={top ? `${JSON.stringify(top)}:${stack.value.length}` : tab.value}>
         {top?.kind === "add-server" ? <AddServerScreen /> : null}
         {top?.kind === "connect-agent" ? <ConnectAgentScreen /> : null}
+        {top?.kind === "harness-setup" ? <HarnessSetupScreen host={top.host} /> : null}
         {top?.kind === "settings" ? <SettingsScreen /> : null}
         {top?.kind === "agent" ? <AgentScreen agentId={top.agentId} /> : null}
         {top?.kind === "host" ? <AgentScreen agentId={top.agentId} /> : null}

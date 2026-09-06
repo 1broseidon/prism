@@ -75,3 +75,5 @@ jobs:
           pnpm build
       - name: Rust host
         run: cargo check -p prism-desktop --locked
+      - name: Client setup tests
+        run: cargo test -p prism-desktop --lib --locked

@@ -6,6 +6,7 @@ import type {
   DayActivity,
   AgentConfig,
   AuditEntry,
+  AuditWindow,
   ConnectSnippet,
   Decision,
   GatewayStatus,
@@ -46,14 +47,15 @@ let rules: Rule[] = [
 ];
 const HOOK_TOKEN = "k3Jx9v2mQd8sT1uWbC4eF6gH7iJ0lM_nO-pQrStUvWx";
 const nativeStatus = {
+  window: mockWindow(),
   observe_native: true,
   hosts: [
-    { host: "claude-code", hook_url: `http://127.0.0.1:9086/hooks/claude-code/${HOOK_TOKEN}`, last_event_at: iso(30), actions_7d: 390 },
-    { host: "codex", hook_url: `http://127.0.0.1:9086/hooks/codex/${HOOK_TOKEN}`, last_event_at: iso(1800), actions_7d: 22 },
+    { host: "claude-code", hook_url: `http://127.0.0.1:9086/hooks/claude-code/${HOOK_TOKEN}`, last_event_at: iso(30), actions_7d: 390, by_reason: [{reason: "git_force", count: 1}, {reason: "write_outside_cwd", count: 2}] },
+    { host: "codex", hook_url: `http://127.0.0.1:9086/hooks/codex/${HOOK_TOKEN}`, last_event_at: iso(1800), actions_7d: 22, by_reason: [] },
   ],
   setup: [
-    { host: "claude-code", settings_path: "/home/george/.claude/settings.json", hook_installed: true, hook_trusted: null },
-    { host: "codex", settings_path: "/home/george/.codex/hooks.json", hook_installed: true, hook_trusted: false },
+    { host: "claude-code", settings_path: "/home/george/.claude/settings.json", mcp_path: "/home/george/.claude.json", mcp_configured: true, hook_installed: true, hooks_disabled: false, setup_present: true, events_received: true, problem: null as string | null },
+    { host: "codex", settings_path: "/home/george/.codex/hooks.json", mcp_path: "/home/george/.codex/config.toml", mcp_configured: true, hook_installed: true, hooks_disabled: false, setup_present: true, events_received: false, problem: null as string | null },
   ],
   last_event_at: iso(30),
   actions_7d: 412,
@@ -75,57 +77,48 @@ const nativeStatus = {
 const nat = (host: string, subject: string, extra: Partial<import("./types").NativeDetail> = {}) => ({ host, subject, cwd: "/home/george/Projects/prism", session: "s-1", via_prism: false, ...extra });
 /** Mirrors prism_core::activity::needs_attention. */
 const needsAttention = (e: AuditEntry) => (e.native ? !!e.native.would_hold : e.source.kind === "human" || e.source.kind === "timeout" || e.verdict === "denied");
-const localDay = (at: string) => {
+function localDay(at: string) {
   const d = new Date(at);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
-/** A week that looks lived in: today's rows come from the feed above, earlier days are made up. */
+function mockWindow(days = 7, at = iso(0), entries: AuditEntry[] = []): AuditWindow {
+  const first = new Date(at); first.setDate(first.getDate() - days + 1);
+  const sorted = entries.map(e => e.at).sort();
+  return {days, first_day:localDay(first.toISOString()), last_day:localDay(at), snapshot_at:at,
+    oldest_available_at:sorted[0] ?? null, newest_available_at:sorted.at(-1) ?? null,
+    retention_days:30, archive_count:3, max_file_bytes:5242880, max_history_bytes:20971520,
+    retained_bytes:0, size_limited:true, full_window_guaranteed:false};
+}
+function mockQuery(filter: import("./state").ActivityFilter = {}) {
+  const window = mockWindow(filter.days ?? 7, filter.at ?? iso(0), audit);
+  const entries = audit.filter(e => !e.native?.via_prism && e.at <= window.snapshot_at && localDay(e.at) >= window.first_day && localDay(e.at) <= window.last_day)
+    .filter(e => !filter.agentId || e.agent_id === filter.agentId)
+    .filter(e => filter.attention === undefined || needsAttention(e) === filter.attention)
+    .filter(e => !filter.day || localDay(e.at) === filter.day)
+    .filter(e => !filter.reason || e.native?.would_hold === filter.reason)
+    .filter(e => !filter.nativeOnly || !!e.native)
+    .sort((a,b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id));
+  return {entries, window};
+}
+/** All chart counts come from materialized fixture rows, just like their drilldowns. */
 function activitySummary(): ActivitySummary {
-  const seen = audit.filter((e) => !e.native?.via_prism);
-  const flagged = needsAttention;
+  const {entries:seen, window} = mockQuery();
   const byAgent = new Map<string, AgentActivity>();
-  for (const e of seen) {
-    const a = byAgent.get(e.agent_id) ?? { id: e.agent_id, name: e.agent_name, host: !!e.native, total: 0, attention: 0 };
-    a.total += 1;
-    if (flagged(e)) a.attention += 1;
-    byAgent.set(e.agent_id, a);
-  }
-  const earlier = [
-    [41, 2],
-    [63, 0],
-    [12, 1],
-    [88, 4],
-    [57, 1],
-    [9, 0],
-  ];
-  const todayFlagged = seen.filter(flagged).length;
-  const daily: DayActivity[] = earlier.map(([routine, attention], i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    return { date: d.toISOString().slice(0, 10), routine, attention };
+  const daily: DayActivity[] = Array.from({length:7}, (_,i) => {
+    const d = new Date(window.last_day + "T12:00:00"); d.setDate(d.getDate() - 6 + i);
+    return {date:localDay(d.toISOString()), routine:0, attention:0};
   });
-  daily.push({ date: new Date().toISOString().slice(0, 10), routine: seen.length - todayFlagged, attention: todayFlagged });
-  const agents = [...byAgent.values()].sort((x, y) => y.total - x.total);
-  const priorTotal = earlier.reduce((n, [r, a]) => n + r + a, 0);
-  const priorAttention = earlier.reduce((n, [, a]) => n + a, 0);
-  if (agents[0]) {
-    agents[0].total += priorTotal;
-    agents[0].attention += priorAttention;
+  for (const e of seen) {
+    const a = byAgent.get(e.agent_id) ?? {id:e.agent_id, name:e.agent_name, host:e.agent_id.startsWith("host:"), total:0, attention:0};
+    a.total++; if (needsAttention(e)) a.attention++; byAgent.set(e.agent_id,a);
+    const day = daily.find(d => d.date === localDay(e.at))!;
+    if (needsAttention(e)) day.attention++; else day.routine++;
   }
-  const mcp = seen.filter((e) => !e.native);
-  return {
-    days: 7,
-    total: seen.length + priorTotal,
-    attention: todayFlagged + priorAttention,
-    mcp: {
-      allowed: mcp.filter((e) => e.verdict === "allowed").length + 140,
-      denied: mcp.filter((e) => e.verdict === "denied").length + 2,
-      asked: mcp.filter((e) => e.source.kind === "human" || e.source.kind === "timeout").length + 3,
-      errors: mcp.filter((e) => e.verdict === "error").length,
-    },
-    agents,
-    daily,
-  };
+  const mcp = seen.filter(e => !e.native);
+  return {window, days:7, total:seen.length, attention:seen.filter(needsAttention).length,
+    mcp:{allowed:mcp.filter(e=>e.verdict==="allowed").length, denied:mcp.filter(e=>e.verdict==="denied").length,
+      asked:mcp.filter(e=>["human","timeout"].includes(e.source.kind)).length, errors:mcp.filter(e=>e.verdict==="error").length},
+    agents:[...byAgent.values()].sort((a,b)=>b.total-a.total), daily};
 }
 
 let audit: AuditEntry[] = [
@@ -143,6 +136,16 @@ let audit: AuditEntry[] = [
   { id: "e6", at: iso(70), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", tool: "list_directory", verdict: "allowed", source: { kind: "posture", posture: "guided" }, duration_ms: 8, error: null, attention: "badge" },
   { id: "e5", at: iso(900), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s2", tool: "search_code", verdict: "error", source: { kind: "human" }, duration_ms: 3300, error: "backend exited with status 1", attention: "silent" },
 ];
+// Earlier days are actual rows so every chart segment has a matching log.
+for (let day = 1; day <= 6; day++) {
+  for (let i = 0; i < 18 + day * 7; i++) {
+    const date = new Date(); date.setDate(date.getDate() - day); date.setHours(12, 0, i, 0);
+    const host = i % 3 === 0 ? "codex" : "claude-code";
+    audit.push({...audit[0], id:`earlier-${day}-${i}`, at:date.toISOString(), agent_id:`host:${host}`,
+      agent_name:host === "codex" ? "Codex" : "Claude Code", server_id:host,
+      native:nat(host, i === 0 ? "git reset --hard" : "cargo check", i === 0 ? {would_hold:"git_force"} : {})});
+  }
+}
 let signins: PendingSignIn[] = [
   { id: "si1", agent_id: "host:claude-code", agent_name: "Claude Code", client_name: "claude-code", client_id: "c-claude-recoil", requested_at: iso(8), needs_consent: true, new_client: true },
 ];
@@ -244,17 +247,19 @@ export const mock = {
   get_settings: () => delay(settings),
   set_settings: (a: { settings: Settings }) => { settings = { ...a.settings }; return delay(undefined); },
   list_server_tools: (a: { serverId: string }) => delay(tools[a.serverId] ?? []),
-  list_audit: (a: { limit: number; agentId?: string | null; attention?: boolean | null; day?: string | null; reason?: string | null }) =>
-    delay(
-      audit
-        .filter((e) => !a.agentId || e.agent_id === a.agentId)
-        .filter((e) => !a.attention || needsAttention(e))
-        .filter((e) => !a.day || localDay(e.at) === a.day)
-        .filter((e) => !a.reason || e.native?.would_hold === a.reason)
-        .slice(0, a.limit),
-    ),
+  list_audit: (a: {limit:number} & import("./state").ActivityFilter) => delay(mockQuery(a).entries.slice(0,a.limit)),
+  list_audit_page: (a: {query: import("./state").ActivityFilter & {offset?:number; limit?:number}}) => {
+    const result = mockQuery(a.query); const offset=a.query.offset ?? 0; const limit=a.query.limit ?? 100;
+    return delay({...result, entries:result.entries.slice(offset,offset+limit), total:result.entries.length, offset, limit, has_more:offset+limit<result.entries.length});
+  },
   get_activity: () => delay(activitySummary()),
-  get_native_status: () => delay(nativeStatus),
+  get_native_status: () => {
+    const {entries, window} = mockQuery({nativeOnly:true});
+    const reasons = (rows: AuditEntry[]) => [...new Set(rows.flatMap(e => e.native?.would_hold ? [e.native.would_hold] : []))].map(reason => ({reason, count:rows.filter(e => e.native?.would_hold === reason).length}));
+    nativeStatus.window=window; nativeStatus.actions_7d=entries.length; nativeStatus.by_reason=reasons(entries); nativeStatus.would_hold_7d=entries.filter(needsAttention).length;
+    for (const host of nativeStatus.hosts) { const rows=entries.filter(e => e.agent_id===`host:${host.host}`); host.actions_7d=rows.length; host.by_reason=reasons(rows); }
+    return delay({...nativeStatus});
+  },
   set_observe_native: (a: { on: boolean }) => { nativeStatus.observe_native = a.on; return delay(undefined); },
   rotate_hook_token: () => { for (const s of nativeStatus.setup) s.hook_installed = false; return delay(undefined); },
   get_host_hook_snippet: (a: { host: string }) => {
@@ -264,8 +269,10 @@ export const mock = {
       : { type: "http", url, timeout: 5 };
     return delay(JSON.stringify({ hooks: { PreToolUse: [{ hooks: [entry] }] } }, null, 2));
   },
+  setup_harness: (a: { host: string }) => { const s = nativeStatus.setup.find((h) => h.host === a.host)!; s.setup_present = true; s.hook_installed = true; s.mcp_configured = true; s.events_received = false; return delay({paths: [s.settings_path, s.mcp_path], backups: [s.settings_path + ".bak"]}); },
+  remove_harness_setup: (a: { host: string }) => { const s = nativeStatus.setup.find((h) => h.host === a.host)!; s.setup_present = false; s.hook_installed = false; s.mcp_configured = false; s.events_received = false; return delay({paths: [s.settings_path, s.mcp_path], backups: [s.settings_path + ".bak"]}); },
   install_host_hook: (a: { host: string }) => { const s = nativeStatus.setup.find((h) => h.host === a.host)!; s.hook_installed = true; return delay({ path: s.settings_path, backup: s.settings_path + ".bak" }); },
-  export_native_report: () => delay("/home/george/Downloads/prism-native-2026-09-06.jsonl"),
+  export_native_report: () => delay({path:"/home/george/Downloads/prism-native.jsonl", metadata_path:"/home/george/Downloads/prism-native.metadata.json", total:mockQuery({nativeOnly:true,attention:true,days:30}).entries.length}),
   hide_panel: () => delay(undefined),
   get_update_status: () =>
     delay({

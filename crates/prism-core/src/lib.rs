@@ -21,7 +21,10 @@ pub use approval::{
     ApprovalRegistry, Decision, DecisionScope, DecisionTarget, DecisionVerdict, HoldOutcome,
     HoldReason, PendingCall, DEFAULT_HOLD_TIMEOUT, TIMEOUT_MESSAGE,
 };
-pub use audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict, NativeDetail};
+pub use audit::{
+    AuditEntry, AuditExport, AuditLog, AuditPage, AuditQuery, AuditSource, AuditVerdict,
+    AuditWindow, NativeDetail,
+};
 pub use backend::{BackendStatus, ServerView};
 pub use config::{
     AgentConfig, AgentStatus, Attention, HttpAuth, PanelAnchor, Posture, PrismConfig, Rule,
@@ -39,3 +42,4 @@ pub use oauth::{
 };
 pub use policy::{evaluate, glob_match, Decider, Evaluation, ToolAnnotations, Verdict};
 pub use shell_path::adopt_login_shell_path;
+pub use storage::write_client_config;

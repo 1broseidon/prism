@@ -1,6 +1,6 @@
 # Prism
 
-**A local MCP gateway that lives in your system tray.** Point Claude Code, Cursor, Codex or any MCP client at one endpoint. Prism runs your MCP servers, aggregates their tools, and holds any call your rules mark as *ask* until you allow or deny it from the panel. Nothing leaves the machine.
+**A local MCP gateway that lives in your system tray.** Point Claude Code, Cursor, Codex or any MCP client at one endpoint. Prism runs your MCP servers, aggregates their tools, and holds any call your rules mark as *ask* until you allow or deny it from the panel. Policies and audit history stay on this machine; requests to remote MCP servers go to the URLs you configure.
 
 <p align="center">
   <img src="docs/intro.gif" alt="An agent asks for a tool, the tray turns amber, the panel opens and you allow or deny the call" width="960">
@@ -58,7 +58,7 @@ pnpm tauri build          # bundles land in target/release/bundle
 
 Prism starts in the tray and stays there. Click the icon on macOS and Windows, or pick **Open Prism** from the menu on Linux. `Ctrl+Alt+P` toggles the panel from anywhere; set `panel_shortcut` in `prism.json` to change it (`"Super+Shift+P"`, say) or to `""` to turn it off.
 
-The gateway listens on `127.0.0.1:9086`. Change it with `listen_port` in `prism.json`, which is written on first launch:
+The gateway listens on `127.0.0.1:9086`. Change it with `listen_port` in `prism.json`, which is written on first launch. After restarting, repair known-harness setup or update other clients’ URLs:
 
 | OS | Configuration | Audit log |
 | --- | --- | --- |
@@ -68,7 +68,7 @@ The gateway listens on `127.0.0.1:9086`. Change it with `listen_port` in `prism.
 
 Linux honours `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. Directories are `0700` and files `0600` on Unix; Windows gets a DACL limited to you and SYSTEM. Configuration writes are atomic, so a crash mid-save cannot truncate the live file.
 
-The panel has four tabs. **Now** holds anything waiting for you plus the recent feed. **Servers**, **Agents** and **Rules** are the three things you configure. The sliders icon opens operator settings.
+The panel has four tabs. **Now** shows pending approvals and an activity summary. Click a count to open its filtered log. **Servers**, **Agents** and **Rules** are the three things you configure. The sliders icon opens operator settings.
 
 ## Add a server
 
@@ -80,7 +80,7 @@ The panel has four tabs. **Now** holds anything waiting for you plus the recent 
 
 - **None.** Public servers such as `https://docs.mcp.cloudflare.com/mcp`.
 - **API key.** A header sent on every request. The key goes in the `Authorization` header as `Bearer …` unless you name another header or give your own prefix. Use this for servers that hand out personal tokens rather than offering OAuth, such as GitHub's `https://api.githubcopilot.com/mcp/`.
-- **OAuth.** Prism signs in through your browser. It reads the server's sign-in settings from its 401 challenge, registers itself as a public client (dynamic client registration), runs the authorization code flow with PKCE, and takes the code back on a loopback listener that exists for that one sign-in. Servers that speak this include Linear, Sentry, Notion and Cloudflare. Servers without registration, such as GitHub, cannot be added this way; use an API key. **Sign out** on the row forgets the tokens; the server shows *needs sign-in* until you sign in again, which the row also offers.
+- **OAuth.** Prism signs in through your browser. It reads the server's sign-in settings from its 401 challenge, registers itself as a public client (dynamic client registration), runs the authorization code flow with PKCE, and takes the code back on a loopback listener that exists for that one sign-in. The callback shows progress until the exchange finishes and credentials are saved; only then does it show success. Servers that speak this include Linear, Sentry, Notion and Cloudflare. Servers without registration, such as GitHub, cannot be added this way; use an API key. **Sign out** on the row forgets the tokens; the server shows *needs sign-in* until you sign in again, which the row also offers.
 
 URLs must be https, except plain http to this machine. Headers and tokens follow the same rule as every other secret below.
 
@@ -92,7 +92,13 @@ If the credential store is locked when Prism starts, affected servers show as fa
 
 ## Connect an agent
 
-**Agents → Connect an agent** shows both options with copy buttons.
+**Agents → Connect an agent** offers **Claude Code**, **Codex**, and **Other**. Choose a known harness to set up both MCP and native observation globally. Prism backs up existing files, preserves other settings and project overrides, and offers **Repair setup** and **Remove setup**. A conflicting `prism` entry pointing elsewhere is left alone.
+
+Setup writes configuration; it does not grant access. Restart the client, complete its MCP sign-in, and approve that request in Prism. Codex also requires hook review through `/hooks`. **Configured** means the expected settings exist. **Receiving** means native events have arrived since those settings changed; a previous trust entry is never treated as proof. Observation remains optional and never blocks native actions.
+
+Choose **Other** for an OAuth URL or a manual bearer token. Project overrides still take precedence inside the client; Prism only manages global setup.
+
+**Protocol negotiation is automatic.** The same `/mcp` URL supports MCP 2026-07-28 stateless requests and older clients that initialize a session. Modern clients receive tool-list changes through `subscriptions/listen`. HTTP upstreams also negotiate modern or legacy support; no protocol switch is needed.
 
 **Clients with OAuth support** (Claude Code, Cursor, Codex and most current MCP clients) only need the URL:
 
@@ -100,7 +106,7 @@ If the credential store is locked when Prism starts, affected servers show as fa
 { "mcpServers": { "prism": { "url": "http://127.0.0.1:9086/mcp" } } }
 ```
 
-The client registers itself, opens a browser, and the browser waits. Prism flips the tray amber and shows a **wants to connect** card. Approve, and the client gets a one-hour access token and a thirty-day rotating refresh token; the browser is sent back and the tools appear. Deny, and no token is ever issued.
+The client registers itself and opens a waiting page directing you to approve the request in Prism. Prism flips the tray amber and shows a **wants to connect** card. Approve, and the client gets a one-hour access token and a thirty-day rotating refresh token; the browser is sent back and the tools appear. Deny, and no token is ever issued.
 
 Later sign-ins for an approved agent also ask, as a **wants to sign in again** card. A public client id proves nothing, so if nothing on your side asked to sign in, refuse it. Refusing leaves the agent's existing approval and tokens alone.
 
@@ -112,9 +118,9 @@ claude mcp add --transport http --scope user prism http://127.0.0.1:9086/mcp
 
 Project-scoped entries still work; they just add connections to the same agent. A harness reaching the gateway from another machine, once remote access exists, will be its own entry named after where it came from, never folded into the local one.
 
-**Clients without OAuth support** get a manual token: **Connect an agent → Manual token**, name the agent, and copy the token or the generated settings into the client. It must send `Authorization: Bearer <token>`. There is one manual token per agent, shown only once, with no expiry. **Replace token** rotates it without touching permissions; **Revoke token** or **Revoke access** kill it immediately, including on open sessions.
+**Clients without OAuth support** get a manual token: **Connect an agent → Other → Manual token**, name the agent, and copy the token or the generated settings into the client. It must send `Authorization: Bearer <token>`. There is one manual token per agent, shown only once, with no expiry. **Replace token** rotates it without touching permissions; **Revoke token** or **Revoke access** kill it immediately, including on open sessions.
 
-Identity is the token, never the name a client announces about itself. Every session is bound to the identity that opened it, so one agent's token cannot ride another agent's session.
+Identity is the token, never the name a client announces about itself. Stateless requests authenticate individually; legacy sessions are additionally bound to the identity that opened them. Both use the same permissions and audit trail. Closing a held request cancels its approval; cancellation cannot undo a backend operation that already started.
 
 ## Decide what runs
 
@@ -152,17 +158,19 @@ Every update file is signed with Prism's minisign key and checked against the pu
 
 MCP is only part of what an agent does. Claude Code and Codex run shell commands, edit files and fetch pages on their own, and none of that passes through the gateway. Prism can observe those too.
 
-**Agents → Claude Code → Write it for me** adds an HTTP hook to `~/.claude/settings.json`; **Agents → Codex → Write it for me** adds a command hook to `~/.codex/hooks.json` (a backup of the previous file is kept either way, and every other hook in it is left alone). From then on the host reports each action to Prism just before it runs and carries on regardless of the answer. Claude Code posts directly; Codex has no HTTP hook type, so its entry is a one-line `curl` with tight timeouts: a loopback post takes milliseconds, and a stopped Prism refuses the connection at once. Prism adds nothing to the host's own permission flow: no card, no prompt, no block. If Prism is not running, the hook fails silently and the host proceeds. Codex reviews every new or changed hook before running it: after Prism writes the entry, open `/hooks` in a Codex session and trust it, and again after rotating the token. The Codex host screen shows **review in Codex** until that is done; Prism reads Codex's trust state and never writes it.
+**Agents → Connect an agent → Claude Code / Codex** configures native observation alongside MCP. Claude Code posts directly from an HTTP hook in `~/.claude/settings.json`; Codex uses a short `curl` command in `~/.codex/hooks.json`. Custom `CLAUDE_CONFIG_DIR` and `CODEX_HOME` locations are honoured. Existing files are backed up, and repair or removal preserves other settings and hooks.
+
+A hook reports each attempted action before it runs. Prism adds no permission prompt and never blocks the native action. If Prism is stopped, the hook fails silently. Codex requires you to review new or changed hooks through `/hooks`; setup does not grant that trust. **Configured** means the hook matches this gateway. **Receiving** means an event has arrived since configuration changed. If the host has disabled hooks, setup leaves them disabled.
 
 What the record keeps is one line per action, never the raw input: the redacted command for a shell call, the path for a file read or write (for a Codex `apply_patch`, the file paths named in the patch and nothing of its content), the origin for a fetch, the tool name for anything else. Bearer tokens, key-like assignments, URL passwords and long opaque strings are replaced before the line is stored.
 
-The **Now** tab sums native and MCP actions together for the week; the **Agents** tab shows each host's coverage: **observed** once actions are arriving, **hooked** before the first one, **not hooked up** until the hook is written. A short watch list marks the risky actions: a recursive delete outside the working directory, a forced push, curl piped into a shell, sudo, a read of SSH keys, cloud credentials or a `.env` file, a write under `~/.ssh` or a shell rc file, a write outside the working directory. The match is lexical and fixed, not learned: the command is split on `;`, `&&`, `||`, `|` and newlines, each part is checked by its program name and flags, and paths are resolved against the working directory without touching the disk. Nothing is held. The Now summary counts matches as needed attention, the host screen lists them per pattern, and **Settings → Native actions** can export the last 30 days. That count is what decides whether a real gate is worth building.
+The **Now** tab sums native and MCP actions together for the week; the setup screen distinguishes configured hooks from received events. A short watch list marks the risky actions: a recursive delete outside the working directory, a forced push, curl piped into a shell, sudo, a read of SSH keys, cloud credentials or a `.env` file, a write under `~/.ssh` or a shell rc file, a write outside the working directory. The match is lexical and fixed, not learned: the command is split on `;`, `&&`, `||`, `|` and newlines, each part is checked by its program name and flags, and paths are resolved against the working directory without touching the disk. Nothing is held. The Now summary counts matches as needed attention, the host screen lists them per pattern, and **Settings → Native actions → Export observed matches** exports retained matches from up to 30 days.
 
 Native action coverage depends on the agent host honouring its own hooks. Prism shows what it can see and labels it; it does not sandbox anything, and a process that bypasses the host is outside what a tray app can see.
 
 ## What the audit log keeps
 
-Agent, tool, timestamp, verdict and what decided it (you, a rule, the posture, do-not-disturb, or a timeout). Tool arguments and results are never persisted, and raw error text is dropped because servers echo credentials. The current file is capped at 5 MiB with three archives, and entries older than 30 days are removed at startup and hourly. The panel shows the last 1,000.
+Agent, tool, timestamp, verdict and what decided it (you, a rule, the posture, do-not-disturb, or a timeout). Tool arguments and results are never persisted, and raw error text is dropped because servers echo credentials. The current file is capped at 5 MiB with three archives, and entries older than 30 days are removed at startup and hourly. Summaries, paginated logs and exports share this retained history; see [Activity history](#activity-history). If history cannot be read, the panel reports it rather than showing a misleading zero.
 
 ## What Prism protects, and what it does not
 
@@ -177,6 +185,12 @@ Prism does not sandbox the servers it launches. A server necessarily receives it
 - **Servers show "failed" on Linux at login.** The keyring was still locked when Prism started. Unlock it and restart the server from the Servers tab.
 - **The agent sees no tools.** It is pending. Open the panel and approve it; Prism pushes a `tools/list_changed` notification so the client refetches.
 - **The panel opens in the wrong corner on Linux.** Set `panel_anchor` in `prism.json` to `top-right`, `top-left`, `bottom-right` or `bottom-left`. `auto` follows the cursor when opened from the tray and otherwise picks the corner the desktop's reserved bar points at, top right when nothing is reserved.
+
+## Activity history
+
+The summary and filtered log use the same retained events and time window. Counts include observed native attempts and MCP outcomes; an observed attempt does not prove the tool completed. Native hook copies of Prism MCP calls are excluded to avoid double counting. Historical harness registrations are grouped for display without changing their stored audit identity.
+
+History is bounded by both age and size: up to 30 days, with a 5 MiB active log and three archives (20 MiB total). A busy machine may retain less than 30 days; periods when Prism was off are not covered. The seven-day view is labelled **retained**, and longer logs load in pages. **Export observed matches** writes the retained Watch list matches plus a metadata file describing the exported time window and retention limits.
 
 ## Development
 

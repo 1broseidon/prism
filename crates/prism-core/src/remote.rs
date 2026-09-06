@@ -11,9 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Query, State};
-use axum::response::{Html, IntoResponse};
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use axum::Router;
+use rmcp::model::ProtocolVersion;
+use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
 use rmcp::transport::auth::{
     AuthClient, AuthError, AuthorizationManager, AuthorizationRequest, CredentialRefreshGuard,
     CredentialStore as TokenStore, OAuthState as RmcpOAuthState, StoredCredentials,
@@ -21,8 +23,7 @@ use rmcp::transport::auth::{
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
-use rmcp::ServiceExt;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::warn;
 
 use crate::config::{HttpAuth, ServerConfig};
@@ -103,6 +104,12 @@ fn describe(err: AuthError) -> Error {
         AuthError::MetadataError(_) => {
             Error::Gateway("could not read the server's sign-in settings".into())
         }
+        AuthError::CredentialStoreError(_) => {
+            Error::Gateway("could not save sign-in credentials".into())
+        }
+        AuthError::TokenExchangeFailed(_) => {
+            Error::Gateway("could not exchange the sign-in code".into())
+        }
         _ => Error::Gateway("sign-in failed".into()),
     }
 }
@@ -141,14 +148,26 @@ pub(crate) async fn connect(
         HttpAuth::None | HttpAuth::Header => {
             let transport =
                 StreamableHttpClientTransport::with_client(http_client()?, transport_config);
-            handshake(().serve(transport)).await
+            handshake(().serve_with_lifecycle(transport, remote_lifecycle())).await
         }
         HttpAuth::Oauth => {
             let manager = authorized_manager(config, store).await?;
             let client = AuthClient::new(http_client()?, manager);
             let transport = StreamableHttpClientTransport::with_client(client, transport_config);
-            handshake(().serve(transport)).await
+            handshake(().serve_with_lifecycle(transport, remote_lifecycle())).await
         }
+    }
+}
+
+fn remote_lifecycle() -> ClientLifecycleMode {
+    ClientLifecycleMode::Auto {
+        preferred_versions: vec![
+            ProtocolVersion::V_2026_07_28,
+            ProtocolVersion::V_2025_11_25,
+            ProtocolVersion::V_2025_06_18,
+            ProtocolVersion::V_2025_03_26,
+        ],
+        legacy_version: Some(ProtocolVersion::V_2025_11_25),
     }
 }
 
@@ -252,14 +271,15 @@ pub(crate) struct SignIn {
 
 #[derive(Clone)]
 struct CallbackState {
-    tx: Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    tx: mpsc::Sender<CallbackRequest>,
+    expected_state: String,
     server_name: String,
 }
 
 /// The page the browser lands on. Same tokens as the panel; nothing loaded from anywhere.
 const CALLBACK_PAGE: &str = include_str!("callback.html");
 
-fn html_escape(raw: &str) -> String {
+pub(crate) fn html_escape(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
         match ch {
@@ -275,7 +295,7 @@ fn html_escape(raw: &str) -> String {
 }
 
 /// Fill the callback page for one outcome. `lede` may carry the escaped server name in a `<b>`.
-fn callback_page(
+pub(crate) fn callback_page(
     state: &str,
     eyebrow_class: &str,
     eyebrow: &str,
@@ -287,58 +307,212 @@ fn callback_page(
         .replace("{{eyebrow_class}}", eyebrow_class)
         .replace("{{eyebrow}}", eyebrow)
         .replace("{{title}}", title)
+        .replace(
+            "{{footer}}",
+            if matches!(state, "waiting" | "inprogress") {
+                "Keep this tab open."
+            } else {
+                "You can close this tab."
+            },
+        )
+        .replace(
+            "{{script}}",
+            "<script>history.replaceState(null, \"\", location.pathname);</script>",
+        )
         .replace("{{lede}}", lede)
+}
+
+struct CallbackRequest {
+    query: String,
+    refused: bool,
+    reply: oneshot::Sender<CallbackOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallbackOutcome {
+    Saved,
+    Refused,
+    Invalid,
+    StoreFailed,
+    ExchangeFailed,
+    TimedOut,
+    Finished,
+    Busy,
+}
+
+impl CallbackOutcome {
+    fn response(self, name: &str) -> axum::response::Response {
+        let (status, state, eyebrow, title, lede) = match self {
+            Self::Saved => (StatusCode::OK, "ok", "Credentials saved", "Signed in.",
+                format!("Prism saved your sign-in for <b>{}</b>. Check the Servers tab while Prism connects.", html_escape(name))),
+            Self::Refused => (StatusCode::FORBIDDEN, "refused", "Access not granted", "Sign-in refused.",
+                "The server did not grant access. You can try again from the Prism panel.".into()),
+            Self::Invalid => (StatusCode::BAD_REQUEST, "failed", "Callback rejected", "Could not verify this callback.",
+                "It is incomplete or does not match this sign-in. Return to the original sign-in tab to continue.".into()),
+            Self::StoreFailed => (StatusCode::INTERNAL_SERVER_ERROR, "failed", "Credentials not saved", "Could not save your sign-in.",
+                "Prism could not save credentials in the system credential store. Unlock it, then try signing in again from Prism.".into()),
+            Self::ExchangeFailed => (StatusCode::BAD_GATEWAY, "failed", "Sign-in failed", "Could not complete sign-in.",
+                "Prism could not exchange the server's authorization code for credentials. Try again from the Prism panel.".into()),
+            Self::TimedOut => (StatusCode::GATEWAY_TIMEOUT, "failed", "Sign-in timed out", "The server took too long.",
+                "Prism could not confirm that sign-in finished. Check the Servers tab and try again.".into()),
+            Self::Finished => (StatusCode::GONE, "done", "Sign-in ended", "This sign-in already ended.",
+                "Check the Servers tab for the result, or start a new sign-in from Prism.".into()),
+            Self::Busy => (StatusCode::CONFLICT, "done", "Sign-in in progress", "Prism is checking your sign-in.",
+                "Keep the original callback tab open for the result.".into()),
+        };
+        crate::oauth::browser_response(
+            status,
+            callback_page(
+                state,
+                if state == "ok" { "" } else { "warn" },
+                eyebrow,
+                title,
+                &lede,
+            ),
+        )
+    }
+}
+
+fn callback_progress_page(name: &str) -> String {
+    callback_page(
+        "inprogress",
+        "",
+        "Completing sign-in",
+        "Finishing your sign-in.",
+        &format!(
+            "Prism is checking the response from <b>{}</b> and saving your credentials.",
+            html_escape(name)
+        ),
+    )
+    .replace(
+        "<script>history.replaceState(null, \"\", location.pathname);</script>",
+        include_str!("callback-progress.html"),
+    )
 }
 
 async fn callback(
     State(state): State<CallbackState>,
-    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    Query(params): Query<Vec<(String, String)>>,
 ) -> axum::response::Response {
+    // Validate before handing off the attempt. Missing, duplicated, empty or forged
+    // callbacks must not consume the PKCE state or close the legitimate listener.
+    let one = |key: &str| -> Option<&str> {
+        let mut values = params
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str());
+        let value = values.next()?;
+        (!value.is_empty() && values.next().is_none()).then_some(value)
+    };
+    let valid_state = one("state").is_some_and(|value| {
+        crate::oauth::constant_time_eq(value.as_bytes(), state.expected_state.as_bytes())
+    });
+    let has_code = params.iter().any(|(k, _)| k == "code");
+    let has_error = params.iter().any(|(k, _)| k == "error");
+    let valid_result = (has_code && !has_error && one("code").is_some())
+        || (has_error && !has_code && one("error").is_some());
+    let has_issuer = params.iter().any(|(k, _)| k == "iss");
+    if !valid_state || !valid_result || (has_issuer && one("iss").is_none()) {
+        return CallbackOutcome::Invalid.response(&state.server_name);
+    }
+    if state.tx.is_closed() {
+        return CallbackOutcome::Finished.response(&state.server_name);
+    }
+    if crate::oauth::wants_html(&headers) {
+        // Navigation only renders progress; its script submits the callback once.
+        return crate::oauth::browser_response(
+            StatusCode::OK,
+            callback_progress_page(&state.server_name),
+        );
+    }
+    if !crate::oauth::same_origin(&headers)
+        || headers
+            .get("x-prism-oauth")
+            .is_some_and(|value| value != "1")
+    {
+        return crate::oauth::private_response(axum::response::IntoResponse::into_response(
+            StatusCode::FORBIDDEN,
+        ));
+    }
     let query = params
         .iter()
         .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    let delivered = state
-        .tx
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-        .map(|tx| tx.send(query).is_ok())
-        .unwrap_or(false);
-    let name = html_escape(&state.server_name);
-    let page = if params.contains_key("error") {
-        callback_page(
-            "refused",
-            "warn",
-            "Not connected",
-            "Sign-in refused.",
-            &format!(
-                "<b>{name}</b> did not grant access, so Prism has nothing stored. The server stays as \
-                 <b>needs sign-in</b> until you try again from the panel."
-            ),
-        )
-    } else if delivered {
-        callback_page(
-            "ok",
-            "",
-            "Connected",
-            "Signed in.",
-            &format!(
-                "Prism has what it needs from <b>{name}</b>. Its tools appear in the Servers tab in a \
-                 moment, available to your agents through the rules you set."
-            ),
-        )
-    } else {
-        callback_page(
-            "done",
-            "quiet",
-            "Already finished",
-            "This sign-in already finished.",
-            "Prism took the code the first time this page opened. Check the Servers tab for the result.",
-        )
-    };
-    Html(page).into_response()
+    let (reply, received) = oneshot::channel();
+    match state.tx.try_send(CallbackRequest {
+        query,
+        refused: has_error,
+        reply,
+    }) {
+        Ok(()) => received.await.unwrap_or(CallbackOutcome::Finished),
+        Err(mpsc::error::TrySendError::Full(_)) => CallbackOutcome::Busy,
+        Err(mpsc::error::TrySendError::Closed(_)) => CallbackOutcome::Finished,
+    }
+    .response(&state.server_name)
+}
+
+async fn receive_callback(
+    state: &mut RmcpOAuthState,
+    rx: &mut mpsc::Receiver<CallbackRequest>,
+    redirect_uri: &str,
+    timeout: Duration,
+    exchange_timeout: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let request = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(request)) => request,
+            Ok(None) => return Err(Error::Gateway("sign-in was cancelled".into())),
+            Err(_) => {
+                return Err(Error::Gateway(
+                    "sign-in timed out; the browser never came back".into(),
+                ))
+            }
+        };
+        let (page, outcome) = if request.refused {
+            (
+                CallbackOutcome::Refused,
+                Err(Error::Gateway("the server refused sign-in".into())),
+            )
+        } else {
+            let url = format!("{redirect_uri}?{}", request.query);
+            match tokio::time::timeout(exchange_timeout, state.handle_callback_url(&url)).await {
+                Ok(Ok(())) => (CallbackOutcome::Saved, Ok(())),
+                Ok(Err(err)) => {
+                    // rmcp keeps the authorization state when issuer validation fails.
+                    // Keep the callback listener too, so the real response can still arrive.
+                    if matches!(
+                        err,
+                        AuthError::AuthorizationServerMismatch { .. }
+                            | AuthError::AuthorizationServerMissingIssuer { .. }
+                            | AuthError::AuthorizationFailed(_)
+                    ) {
+                        let _ = request.reply.send(CallbackOutcome::Invalid);
+                        continue;
+                    }
+                    let page = if matches!(err, AuthError::CredentialStoreError(_)) {
+                        CallbackOutcome::StoreFailed
+                    } else {
+                        CallbackOutcome::ExchangeFailed
+                    };
+                    warn!("OAuth sign-in failed: {}", kind(&err));
+                    (page, Err(describe(err)))
+                }
+                Err(_) => (
+                    CallbackOutcome::TimedOut,
+                    Err(Error::Gateway(
+                        "sign-in timed out while completing the callback".into(),
+                    )),
+                ),
+            }
+        };
+        // Only now may the browser report success: rmcp has validated state,
+        // exchanged the code, and awaited Tokens::save all the way through keyring.
+        let _ = request.reply.send(page);
+        return outcome;
+    }
 }
 
 fn urlencode(raw: &str) -> String {
@@ -386,44 +560,52 @@ pub(crate) async fn begin_sign_in(
         .map_err(describe)?;
     let auth_url = state.get_authorization_url().await.map_err(describe)?;
 
-    let (query_tx, query_rx) = oneshot::channel::<String>();
+    let expected_state = reqwest::Url::parse(&auth_url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned())
+        })
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Error::Gateway("the sign-in URL has no state".into()))?;
+    let (query_tx, mut query_rx) = mpsc::channel::<CallbackRequest>(1);
     let (done_tx, done_rx) = oneshot::channel::<Result<()>>();
     let app = Router::new()
         .route("/callback", get(callback))
         .with_state(CallbackState {
-            tx: Arc::new(std::sync::Mutex::new(Some(query_tx))),
+            tx: query_tx,
+            expected_state,
             server_name: config.name.clone(),
         });
-    let server_name = config.name.clone();
     tokio::spawn(async move {
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
-        let serve = tokio::spawn(async move {
+        let mut serve = tokio::spawn(async move {
             let _ = axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = stop_rx.await;
                 })
                 .await;
         });
-        let outcome = match tokio::time::timeout(SIGN_IN_TIMEOUT, query_rx).await {
-            Ok(Ok(query)) => {
-                let callback_url = format!("{redirect_uri}?{query}");
-                match state.handle_callback_url(&callback_url).await {
-                    Ok(()) => Ok(()),
-                    Err(err) => {
-                        warn!(server = %server_name, "OAuth sign-in failed: {}", kind(&err));
-                        Err(describe(err))
-                    }
-                }
-            }
-            Ok(Err(_)) => Err(Error::Gateway("sign-in was cancelled".into())),
-            Err(_) => Err(Error::Gateway(
-                "sign-in timed out; the browser never came back".into(),
-            )),
-        };
+        let outcome = receive_callback(
+            &mut state,
+            &mut query_rx,
+            &redirect_uri,
+            SIGN_IN_TIMEOUT,
+            HANDSHAKE_TIMEOUT,
+        )
+        .await;
+        // Close queued/replayed callbacks without processing them a second time.
+        drop(query_rx);
         // Let the browser receive its page before the listener goes away.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let _ = stop_tx.send(());
-        let _ = serve.await;
+        if tokio::time::timeout(Duration::from_secs(1), &mut serve)
+            .await
+            .is_err()
+        {
+            serve.abort();
+        }
         let _ = done_tx.send(outcome);
     });
 
@@ -448,6 +630,7 @@ fn kind(err: &AuthError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
 
     #[test]
     fn urls_must_be_https_unless_local() {
@@ -483,7 +666,7 @@ mod tests {
         assert!(page.contains("from <b>acme &lt;b&gt;&amp;&lt;/b&gt; &quot;co&quot;</b>"));
         assert!(!page.contains("{{"), "every placeholder is filled");
         assert!(
-            !page.contains("http"),
+            !page.contains("https://"),
             "the page loads nothing from anywhere"
         );
     }
@@ -712,6 +895,404 @@ mod tests {
         panic!("server never reached {what}");
     }
 
+    // Only the token-bearing save is controlled; dynamic registration still succeeds.
+    struct TestTokenStore {
+        inner: MemoryStore,
+        fail: bool,
+        entered: tokio::sync::Notify,
+        release: (std::sync::Mutex<bool>, std::sync::Condvar),
+    }
+    impl TestTokenStore {
+        fn new(fail: bool) -> Self {
+            Self {
+                inner: MemoryStore::default(),
+                fail,
+                entered: tokio::sync::Notify::new(),
+                release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            }
+        }
+        fn release(&self) {
+            *self.release.0.lock().unwrap() = true;
+            self.release.1.notify_all();
+        }
+    }
+    impl CredentialStore for TestTokenStore {
+        fn set(&self, key: &str, value: &[u8]) -> Result<()> {
+            let json: serde_json::Value = serde_json::from_slice(value).unwrap();
+            if json
+                .get("token_response")
+                .is_some_and(|token| !token.is_null())
+            {
+                self.entered.notify_one();
+                let (released, _) = self
+                    .release
+                    .1
+                    .wait_timeout_while(
+                        self.release.0.lock().unwrap(),
+                        Duration::from_secs(5),
+                        |released| !*released,
+                    )
+                    .unwrap();
+                assert!(*released, "test must release the credential store");
+                if self.fail {
+                    return Err(Error::Gateway("synthetic locked store".into()));
+                }
+            }
+            self.inner.set(key, value)
+        }
+        fn get(&self, key: &str) -> Result<Vec<u8>> {
+            self.inner.get(key)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_waits_for_the_actual_credential_save_and_reports_failures() {
+        for fail in [false, true] {
+            let (upstream, port, _dir) = gateway_on_loopback().await;
+            let store = Arc::new(TestTokenStore::new(fail));
+            let mut config = remote(
+                "store <test>",
+                format!("http://127.0.0.1:{port}/mcp"),
+                HttpAuth::Oauth,
+                BTreeMap::new(),
+            );
+            let id = uuid::Uuid::new_v4().to_string();
+            config.oauth_ref = Some(id.clone());
+            let mut signin = begin_sign_in(&config, store.clone()).await.unwrap();
+            let browser = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let auth_url = reqwest::Url::parse(&signin.url).unwrap();
+            let params: HashMap<_, _> = auth_url.query_pairs().into_owned().collect();
+            let callback_url = &params["redirect_uri"];
+            // All malformed callbacks leave the legitimate attempt available.
+            for query in [
+                "".into(),
+                "code=secret-code&state=wrong".into(),
+                format!(
+                    "code=secret-code&state={}&state={}",
+                    params["state"], params["state"]
+                ),
+                format!("code=&state={}", params["state"]),
+                format!("code=secret-code&error=denied&state={}", params["state"]),
+            ] {
+                let response = browser
+                    .get(format!("{callback_url}?{query}"))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 400);
+                let html = response.text().await.unwrap();
+                assert!(html.contains("Could not verify this callback"));
+                assert!(!html.contains("secret-code"));
+                assert!(!html.contains("Credentials saved"));
+                assert!(matches!(
+                    signin.done.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            }
+            let authorization = tokio::spawn({
+                let browser = browser.clone();
+                let url = signin.url.clone();
+                async move { browser.get(url).send().await.unwrap() }
+            });
+            let pending = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(pending) = upstream.pending_signins().into_iter().next() {
+                        break pending;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            upstream
+                .decide_agent(&pending.agent_id, true)
+                .await
+                .unwrap();
+            let authorized = authorization.await.unwrap();
+            assert_eq!(authorized.status(), 303);
+            let location = authorized.headers()["location"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            // Even a state-matching callback with a forged issuer must not burn the real code.
+            let forged = browser
+                .get(format!("{location}&iss=https%3A%2F%2Fwrong.example"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(forged.status(), 400);
+            assert!(matches!(
+                signin.done.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            let progress = tokio::time::timeout(
+                Duration::from_secs(1),
+                browser.get(&location).header("Accept", "text/html").send(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(progress.status(), 200);
+            assert_eq!(progress.headers()["cache-control"], "no-store");
+            let csp = progress.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let html = progress.text().await.unwrap();
+            assert!(html.contains("data-state=\"inprogress\""));
+            assert!(html.contains("Finishing your sign-in"));
+            assert!(!html.contains("Credentials saved"));
+            assert!(!html.contains(&params["state"]));
+            let code = reqwest::Url::parse(&location)
+                .unwrap()
+                .query_pairs()
+                .find(|(k, _)| k == "code")
+                .unwrap()
+                .1
+                .into_owned();
+            assert!(!html.contains(&code));
+            let nonce = html
+                .split("<script nonce=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            assert!(csp.contains(&format!("'nonce-{nonce}'")));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), store.entered.notified())
+                    .await
+                    .is_err(),
+                "rendering HTML must not consume the callback"
+            );
+            let rejected = browser
+                .get(&location)
+                .header("Accept", "application/json")
+                .header("X-Prism-OAuth", "1")
+                .header("Sec-Fetch-Site", "cross-site")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), 403);
+            let mut callback = tokio::spawn({
+                let browser = browser.clone();
+                let location = location.clone();
+                async move {
+                    browser
+                        .get(location)
+                        .header("Accept", "application/json")
+                        .header("X-Prism-OAuth", "1")
+                        .header("Sec-Fetch-Site", "same-origin")
+                        .send()
+                        .await
+                        .unwrap()
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), store.entered.notified())
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), &mut callback)
+                    .await
+                    .is_err(),
+                "browser must wait until the credential store finishes"
+            );
+            // Even while the real exchange is blocked in keyring, browser navigation
+            // gets progress immediately and cannot enqueue/consume another attempt.
+            let progress = tokio::time::timeout(
+                Duration::from_secs(1),
+                browser.get(&location).header("Accept", "text/html").send(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(progress.status(), 200);
+            assert!(progress
+                .text()
+                .await
+                .unwrap()
+                .contains("Finishing your sign-in"));
+            store.release();
+            let response = callback.await.unwrap();
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+            assert_eq!(response.status(), if fail { 500 } else { 200 });
+            let html = response.text().await.unwrap();
+            assert!(html.contains(if fail {
+                "Could not save your sign-in"
+            } else {
+                "Credentials saved"
+            }));
+            assert!(!html.contains(&params["state"]));
+            let creds = Tokens::new(store.clone(), Some(id))
+                .unwrap()
+                .load()
+                .await
+                .unwrap();
+            assert_eq!(creds.and_then(|c| c.token_response).is_some(), !fail);
+            let replay = browser.get(&location).send().await.unwrap();
+            assert_eq!(replay.status(), 410);
+            assert!(!replay.text().await.unwrap().contains("Credentials saved"));
+            assert_eq!(signin.done.await.unwrap().is_ok(), !fail);
+            upstream.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_refusal_and_failed_exchange_never_claim_success() {
+        for refused in [true, false] {
+            let (upstream, port, _dir) = gateway_on_loopback().await;
+            let store = Arc::new(MemoryStore::default());
+            let mut config = remote(
+                "failure",
+                format!("http://127.0.0.1:{port}/mcp"),
+                HttpAuth::Oauth,
+                BTreeMap::new(),
+            );
+            config.oauth_ref = Some(uuid::Uuid::new_v4().to_string());
+            let signin = begin_sign_in(&config, store.clone()).await.unwrap();
+            let params: HashMap<_, _> = reqwest::Url::parse(&signin.url)
+                .unwrap()
+                .query_pairs()
+                .into_owned()
+                .collect();
+            let query = if refused {
+                "error=access_denied&error_description=secret-text"
+            } else {
+                "code=secret-invalid-code"
+            };
+            let response = reqwest::get(format!(
+                "{}?{query}&state={}",
+                params["redirect_uri"], params["state"]
+            ))
+            .await
+            .unwrap();
+            assert_eq!(response.status(), if refused { 403 } else { 502 });
+            let html = response.text().await.unwrap();
+            assert!(html.contains(if refused {
+                "Sign-in refused"
+            } else {
+                "Could not complete sign-in"
+            }));
+            assert!(!html.contains("secret-"));
+            assert!(!html.contains("Credentials saved"));
+            assert!(signin.done.await.unwrap().is_err());
+            assert!(Tokens::new(store, config.oauth_ref)
+                .unwrap()
+                .load()
+                .await
+                .unwrap()
+                .and_then(|credentials| credentials.token_response)
+                .is_none());
+            upstream.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_wait_is_bounded_without_a_browser() {
+        let (upstream, port, _dir) = gateway_on_loopback().await;
+        let mut state = RmcpOAuthState::new(
+            format!("http://127.0.0.1:{port}/mcp").as_str(),
+            Some(http_client().unwrap()),
+        )
+        .await
+        .unwrap();
+        let (_tx, mut rx) = mpsc::channel(1);
+        let result = receive_callback(
+            &mut state,
+            &mut rx,
+            "http://localhost/callback",
+            Duration::from_millis(5),
+            HANDSHAKE_TIMEOUT,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        upstream.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn callback_exchange_timeout_reports_an_unconfirmed_result() {
+        let (upstream, port, _dir) = gateway_on_loopback().await;
+        let store = Arc::new(MemoryStore::default());
+        let mut state = RmcpOAuthState::new(
+            format!("http://127.0.0.1:{port}/mcp").as_str(),
+            Some(http_client().unwrap()),
+        )
+        .await
+        .unwrap();
+        if let RmcpOAuthState::Unauthorized(manager) = &mut state {
+            manager.set_credential_store(
+                Tokens::new(store.clone(), Some(uuid::Uuid::new_v4().to_string())).unwrap(),
+            );
+        }
+        state
+            .start_authorization(
+                AuthorizationRequest::new("http://localhost/callback")
+                    .with_client_name(CLIENT_NAME),
+            )
+            .await
+            .unwrap();
+        let auth_url = reqwest::Url::parse(&state.get_authorization_url().await.unwrap()).unwrap();
+        let authorization = tokio::spawn(async move {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap()
+                .get(auth_url)
+                .send()
+                .await
+                .unwrap()
+        });
+        let pending = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(pending) = upstream.pending_signins().into_iter().next() {
+                    break pending;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        upstream
+            .decide_agent(&pending.agent_id, true)
+            .await
+            .unwrap();
+        let authorized = authorization.await.unwrap();
+        assert_eq!(authorized.status(), StatusCode::SEE_OTHER);
+        let callback_url =
+            reqwest::Url::parse(authorized.headers()["location"].to_str().unwrap()).unwrap();
+        // Holding the upstream config makes the token exchange wait without changing
+        // an account, using the real HTTP/token path and a very short test deadline.
+        let blocked = upstream.config.write().await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let (reply, result) = oneshot::channel();
+        tx.send(CallbackRequest {
+            query: callback_url.query().unwrap().to_string(),
+            refused: false,
+            reply,
+        })
+        .await
+        .unwrap();
+        let outcome = receive_callback(
+            &mut state,
+            &mut rx,
+            "http://localhost/callback",
+            SIGN_IN_TIMEOUT,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(outcome.unwrap_err().to_string().contains("timed out"));
+        assert_eq!(result.await.unwrap(), CallbackOutcome::TimedOut);
+        drop(blocked);
+        upstream.shutdown().await;
+    }
+
     /// The whole OAuth path against Prism's own authorization server: discovery from the
     /// 401 challenge, dynamic registration, the browser hop with consent in the upstream
     /// panel, the loopback callback, the token exchange, and a live session afterwards.
@@ -741,15 +1322,28 @@ mod tests {
             "{auth_url}"
         );
 
-        // The browser: parks on /authorize until the upstream operator approves "Prism".
+        // A real browser gets helpful HTML immediately and polls only its own status.
         let browser = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
-        let parked = tokio::spawn({
-            let browser = browser.clone();
-            async move { browser.get(auth_url).send().await.unwrap() }
-        });
+        let page = browser
+            .get(&auth_url)
+            .header("Accept", "text/html")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), 200);
+        let html = page.text().await.unwrap();
+        let req = html
+            .split("const request = \"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let status_url = format!("http://127.0.0.1:{upstream_port}/authorize/status?req={req}");
+        let finish_url = format!("http://127.0.0.1:{upstream_port}/authorize/finish?req={req}");
         let mut pending = None;
         for _ in 0..100 {
             pending = upstream.agents().await.into_iter().find(|a| {
@@ -766,10 +1360,26 @@ mod tests {
             .await
             .unwrap();
 
-        let redirect = tokio::time::timeout(Duration::from_secs(10), parked)
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status: serde_json::Value = browser
+                    .get(&status_url)
+                    .header("X-Prism-OAuth", "1")
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if status["status"] == "ready" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let redirect = browser.get(finish_url).send().await.unwrap();
         assert_eq!(redirect.status(), 303);
         let location = redirect.headers()["location"].to_str().unwrap().to_string();
         assert!(location.starts_with("http://127.0.0.1:"), "{location}");

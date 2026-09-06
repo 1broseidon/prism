@@ -103,6 +103,7 @@ pub struct NativeStatus {
     pub by_reason: Vec<ReasonCount>,
     pub rules: Vec<ShadowRule>,
     pub hosts: Vec<HostStatus>,
+    pub window: crate::audit::AuditWindow,
 }
 
 /// One host's share of the record.
@@ -112,6 +113,8 @@ pub struct HostStatus {
     pub hook_url: String,
     pub last_event_at: Option<DateTime<Utc>>,
     pub actions_7d: usize,
+    /// Shadow reasons for this local host only, matching its agent-id drilldown.
+    pub by_reason: Vec<ReasonCount>,
 }
 
 #[derive(Debug, Clone, Serialize)]

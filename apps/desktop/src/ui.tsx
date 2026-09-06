@@ -9,14 +9,14 @@ type ButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
   children?: ComponentChildren;
 };
 
-export function Button({ variant = "default", busy, state, hint, children, class: cls, type, ...rest }: ButtonProps) {
+export function Button({ variant = "default", busy, state, hint, children, class: cls, type, disabled, ...rest }: ButtonProps) {
   return (
     <button
       type={type ?? "button"}
       class={`btn ${variant === "default" ? "" : variant} ${cls ?? ""}`}
       aria-busy={busy ? "true" : undefined}
       data-state={state}
-      disabled={busy || rest.disabled}
+      disabled={busy || disabled}
       {...rest}
     >
       {children}

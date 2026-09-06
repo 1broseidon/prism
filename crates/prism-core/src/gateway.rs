@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,11 +8,12 @@ use axum::Router;
 use chrono::Utc;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, InitializeRequestParams,
-    InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, DiscoverResult,
+    Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, SubscriptionFilter,
     Tool,
 };
-use rmcp::service::{Peer, RequestContext};
+use rmcp::service::{Peer, RequestContext, SubscriptionContext};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
 use rmcp::transport::StreamableHttpServerConfig;
@@ -123,10 +125,41 @@ pub struct ClientView {
     pub signed_in: bool,
 }
 
-/// One live MCP session and the agent it authenticated as.
+/// Presence for a legacy session or an active stateless request/notification stream.
 struct SessionEntry {
     agent_id: String,
-    peer: Peer<RoleServer>,
+    /// Only legacy sessions accept unsolicited peer notifications.
+    peer: Option<Peer<RoleServer>>,
+}
+
+/// Dropping a tool request records cancellation even when the transport drops
+/// the future before it can return an error response.
+struct CallAuditGuard<'a> {
+    audit: &'a AuditLog,
+    entry: Option<AuditEntry>,
+    started: Instant,
+}
+
+impl Drop for CallAuditGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(mut entry) = self.entry.take() {
+            entry.duration_ms = self.started.elapsed().as_millis() as u64;
+            self.audit.record(entry);
+        }
+    }
+}
+
+struct HoldEventGuard {
+    events: EventSender,
+    id: Option<String>,
+}
+
+impl Drop for HoldEventGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let _ = self.events.send(GatewayEvent::CallCancelled { id });
+        }
+    }
 }
 
 /// The MCP gateway agents connect to.
@@ -236,6 +269,45 @@ impl Gateway {
         }
 
         spawn_http(gateway.clone(), listen_port, shutdown)?;
+        // Modern streams observe the same backend events in `listen`; legacy
+        // peers need the corresponding unsolicited session notification.
+        let mut backend_events = gateway.subscribe();
+        let weak_backend = Arc::downgrade(&gateway);
+        let backend_stop = gateway.shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                let changed = tokio::select! {
+                    _ = backend_stop.cancelled() => break,
+                    event = backend_events.recv() => match event {
+                        Ok(GatewayEvent::ServerStatus { .. }) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        _ => false,
+                    },
+                };
+                if changed {
+                    let Some(gateway) = weak_backend.upgrade() else {
+                        break;
+                    };
+                    let agents: std::collections::HashSet<_> = gateway
+                        .sessions
+                        .lock()
+                        .map(|sessions| {
+                            sessions
+                                .values()
+                                .filter(|entry| entry.peer.is_some())
+                                .map(|entry| entry.agent_id.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for agent in agents {
+                        tokio::select! {
+                            _ = backend_stop.cancelled() => return,
+                            _ = gateway.notify_tools_changed(&agent) => {},
+                        }
+                    }
+                }
+            }
+        });
         let weak = Arc::downgrade(&gateway);
         let stop = gateway.shutdown.clone();
         tokio::spawn(async move {
@@ -570,7 +642,7 @@ impl Gateway {
             .map(|s| {
                 s.values()
                     .filter(|e| e.agent_id == agent_id)
-                    .map(|e| e.peer.clone())
+                    .filter_map(|e| e.peer.clone())
                     .collect()
             })
             .unwrap_or_default();
@@ -581,14 +653,14 @@ impl Gateway {
         }
     }
 
-    /// Called on MCP `initialize` over a bearer-authenticated request: the token already
-    /// names the agent, so nothing the client announces about itself is trusted for identity.
-    async fn register_authenticated_session(
+    /// Track an authenticated legacy session or active stateless request. The
+    /// bearer names the agent; client metadata is display information only.
+    async fn register_authenticated_presence(
         &self,
         session_id: &str,
         agent_id: &str,
         client_version: Option<&str>,
-        peer: Peer<RoleServer>,
+        peer: Option<Peer<RoleServer>>,
     ) -> Option<AgentConfig> {
         let agent = {
             let mut config = self.config.write().await;
@@ -598,7 +670,8 @@ impl Gateway {
             }
             agent.clone()
         };
-        if let Ok(mut sessions) = self.sessions.lock() {
+        let newly_connected = if let Ok(mut sessions) = self.sessions.lock() {
+            let connected = sessions.values().any(|entry| entry.agent_id == agent.id);
             sessions.insert(
                 session_id.to_string(),
                 SessionEntry {
@@ -606,19 +679,23 @@ impl Gateway {
                     peer,
                 },
             );
+            !connected
+        } else {
+            false
+        };
+        if newly_connected {
+            let _ = self.events.send(GatewayEvent::AgentConnected {
+                agent_id: agent.id.clone(),
+            });
         }
-        let _ = self.events.send(GatewayEvent::AgentConnected {
-            agent_id: agent.id.clone(),
-        });
         Some(agent)
     }
 
     fn unregister_session(&self, session_id: &str) {
-        let removed = self
-            .sessions
-            .lock()
-            .ok()
-            .and_then(|mut s| s.remove(session_id));
+        let removed = self.sessions.lock().ok().and_then(|mut s| {
+            let entry = s.remove(session_id)?;
+            (!s.values().any(|other| other.agent_id == entry.agent_id)).then_some(entry)
+        });
         if let Some(entry) = removed {
             let _ = self.events.send(GatewayEvent::AgentDisconnected {
                 agent_id: entry.agent_id,
@@ -828,13 +905,62 @@ impl Gateway {
         Ok(())
     }
 
+    /// Compatibility cache feed. Desktop history uses `audit_query` for errors and metadata.
     pub async fn audit(&self, limit: usize) -> Vec<AuditEntry> {
-        self.audit.list(limit)
+        let audit = self.audit.clone();
+        tokio::task::spawn_blocking(move || audit.list(limit))
+            .await
+            .expect("audit cache worker could not complete")
     }
 
-    /// The last `days` local days summed up: totals, what needed a person, per agent, per day.
-    pub async fn activity(&self, days: u32) -> crate::activity::ActivitySummary {
-        crate::activity::summarize(self.audit.list(usize::MAX).iter(), days, Utc::now())
+    pub async fn audit_query(
+        &self,
+        mut query: crate::audit::AuditQuery,
+    ) -> Result<crate::audit::AuditPage> {
+        query
+            .canonicalization_exclusions
+            .extend(self.audit_identity_exclusions().await);
+        self.audit.query(query).await
+    }
+
+    pub async fn audit_export(
+        &self,
+        mut query: crate::audit::AuditQuery,
+    ) -> Result<crate::audit::AuditExport> {
+        query
+            .canonicalization_exclusions
+            .extend(self.audit_identity_exclusions().await);
+        self.audit.export(query).await
+    }
+
+    /// Manual registrations share the UUID format with historical OAuth registrations. Their
+    /// current config, never a display name or query parameter, keeps their presentation separate.
+    async fn audit_identity_exclusions(&self) -> std::collections::HashSet<String> {
+        self.config
+            .read()
+            .await
+            .agents
+            .iter()
+            .filter(|agent| agent.host.is_none() && agent.client_id.is_none())
+            .map(|agent| agent.id.clone())
+            .collect()
+    }
+
+    /// Retained history over local calendar days, with the same window as audit drilldowns.
+    pub async fn activity(&self, days: u32) -> Result<crate::activity::ActivitySummary> {
+        let exclusions = self.audit_identity_exclusions().await;
+        self.audit
+            .read(days, move |snapshot| {
+                let mut summary = crate::activity::summarize_with_exclusions(
+                    snapshot.entries.iter().map(AsRef::as_ref),
+                    snapshot.window.days,
+                    snapshot.window.snapshot_at,
+                    &exclusions,
+                );
+                summary.window = snapshot.window;
+                Ok(summary)
+            })
+            .await
     }
 
     // ----- native actions (observe) ------------------------------------------------------
@@ -881,75 +1007,108 @@ impl Gateway {
         Ok(())
     }
 
-    /// Coverage and the last seven days of counts, computed from the in-memory ring.
-    pub async fn native_status(&self) -> crate::native::NativeStatus {
+    /// Coverage and seven local calendar days from retained history, matching drilldowns.
+    pub async fn native_status(&self) -> Result<crate::native::NativeStatus> {
         let observe_native = self.config.read().await.observe_native;
-        let cutoff = Utc::now() - chrono::Duration::days(7);
-        let mut actions = 0usize;
-        let mut per_host: HashMap<String, usize> = HashMap::new();
-        let mut counts: HashMap<String, usize> = HashMap::new();
+        let exclusions = self.audit_identity_exclusions().await;
         let mut last = self
             .native_last
             .lock()
             .map(|l| l.clone())
             .unwrap_or_default();
-        for entry in self.audit.list(usize::MAX) {
-            let Some(native) = entry.native.as_ref() else {
-                continue;
-            };
-            if entry.at < cutoff || native.via_prism {
-                continue;
-            }
-            actions += 1;
-            *per_host.entry(native.host.clone()).or_default() += 1;
-            let seen = last.entry(native.host.clone()).or_insert(entry.at);
-            *seen = (*seen).max(entry.at);
-            if let Some(reason) = &native.would_hold {
-                *counts.entry(reason.clone()).or_default() += 1;
-            }
-        }
-        let hosts = crate::native::HOSTS
+        let hook_urls: HashMap<_, _> = crate::native::HOSTS
             .iter()
-            .map(|host| crate::native::HostStatus {
-                host: host.to_string(),
-                hook_url: self.hook_url(host),
-                last_event_at: last.get(*host).copied(),
-                actions_7d: per_host.get(*host).copied().unwrap_or(0),
+            .map(|host| (host.to_string(), self.hook_url(host)))
+            .collect();
+        self.audit
+            .read(7, move |snapshot| {
+                let query = crate::audit::AuditQuery {
+                    native_only: true,
+                    canonicalization_exclusions: exclusions,
+                    ..Default::default()
+                };
+                let mut actions = 0usize;
+                let mut per_host: HashMap<String, usize> = HashMap::new();
+                let mut counts: HashMap<String, usize> = HashMap::new();
+                let mut host_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+                for entry in snapshot
+                    .entries
+                    .iter()
+                    .filter(|entry| query.matches(entry, &snapshot.window))
+                {
+                    let native = entry.native.as_ref().expect("native-only query");
+                    actions += 1;
+                    let id = crate::audit::canonical_agent_id_excluding(
+                        entry,
+                        &query.canonicalization_exclusions,
+                    );
+                    // Match the same presentation id as the drilldown. The persisted raw id and
+                    // remote origin suffix remain intact; a display name conveys no authority.
+                    let local_host = crate::native::HOSTS
+                        .iter()
+                        .copied()
+                        .find(|host| id.as_ref() == crate::native::harness_agent_id(host, None));
+                    if let Some(host) = local_host {
+                        *per_host.entry(host.to_string()).or_default() += 1;
+                        let seen = last.entry(host.to_string()).or_insert(entry.at);
+                        *seen = (*seen).max(entry.at);
+                    }
+                    if let Some(reason) = &native.would_hold {
+                        *counts.entry(reason.clone()).or_default() += 1;
+                        if let Some(host) = local_host {
+                            *host_counts
+                                .entry(host.to_string())
+                                .or_default()
+                                .entry(reason.clone())
+                                .or_default() += 1;
+                        }
+                    }
+                }
+                let sorted_reasons = |counts: HashMap<String, usize>| {
+                    let mut reasons: Vec<_> = counts
+                        .into_iter()
+                        .map(|(reason, count)| crate::native::ReasonCount { reason, count })
+                        .collect();
+                    reasons.sort_by(|a, b| b.count.cmp(&a.count).then(a.reason.cmp(&b.reason)));
+                    reasons
+                };
+                let hosts = crate::native::HOSTS
+                    .iter()
+                    .map(|host| crate::native::HostStatus {
+                        host: host.to_string(),
+                        hook_url: hook_urls.get(*host).cloned().unwrap_or_default(),
+                        last_event_at: last.get(*host).copied(),
+                        actions_7d: per_host.get(*host).copied().unwrap_or(0),
+                        by_reason: sorted_reasons(host_counts.remove(*host).unwrap_or_default()),
+                    })
+                    .collect();
+                let by_reason = sorted_reasons(counts);
+                Ok(crate::native::NativeStatus {
+                    observe_native,
+                    last_event_at: last.values().max().copied(),
+                    actions_7d: actions,
+                    would_hold_7d: by_reason.iter().map(|r| r.count).sum(),
+                    by_reason,
+                    rules: crate::native::shadow::RULES.to_vec(),
+                    hosts,
+                    window: snapshot.window,
+                })
             })
-            .collect();
-        let mut by_reason: Vec<crate::native::ReasonCount> = counts
-            .into_iter()
-            .map(|(reason, count)| crate::native::ReasonCount { reason, count })
-            .collect();
-        by_reason.sort_by(|a, b| b.count.cmp(&a.count).then(a.reason.cmp(&b.reason)));
-        crate::native::NativeStatus {
-            observe_native,
-            last_event_at: last.values().max().copied(),
-            actions_7d: actions,
-            would_hold_7d: by_reason.iter().map(|r| r.count).sum(),
-            by_reason,
-            rules: crate::native::shadow::RULES.to_vec(),
-            hosts,
-        }
+            .await
     }
 
-    /// JSONL of the native entries the shadow list would have held, newest first.
-    pub async fn native_export(&self, days: i64) -> String {
-        let cutoff = Utc::now() - chrono::Duration::days(days);
-        let mut out = String::new();
-        for entry in self.audit.list(usize::MAX) {
-            let hit = entry
-                .native
-                .as_ref()
-                .is_some_and(|n| n.would_hold.is_some() && !n.via_prism);
-            if hit && entry.at >= cutoff {
-                if let Ok(line) = serde_json::to_string(&entry) {
-                    out.push_str(&line);
-                    out.push('\n');
-                }
-            }
-        }
-        out
+    /// JSONL of every retained native shadow hit in the requested local calendar days.
+    pub async fn native_export(&self, days: i64) -> Result<String> {
+        Ok(self
+            .audit
+            .export(crate::audit::AuditQuery {
+                days: days.clamp(1, 30) as u32,
+                native_only: true,
+                attention: Some(true),
+                ..Default::default()
+            })
+            .await?
+            .jsonl)
     }
 
     /// One hook event becomes one observed audit entry. Creates the host's agent record on first
@@ -1149,10 +1308,11 @@ impl Gateway {
             return ListToolsResult::default();
         }
         let pairs = self.backends.list_tools(false).await;
-        let tools = pairs
+        let mut tools: Vec<_> = pairs
             .into_iter()
             .map(|(server, tool)| aggregate_tool(&server.name, tool))
             .collect();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
         #[allow(clippy::field_reassign_with_default)]
         {
             let mut result = ListToolsResult::default();
@@ -1175,7 +1335,7 @@ impl Gateway {
             Some(agent) => agent,
             None => {
                 return Err(McpError::invalid_request(
-                    "This session has no agent identity. Send MCP initialize first.",
+                    "This request has no authenticated agent identity.",
                     None,
                 ));
             }
@@ -1213,6 +1373,18 @@ impl Gateway {
             }
         };
 
+        let mut cancellation = CallAuditGuard {
+            audit: &self.audit,
+            started,
+            entry: Some(AuditEntry {
+                id: uuid::Uuid::new_v4().to_string(), at: Utc::now(),
+                agent_id: agent.id.clone(), agent_name: agent.name.clone(),
+                server_id: server.id.clone(), tool: original_tool.clone(),
+                verdict: AuditVerdict::Error, source: AuditSource::Cancelled,
+                duration_ms: 0, error: Some("Client cancelled the request; an already-started backend operation may still finish".into()),
+                attention: Attention::Silent, native: None,
+            }),
+        };
         let annotations = self
             .backends
             .find_tool(&server.id, &original_tool)
@@ -1263,7 +1435,7 @@ impl Gateway {
             eval.attention
         };
 
-        match verdict {
+        let result = match verdict {
             Verdict::Allow => {
                 self.forward_or_error(
                     &agent,
@@ -1333,7 +1505,9 @@ impl Gateway {
                 )
                 .await
             }
-        }
+        };
+        cancellation.entry = None;
+        result
     }
 
     /// Nobody can answer (timeout or do-not-disturb): apply the configured fallback.
@@ -1420,7 +1594,12 @@ impl Gateway {
             reason,
         };
         let _ = self.events.send(GatewayEvent::PendingCall(pending.clone()));
+        let mut cleanup = HoldEventGuard {
+            events: self.events.clone(),
+            id: Some(pending.id.clone()),
+        };
         let outcome = self.approval.register_for(pending.clone(), hold).await;
+        cleanup.id = None;
         match outcome {
             HoldOutcome::Timeout => {
                 self.resolve_unattended(
@@ -1567,25 +1746,57 @@ impl PrismProxy {
         self.agent_id.lock().ok().and_then(|a| a.clone())
     }
 
-    /// The identity on this request must be the one that opened the session. The HTTP layer
-    /// enforces the same thing; this is the check that survives a transport change.
-    fn caller(
-        &self,
+    fn request_identity(
         context: &RequestContext<RoleServer>,
-    ) -> std::result::Result<Option<String>, McpError> {
-        let on_request = context
+    ) -> std::result::Result<AuthenticatedAgent, McpError> {
+        context
             .extensions
             .get::<http::request::Parts>()
             .and_then(|parts| parts.extensions.get::<AuthenticatedAgent>())
-            .map(|a| a.agent_id.clone());
+            .cloned()
+            .ok_or_else(|| McpError::invalid_request("a bearer token is required", None))
+    }
+
+    /// Modern requests carry their own verified identity. Only legacy requests
+    /// inherit a session, whose owner must still match the bearer on this request.
+    async fn caller(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> std::result::Result<Option<String>, McpError> {
+        let identity = Self::request_identity(context)?;
+        if context
+            .protocol_version()
+            .is_some_and(|v| v >= ProtocolVersion::V_2026_07_28)
+        {
+            self.stateless_presence(&identity.agent_id, context).await?;
+            return Ok(Some(identity.agent_id));
+        }
         let session = self.agent_id();
-        if on_request.is_none() || on_request != session {
+        if Some(&identity.agent_id) != session.as_ref() {
             return Err(McpError::invalid_request(
                 "this session belongs to another agent",
                 None,
             ));
         }
         Ok(session)
+    }
+
+    async fn stateless_presence(
+        &self,
+        agent_id: &str,
+        context: &RequestContext<RoleServer>,
+    ) -> std::result::Result<(), McpError> {
+        let client = context.client_info();
+        self.gateway
+            .register_authenticated_presence(
+                &self.session_id,
+                agent_id,
+                client.as_ref().map(|c| c.version.as_str()),
+                None,
+            )
+            .await
+            .ok_or_else(|| McpError::invalid_request("unknown agent", None))?;
+        Ok(())
     }
 }
 
@@ -1596,6 +1807,77 @@ impl Drop for PrismProxy {
 }
 
 impl ServerHandler for PrismProxy {
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        // Pin the revisions implemented by Prism, rather than implicitly opting
+        // into future lifecycle changes whenever the SDK adds another version.
+        Cow::Borrowed(&[
+            ProtocolVersion::V_2024_11_05,
+            ProtocolVersion::V_2025_03_26,
+            ProtocolVersion::V_2025_06_18,
+            ProtocolVersion::V_2025_11_25,
+            ProtocolVersion::V_2026_07_28,
+        ])
+    }
+
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> std::result::Result<DiscoverResult, McpError> {
+        let identity = Self::request_identity(&context)?;
+        self.stateless_presence(&identity.agent_id, &context)
+            .await?;
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        Some(requested.intersection(&SubscriptionFilter::builder().tools_list_changed().build()))
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> std::result::Result<(), McpError> {
+        let identity = Self::request_identity(context.request_context())?;
+        // Subscribe before marking presence so no subsequent change can be missed.
+        let mut events = self.gateway.subscribe();
+        self.caller(context.request_context()).await?;
+        let mut validity = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            let changed = tokio::select! {
+                _ = context.cancelled() => break,
+                _ = self.gateway.shutdown.cancelled() => break,
+                _ = validity.tick() => false,
+                event = events.recv() => match event {
+                    Ok(GatewayEvent::ServerStatus { .. }) => true,
+                    Ok(GatewayEvent::AgentDecided { agent_id, .. } | GatewayEvent::AgentUpdated { agent_id }) => agent_id == identity.agent_id,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => false,
+                },
+            };
+            // A notification stream must not outlive its token's authority.
+            if self
+                .gateway
+                .authenticate_hash(&identity.token_hash)
+                .await
+                .as_deref()
+                != Some(identity.agent_id.as_str())
+            {
+                break;
+            }
+            if changed
+                && context.accepted().tools_list_changed == Some(true)
+                && context.sink().notify_tool_list_changed().await.is_err()
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
@@ -1603,6 +1885,7 @@ impl ServerHandler for PrismProxy {
                 .enable_tool_list_changed()
                 .build(),
         )
+        .with_server_info(Implementation::new("Prism", env!("CARGO_PKG_VERSION")))
         .with_instructions(
             "Prism local MCP gateway. Tools appear once the human approves this agent in the \
              Prism panel; they are named {server}__{tool}.",
@@ -1624,11 +1907,11 @@ impl ServerHandler for PrismProxy {
             .ok_or_else(|| McpError::invalid_request("a bearer token is required", None))?;
         let agent_id = self
             .gateway
-            .register_authenticated_session(
+            .register_authenticated_presence(
                 &self.session_id,
                 &authenticated,
                 version,
-                context.peer.clone(),
+                Some(context.peer.clone()),
             )
             .await
             .map(|a| a.id)
@@ -1644,8 +1927,19 @@ impl ServerHandler for PrismProxy {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, McpError> {
-        let agent = self.caller(&context)?;
-        Ok(self.gateway.handle_list_tools(agent.as_deref()).await)
+        let agent = self.caller(&context).await?;
+        let mut result = self.gateway.handle_list_tools(agent.as_deref()).await;
+        if context
+            .protocol_version()
+            .is_some_and(|v| v >= ProtocolVersion::V_2026_07_28)
+        {
+            // Tool availability is authorization-dependent and may change at
+            // any time. Supply July's required cache policy without sharing it.
+            result = result
+                .with_ttl_ms(0)
+                .with_cache_scope(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn call_tool(
@@ -1653,16 +1947,25 @@ impl ServerHandler for PrismProxy {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> std::result::Result<CallToolResponse, McpError> {
-        let agent = self.caller(&context)?;
-        self.gateway
-            .handle_call_tool(request, agent.as_deref())
-            .await
-            .map(Into::into)
+        let agent = self.caller(&context).await?;
+        tokio::select! {
+            biased;
+            _ = context.ct.cancelled() => Err(McpError::invalid_request("request cancelled", None)),
+            result = self.gateway.handle_call_tool(request, agent.as_deref()) => result.map(|mut result| {
+                // Legacy upstreams omit this field. Restore the modern envelope;
+                // rmcp strips it again when the downstream client is legacy.
+                result.result_type = Some(rmcp::model::ResultType::COMPLETE);
+                result.into()
+            }),
+        }
     }
 }
 
 fn spawn_http(gateway: Arc<Gateway>, port: u16, shutdown: CancellationToken) -> Result<()> {
     let gw = gateway.clone();
+    let transport_config = StreamableHttpServerConfig::default()
+        .disable_allowed_hosts()
+        .with_cancellation_token(shutdown.clone());
     let service: StreamableHttpService<PrismProxy, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -1674,7 +1977,7 @@ fn spawn_http(gateway: Arc<Gateway>, port: u16, shutdown: CancellationToken) -> 
             },
             LocalSessionManager::default().into(),
             // The outer HTTP guard enforces one Host policy for MCP and OAuth alike.
-            StreamableHttpServerConfig::default().disable_allowed_hosts(),
+            transport_config,
         );
 
     let app = Router::new()
@@ -1751,4 +2054,245 @@ fn load_or_create_hook_token(path: &Path) -> Result<String> {
     let token = crate::native::new_token();
     crate::storage::atomic_write(path, token.as_bytes())?;
     Ok(token)
+}
+
+#[cfg(test)]
+mod retained_history_tests {
+    use super::*;
+    use crate::audit::{AuditQuery, NativeDetail};
+
+    fn gateway(path: &Path) -> Gateway {
+        let (events, _) = channel();
+        let credentials = Arc::new(crate::credentials::NativeStore::default());
+        Gateway {
+            config_path: path.with_extension("config"),
+            config: RwLock::new(PrismConfig::default()),
+            backends: BackendManager::new(events.clone(), credentials.clone()),
+            credentials,
+            approval: ApprovalRegistry::new(),
+            audit: AuditLog::new(path, events.clone()).unwrap(),
+            events,
+            shutdown: CancellationToken::new(),
+            listen_port: 0,
+            oauth: OAuthState::default(),
+            sessions: std::sync::Mutex::new(HashMap::new()),
+            calls: std::sync::Mutex::new(HashMap::new()),
+            native_budget: std::sync::Mutex::new(Default::default()),
+            native_last: std::sync::Mutex::new(HashMap::new()),
+            hook_token: std::sync::RwLock::new("test-token".into()),
+            hook_token_path: path.with_extension("hook-token"),
+        }
+    }
+
+    fn native(
+        at: chrono::DateTime<Utc>,
+        id: &str,
+        host: &str,
+        reason: Option<&str>,
+        duplicate: bool,
+    ) -> AuditEntry {
+        AuditEntry {
+            id: id.into(),
+            at,
+            agent_id: format!("legacy-{host}"),
+            agent_name: crate::native::harness_display_name(host).into(),
+            server_id: host.into(),
+            tool: "shell".into(),
+            verdict: AuditVerdict::Allowed,
+            source: AuditSource::Observed,
+            duration_ms: 0,
+            error: None,
+            attention: Attention::Silent,
+            native: Some(NativeDetail {
+                host: host.into(),
+                session: None,
+                cwd: None,
+                subject: "ls".into(),
+                would_hold: reason.map(str::to_string),
+                agent_type: None,
+                via_prism: duplicate,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_host_reason_counts_match_frozen_drilldowns_and_retained_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let at = Utc::now() - chrono::Duration::minutes(1);
+        let rows = [
+            native(at, "claude-hit", "claude-code", Some("sudo"), false),
+            native(at, "claude-other", "claude-code", Some("rm"), false),
+            native(at, "claude-routine", "claude-code", None, false),
+            native(at, "codex-hit", "codex", Some("sudo"), false),
+            native(at, "codex-hit2", "codex", Some("sudo"), false),
+            native(at, "duplicate", "codex", Some("sudo"), true),
+            native(
+                at - chrono::Duration::days(10),
+                "archived-old",
+                "codex",
+                Some("sudo"),
+                false,
+            ),
+        ];
+        // All rows live in a rotated file; the active file starts empty.
+        std::fs::write(
+            path.with_file_name("audit.jsonl.1"),
+            rows.iter()
+                .map(|row| format!("{}\n", serde_json::to_string(row).unwrap()))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let gateway = gateway(&path);
+        let status = gateway.native_status().await.unwrap();
+        assert_eq!(status.actions_7d, 5);
+        assert_eq!(status.would_hold_7d, 4);
+        for host in &status.hosts {
+            let query = AuditQuery {
+                at: Some(status.window.snapshot_at),
+                agent_id: Some(format!("host:{}", host.host)),
+                native_only: true,
+                ..Default::default()
+            };
+            assert_eq!(
+                gateway.audit_query(query.clone()).await.unwrap().total,
+                host.actions_7d
+            );
+            for reason in &host.by_reason {
+                assert_eq!(
+                    gateway
+                        .audit_query(AuditQuery {
+                            reason: Some(reason.reason.clone()),
+                            ..query.clone()
+                        })
+                        .await
+                        .unwrap()
+                        .total,
+                    reason.count
+                );
+            }
+        }
+        let claude = status
+            .hosts
+            .iter()
+            .find(|host| host.host == "claude-code")
+            .unwrap();
+        let codex = status
+            .hosts
+            .iter()
+            .find(|host| host.host == "codex")
+            .unwrap();
+        assert_eq!(
+            claude
+                .by_reason
+                .iter()
+                .find(|reason| reason.reason == "sudo")
+                .unwrap()
+                .count,
+            1
+        );
+        assert_eq!(codex.by_reason[0].count, 2);
+        let summary = gateway.activity(7).await.unwrap();
+        assert_eq!(summary.total, status.actions_7d);
+        assert_eq!(summary.attention, status.would_hold_7d);
+        let export = gateway.native_export(30).await.unwrap();
+        assert_eq!(export.lines().count(), 5);
+        assert!(export.contains("archived-old"));
+        assert!(!export.contains("duplicate"));
+        assert!(!export.contains("claude-routine"));
+        let with_metadata = gateway
+            .audit_export(AuditQuery {
+                days: 30,
+                native_only: true,
+                attention: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(with_metadata.jsonl, export);
+        assert_eq!(with_metadata.total, 5);
+        assert!(!with_metadata.window.full_window_guaranteed);
+        gateway.audit.close();
+        std::fs::remove_file(&path).unwrap();
+        assert!(gateway.activity(7).await.is_err());
+        assert!(gateway.native_status().await.is_err());
+        assert!(gateway.native_export(30).await.is_err());
+        assert!(gateway.audit_export(AuditQuery::default()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn manual_agents_named_codex_or_claude_keep_their_authenticated_audit_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let gateway = gateway(&path);
+        let codex = gateway.create_manual_agent("Codex").await.unwrap();
+        let claude = gateway.create_manual_agent("Claude Code").await.unwrap();
+        let at = Utc::now() - chrono::Duration::seconds(1);
+        for (id, name) in [
+            (&codex.agent_id, "Codex"),
+            (&claude.agent_id, "Claude Code"),
+        ] {
+            let mut row = native(at, id, "codex", None, false);
+            row.agent_id = id.clone();
+            row.agent_name = name.into();
+            row.native = None;
+            row.source = AuditSource::Human;
+            gateway.audit.record(row);
+        }
+        let mut legacy = native(at, "legacy-row", "codex", None, false);
+        legacy.agent_id = "historical-oauth-registration".into();
+        legacy.native = None;
+        gateway.audit.record(legacy);
+        let summary = gateway.activity(7).await.unwrap();
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.agents.len(), 3);
+        for id in [&codex.agent_id, &claude.agent_id] {
+            let agent = summary.agents.iter().find(|agent| &agent.id == id).unwrap();
+            assert_eq!(agent.total, 1);
+            assert!(!agent.host);
+            let query = AuditQuery {
+                at: Some(summary.window.snapshot_at),
+                agent_id: Some(id.clone()),
+                ..Default::default()
+            };
+            let page = gateway.audit_query(query.clone()).await.unwrap();
+            assert_eq!(page.total, 1);
+            assert_eq!(&page.entries[0].agent_id, id);
+            let exported = gateway.audit_export(query).await.unwrap();
+            assert_eq!(exported.total, 1);
+            let row: AuditEntry = serde_json::from_str(exported.jsonl.trim()).unwrap();
+            assert_eq!(&row.agent_id, id);
+        }
+        let host = gateway
+            .audit_query(AuditQuery {
+                agent_id: Some("host:codex".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(host.total, 1);
+        assert_eq!(host.entries[0].agent_id, "historical-oauth-registration");
+        assert_eq!(
+            gateway
+                .audit_query(AuditQuery {
+                    agent_id: Some("host:claude-code".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .total,
+            0
+        );
+        let raw: Vec<AuditEntry> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(raw.iter().any(|entry| entry.agent_id == codex.agent_id));
+        assert!(raw.iter().any(|entry| entry.agent_id == claude.agent_id));
+        assert!(raw
+            .iter()
+            .any(|entry| entry.agent_id == "historical-oauth-registration"));
+        gateway.audit.close();
+    }
 }

@@ -1,93 +1,27 @@
-import { useEffect, useState } from "preact/hooks";
-import * as api from "../api";
+import { useEffect } from "preact/hooks";
 import { loadNativeStatus } from "../events";
 import { hostSetup, hostStatus } from "../hosts";
-import { errorMessage, native, push } from "../state";
-import { Button, Chip, CodeBlock, Label, describeError, useCopy } from "../ui";
+import { native, push } from "../state";
+import { Button, Chip, Label } from "../ui";
 
-/** The native side of a harness: its hook, and what the watch list saw. Rendered inside the agent screen. */
+/** Connection setup and observed patterns for this harness. */
 export function HarnessSections({ agentId, host }: { agentId: string; host: string }) {
   const st = native.value;
   const hs = hostStatus(st, host);
   const setup = hostSetup(st, host);
-  const [snippet, setSnippet] = useState<string>("");
-  const [showSnippet, setShowSnippet] = useState(false);
-  const [wrote, setWrote] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [copyState, copy] = useCopy();
-
-  useEffect(() => {
-    if (!host) return;
-    api
-      .getHostHookSnippet(host)
-      .then(setSnippet)
-      .catch(() => setSnippet(""));
-    loadNativeStatus();
-  }, [host, hs?.hook_url]);
-
-  const run = async (fn: () => Promise<void>) => {
-    setBusy(true);
-    try {
-      await fn();
-      loadNativeStatus();
-    } catch (err) {
-      errorMessage.value = describeError(err);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const install = () =>
-    run(async () => {
-      await api.installHostHook(host);
-      setWrote(true);
-    });
-  const rotate = () =>
-    run(async () => {
-      await api.rotateHookToken();
-      setWrote(false);
-    });
-
-  const installed = setup?.hook_installed ?? false;
-  const needsReview = installed && setup?.hook_trusted === false;
-  const isCodex = host === "codex";
-  const path = setup?.settings_path ?? (isCodex ? "~/.codex/hooks.json" : "~/.claude/settings.json");
-  const asked = st ? st.by_reason.reduce((n, r) => n + r.count, 0) : 0;
-
-  return (
-    <>
-      <section class="section">
-        <Label right={needsReview ? <Chip tone="warn">review in Codex</Chip> : installed ? <Chip tone="ok">installed</Chip> : null}>Hook</Label>
-        <p class="hint">Posts each native action to Prism before it runs. One redacted line is kept.</p>
-        <div class="actions update-actions">
-          <Button variant="primary" busy={busy} onClick={() => void install()}>
-            {installed ? "Rewrite the hook" : "Write it for me"}
-          </Button>
-          <Button variant="quiet" busy={busy} onClick={() => void rotate()} title="New token; rewrite the hook afterwards">
-            Rotate token
-          </Button>
-        </div>
-        <p class="hint">
-          {wrote ? (isCodex ? "Written. Trust it in Codex: /hooks." : "Written.") : needsReview ? "Codex skips it until trusted: /hooks." : `Writes ${path}, backup kept.`}
-        </p>
-        <div class="snippet-row">
-          <button type="button" class="link" aria-expanded={showSnippet} onClick={() => setShowSnippet(!showSnippet)}>
-            {showSnippet ? "Hide snippet" : "Show snippet"}
-          </button>
-          {showSnippet ? null : (
-            <Button variant="quiet" state={copyState} disabled={!snippet} onClick={() => void copy(snippet)}>
-              {copyState === "success" ? "Copied" : copyState === "error" ? "Copy failed" : "Copy"}
-            </Button>
-          )}
-        </div>
-        {showSnippet ? <CodeBlock text={snippet} copyable emptyText="Loading…" /> : null}
-      </section>
-
+  useEffect(() => { loadNativeStatus(); }, [host]);
+  const reasons = hs?.by_reason ?? [];
+  const asked = reasons.reduce((n, r) => n + r.count, 0);
+  return <>
+    <section class="section">
+      <Label right={<Chip tone={setup?.events_received && st?.observe_native ? "ok" : undefined}>{!st?.observe_native || setup?.hooks_disabled ? "observation off" : setup?.events_received ? "observed" : setup?.hook_installed ? "configured" : "not configured"}</Chip>}>Setup</Label>
+      <Button variant="quiet" onClick={() => push({ kind: "harness-setup", host })}>{setup?.hook_installed || setup?.mcp_configured ? "Manage setup" : "Set up MCP + observation"}</Button>
+    </section>
       <section class="section">
         <Label right={<span class={asked ? "accent" : ""}>{asked}</span>}>Watch list</Label>
         <ul class="shadow-rules">
           {(st?.rules ?? []).map((rule) => {
-            const count = st?.by_reason.find((r) => r.reason === rule.id)?.count ?? 0;
+            const count = reasons.find((r) => r.reason === rule.id)?.count ?? 0;
             const body = (
               <>
                 <span class="mono">{rule.id.replace(/_/g, " ")}</span>
@@ -97,7 +31,7 @@ export function HarnessSections({ agentId, host }: { agentId: string; host: stri
             return (
               <li key={rule.id} title={rule.summary}>
                 {count ? (
-                  <button type="button" class="row-btn" onClick={() => push({ kind: "activity", agentId, reason: rule.id })}>
+                  <button type="button" class="row-btn" onClick={() => push({ kind: "activity", agentId, reason: rule.id, nativeOnly: true, days: 7, at: st?.window.snapshot_at })}>
                     {body}
                   </button>
                 ) : (
@@ -108,6 +42,5 @@ export function HarnessSections({ agentId, host }: { agentId: string; host: stri
           })}
         </ul>
       </section>
-    </>
-  );
+  </>;
 }

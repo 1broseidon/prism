@@ -4,161 +4,48 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>Prism</title>
+<meta name="referrer" content="no-referrer">
+<title>Prism · Sign-in</title>
 <style>
-  /* The panel's tokens, direction "Marquee": warm paper and ink, three tonal steps, one signal colour.
-   * No external requests: this page is served from a loopback listener that exists for one sign-in. */
   :root {
     color-scheme: light dark;
-    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-    --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-    --paper: light-dark(oklch(97.5% 0.006 80), oklch(17% 0.01 60));
-    --well: light-dark(oklch(91.5% 0.01 80), oklch(27% 0.013 60));
-    --ink: light-dark(oklch(19% 0.012 60), oklch(96% 0.008 80));
-    --ink-2: light-dark(oklch(42% 0.012 60), oklch(74% 0.01 75));
-    --ink-3: light-dark(oklch(58% 0.012 60), oklch(56% 0.012 70));
-    --ok: light-dark(oklch(58% 0.15 150), oklch(74% 0.15 150));
-    --ok-soft: light-dark(oklch(58% 0.15 150 / 0.16), oklch(74% 0.15 150 / 0.18));
-    --danger: light-dark(oklch(55% 0.19 25), oklch(72% 0.17 25));
-    --danger-soft: light-dark(oklch(55% 0.19 25 / 0.12), oklch(72% 0.17 25 / 0.16));
-    --glow-ok: light-dark(oklch(58% 0.15 150 / 0.16), oklch(74% 0.15 150 / 0.10));
-    --glow-warn: light-dark(oklch(55% 0.19 25 / 0.12), oklch(72% 0.17 25 / 0.10));
-    --glow-quiet: light-dark(oklch(19% 0.012 60 / 0.06), oklch(96% 0.008 80 / 0.05));
-    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-    /* One beat for the light to pass through the mark before the verdict settles. */
-    --dur: 2600ms;
+    --paper: light-dark(#f8f7f4, #24211e);
+    --ink: light-dark(#252820, #f3f3ec);
+    --muted: light-dark(#62695c, #b9c0b1);
+    --green: light-dark(#287344, #8aca9d);
+    --danger: light-dark(#a33b30, #efa49a);
+    --amber: light-dark(#805817, #d6b66a);
   }
-  html, body { height: 100%; }
-  body {
-    margin: 0;
-    background: var(--paper);
-    color: var(--ink);
-    font-family: var(--font-ui);
-    font-size: 15px;
-    line-height: 1.45;
-    letter-spacing: -0.01em;
-    -webkit-font-smoothing: antialiased;
-    display: grid;
-    place-items: center;
-    min-height: 100vh;
-    overflow-x: hidden;
-  }
-  /* One soft pool behind the mark; its colour is the verdict. */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    background: radial-gradient(30rem 20rem at 50% 40%, var(--glow), transparent 70%);
-  }
-  body[data-state="ok"] { --glow: var(--glow-ok); --facet: var(--ok); }
-  body[data-state="refused"] { --glow: var(--glow-warn); --facet: var(--danger); }
-  body[data-state="done"] { --glow: var(--glow-quiet); --facet: var(--ink-3); }
-  main {
-    position: relative;
-    display: grid;
-    justify-items: center;
-    text-align: center;
-    padding: 2rem 1.5rem 4rem;
-    max-width: 30rem;
-    width: 100%;
-    box-sizing: border-box;
-  }
-  .mark {
-    width: 84px;
-    height: 66px;
-    display: block;
-    margin-bottom: 28px;
-    color: var(--ink);
-    filter: drop-shadow(0 12px 28px oklch(0% 0 0 / 0.16));
-  }
-  .mark { overflow: visible; }
-  .mark .lit { fill: var(--facet); }
-  .mark .band { opacity: 0; }
-  .eyebrow {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--ok);
-    background: var(--ok-soft);
-    padding: 5px 10px 5px 8px;
-    border-radius: 999px;
-    margin-bottom: 18px;
-  }
-  .eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-  .eyebrow.warn { color: var(--danger); background: var(--danger-soft); }
-  .eyebrow.quiet { color: var(--ink-2); background: var(--well); }
-  h1 {
-    font-size: 34px;
-    font-weight: 600;
-    letter-spacing: -0.025em;
-    line-height: 1.1;
-    margin: 0 0 10px;
-    text-wrap: balance;
-  }
-  .lede { margin: 0; color: var(--ink-2); font-size: 16px; max-width: 26rem; text-wrap: balance; }
-  .lede b { color: var(--ink); font-weight: 600; }
-  .close { margin: 22px 0 0; color: var(--ink-3); font-size: 13.5px; }
-  /* The mark lands in ink. A spectral band sweeps through the second facet at the prism's own angle,
-   * and the verdict colour rises where the light left. The pool behind it lights once the colour has
-   * settled, and only then do the words rise. Everything keys off --dur. */
-  @media (prefers-reduced-motion: no-preference) {
-    .mark { animation: land calc(var(--dur) * 0.6) var(--ease-out) both; }
-    .mark .band { animation: sweep var(--dur) cubic-bezier(0.3, 0, 0.2, 1) both; }
-    .mark .lit { animation: settle var(--dur) linear both; }
-    body::before { animation: pool calc(var(--dur) * 0.8) var(--ease-out) both; animation-delay: calc(var(--dur) * 0.75); }
-    .eyebrow, h1, .lede, .close { animation: rise calc(var(--dur) * 0.5) var(--ease-out) both; }
-    .eyebrow { animation-delay: calc(var(--dur) * 0.45); }
-    h1 { animation-delay: calc(var(--dur) * 0.5); }
-    .lede { animation-delay: calc(var(--dur) * 0.55); }
-    .close { animation-delay: calc(var(--dur) * 0.6); }
-  }
-  @keyframes land { from { opacity: 0.35; transform: translateY(-14px) scale(0.94); } to { opacity: 1; transform: none; } }
-  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-  @keyframes pool { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes sweep {
-    0%   { transform: translateX(-46px); opacity: 1; }
-    70%  { opacity: 1; }
-    100% { transform: translateX(46px); opacity: 0; }
-  }
-  @keyframes settle {
-    0%   { fill: var(--ink); }
-    45%  { fill: var(--ink); }
-    85%  { fill: var(--facet); }
-    100% { fill: var(--facet); }
-  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100svh; display: grid; place-items: center;
+    padding: 32px 24px; background: var(--paper); color: var(--ink);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  main { width: 100%; max-width: 28rem; text-align: center; }
+  body { --signal: var(--muted); }
+  body[data-state="waiting"] { --signal: var(--amber); }
+  body[data-state="done"], body[data-state="inprogress"] { --signal: var(--muted); }
+  body[data-state="failed"], body[data-state="refused"] { --signal: var(--danger); }
+  body[data-state="ok"] { --signal: var(--green); }
+  .mark { display: block; width: 64px; height: 51px; margin: 0 auto 28px; color: var(--signal); }
+  .facet { opacity: .65; }
+  .eyebrow { color: var(--signal); font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
+  h1 { margin: 10px 0 14px; font-size: clamp(26px, 5vw, 32px); line-height: 1.2; letter-spacing: -.025em; font-weight: 600; }
+  p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+  b { color: var(--ink); font-weight: 600; }
+  .close, noscript { display: block; margin-top: 24px; font-size: 14px; }
 </style>
 </head>
 <body data-state="{{state}}">
-<main>
+<main aria-live="polite">
   <svg class="mark" viewBox="8 12 48 38" aria-hidden="true" fill="currentColor">
-    <defs>
-      <clipPath id="facet"><polygon points="42,50 30,12 52,18 56,50" /></clipPath>
-      <linearGradient id="spectrum" x1="0" y1="0" x2="1" y2="0">
-        <stop offset="0"    stop-color="oklch(72% 0.17 25 / 0)" />
-        <stop offset="0.1"  stop-color="oklch(72% 0.17 25)" />
-        <stop offset="0.28" stop-color="oklch(78% 0.17 65)" />
-        <stop offset="0.42" stop-color="oklch(85% 0.16 105)" />
-        <stop offset="0.56" stop-color="oklch(74% 0.15 150)" />
-        <stop offset="0.7"  stop-color="oklch(76% 0.13 210)" />
-        <stop offset="0.84" stop-color="oklch(66% 0.17 275)" />
-        <stop offset="1"    stop-color="oklch(66% 0.17 320 / 0)" />
-      </linearGradient>
-    </defs>
     <polygon points="8,50 30,12 38,50" />
-    <g clip-path="url(#facet)">
-      <polygon class="lit" points="42,50 30,12 52,18 56,50" />
-      <g class="band"><rect x="20" y="0" width="52" height="64" fill="url(#spectrum)" transform="skewX(-22)" /></g>
-    </g>
+    <polygon class="facet" points="42,50 30,12 52,18 56,50" />
   </svg>
   <div class="eyebrow {{eyebrow_class}}">{{eyebrow}}</div>
   <h1>{{title}}</h1>
   <p class="lede">{{lede}}</p>
-  <p class="close">You can close this tab.</p>
+  <p class="close">{{footer}}</p>
 </main>
+{{script}}
 </body>
 </html>

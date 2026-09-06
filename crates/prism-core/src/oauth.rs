@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Form, Query, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -31,15 +31,19 @@ use crate::gateway::Gateway;
 const ACCESS_TTL_SECS: i64 = 60 * 60;
 const REFRESH_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 const CODE_TTL_SECS: i64 = 5 * 60;
-/// How long a browser parks on `/authorize` waiting for the operator before it gives up.
+/// How long an authorization may wait for the operator before it gives up.
 const AUTHORIZE_WAIT: Duration = Duration::from_secs(10 * 60);
 const SCOPE: &str = "mcp";
+const BROWSER_RESULT_TTL: Duration = Duration::from_secs(60);
+const MAX_BROWSER_FLOWS: usize = 32;
 
 /// Set on `/mcp` requests by the bearer check. The proxy reads it back through the request
 /// parts rmcp attaches to every MCP message.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedAgent {
     pub agent_id: String,
+    /// Used to re-check authority while a stateless notification stream is open.
+    pub(crate) token_hash: String,
 }
 
 /// A token as the panel sees it: what kind, when it was minted, when it dies. Never the value.
@@ -107,12 +111,27 @@ struct SignInEntry {
     tx: oneshot::Sender<bool>,
 }
 
+struct AuthorizationWait {
+    signin: PendingSignIn,
+    redirect_uri: String,
+    code_challenge: String,
+    state: Option<String>,
+    rx: oneshot::Receiver<bool>,
+}
+
+#[derive(Default)]
+struct BrowserFlow {
+    outcome: Option<AuthorizeOutcome>,
+    polls: RateWindow,
+}
+
 /// In-memory half of the authorization server: unredeemed codes, parked browsers, and which
 /// identity opened each MCP session.
 #[derive(Default)]
 pub(crate) struct OAuthState {
     codes: Mutex<HashMap<String, AuthCode>>,
     signins: Mutex<HashMap<String, SignInEntry>>,
+    browsers: Mutex<HashMap<String, BrowserFlow>>,
     /// A request on a session must carry the identity that created it.
     session_owners: Mutex<HashMap<String, String>>,
     rates: Mutex<RateLimits>,
@@ -151,6 +170,7 @@ struct RateLimits {
     authorize: RateWindow,
     token: RateWindow,
     revoke: RateWindow,
+    status: RateWindow,
 }
 
 fn decided_clients(config: &crate::config::PrismConfig) -> HashSet<String> {
@@ -339,7 +359,7 @@ pub fn pkce_matches(verifier: &str, challenge: &str) -> bool {
     )
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -602,8 +622,18 @@ impl Gateway {
     /// The authorization step. Approval in the panel is the consent screen; a browser that
     /// arrives while the agent is still pending waits here for the answer.
     pub async fn authorize(&self, params: AuthorizeParams) -> AuthorizeOutcome {
+        match self.start_authorization(params).await {
+            Ok(wait) => self.finish_authorization(wait, AUTHORIZE_WAIT).await,
+            Err(outcome) => outcome,
+        }
+    }
+
+    async fn start_authorization(
+        &self,
+        params: AuthorizeParams,
+    ) -> std::result::Result<AuthorizationWait, AuthorizeOutcome> {
         let Some(client_id) = params.client_id.as_deref().filter(|c| !c.is_empty()) else {
-            return AuthorizeOutcome::Invalid("client_id is required".into());
+            return Err(AuthorizeOutcome::Invalid("client_id is required".into()));
         };
         let client = match self
             .config
@@ -616,24 +646,29 @@ impl Gateway {
         {
             Some(c) => c,
             None => {
-                return AuthorizeOutcome::Invalid(
+                return Err(AuthorizeOutcome::Invalid(
                     "unknown client_id; register first at /register".into(),
-                )
+                ))
             }
         };
         let redirect_uri = match params.redirect_uri.as_deref() {
             Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => uri.to_string(),
             Some(_) => {
-                return AuthorizeOutcome::Invalid(
+                return Err(AuthorizeOutcome::Invalid(
                     "redirect_uri does not match the registered client".into(),
-                )
+                ))
             }
             None if client.redirect_uris.len() == 1 => client.redirect_uris[0].clone(),
-            None => return AuthorizeOutcome::Invalid("redirect_uri is required".into()),
+            None => return Err(AuthorizeOutcome::Invalid("redirect_uri is required".into())),
         };
         let state = params.state.as_deref();
         let fail = |error: &str, description: &str| {
-            AuthorizeOutcome::Redirect(error_redirect(&redirect_uri, error, description, state))
+            Err(AuthorizeOutcome::Redirect(error_redirect(
+                &redirect_uri,
+                error,
+                description,
+                state,
+            )))
         };
 
         if params.response_type.as_deref() != Some("code") {
@@ -716,7 +751,32 @@ impl Gateway {
                 .events
                 .send(GatewayEvent::SignInRequested(signin.clone()));
         }
-        let answer = tokio::time::timeout(AUTHORIZE_WAIT, rx).await;
+        Ok(AuthorizationWait {
+            signin,
+            redirect_uri,
+            code_challenge: challenge.to_string(),
+            state: params.state,
+            rx,
+        })
+    }
+
+    async fn finish_authorization(
+        &self,
+        wait: AuthorizationWait,
+        timeout: Duration,
+    ) -> AuthorizeOutcome {
+        let AuthorizationWait {
+            signin,
+            redirect_uri,
+            code_challenge,
+            state,
+            rx,
+        } = wait;
+        let state = state.as_deref();
+        let fail = |error: &str, description: &str| {
+            AuthorizeOutcome::Redirect(error_redirect(&redirect_uri, error, description, state))
+        };
+        let answer = tokio::time::timeout(timeout, rx).await;
         if let Ok(mut signins) = self.oauth.signins.lock() {
             signins.remove(&signin.id);
         }
@@ -742,10 +802,10 @@ impl Gateway {
             codes.insert(
                 code.clone(),
                 AuthCode {
-                    client_id: client.client_id.clone(),
-                    agent_id: agent.id.clone(),
+                    client_id: signin.client_id.clone(),
+                    agent_id: signin.agent_id.clone(),
                     redirect_uri: redirect_uri.clone(),
-                    code_challenge: challenge.to_string(),
+                    code_challenge,
                     expires_at: now + chrono::Duration::seconds(CODE_TTL_SECS),
                 },
             );
@@ -1003,6 +1063,10 @@ impl Gateway {
     /// The agent behind a bearer token, if the token is live and the agent still approved.
     pub async fn authenticate(&self, bearer: &str) -> Option<String> {
         let hash = hash_token(bearer.trim());
+        self.authenticate_hash(&hash).await
+    }
+
+    pub(crate) async fn authenticate_hash(&self, hash: &str) -> Option<String> {
         let now = Utc::now();
         let config = self.config.read().await;
         let token = config.tokens.iter().find(|t| {
@@ -1125,6 +1189,8 @@ pub(crate) fn router(gateway: Arc<Gateway>) -> Router {
         )
         .route("/register", post(register))
         .route("/authorize", get(authorize))
+        .route("/authorize/status", get(authorize_status))
+        .route("/authorize/finish", get(authorize_finish))
         .route("/token", post(token))
         .route("/revoke", post(revoke))
         .layer(DefaultBodyLimit::max(32 * 1024))
@@ -1158,6 +1224,7 @@ async fn rate_limit(State(gateway): State<Arc<Gateway>>, req: Request, next: Nex
         match (req.method().as_str(), req.uri().path()) {
             ("POST", "/register") => rates.register.take(now, 30),
             ("GET", "/authorize") => rates.authorize.take(now, 30),
+            ("GET", "/authorize/status" | "/authorize/finish") => rates.status.take(now, 1800),
             ("POST", "/token") => rates.token.take(now, 120),
             ("POST", "/revoke") => rates.revoke.take(now, 60),
             _ => None,
@@ -1186,8 +1253,9 @@ pub(crate) async fn require_bearer(
         })
         .filter(|t| !t.is_empty())
         .map(str::to_string);
-    let identity = match presented {
-        Some(token) => match gateway.authenticate(&token).await {
+    let token_hash = presented.as_deref().map(hash_token);
+    let identity = match token_hash.as_deref() {
+        Some(hash) => match gateway.authenticate_hash(hash).await {
             Some(agent_id) => agent_id,
             None => return challenge(&gateway, Some("invalid_token")),
         },
@@ -1195,6 +1263,7 @@ pub(crate) async fn require_bearer(
     };
     req.extensions_mut().insert(AuthenticatedAgent {
         agent_id: identity.clone(),
+        token_hash: token_hash.expect("authenticated token has a hash"),
     });
 
     // A session belongs to whoever opened it. A valid token for another agent does not
@@ -1307,18 +1376,224 @@ async fn register(
     }
 }
 
+// Browsers explicitly ask for HTML; native clients retain the blocking 303 flow.
+pub(crate) fn wants_html(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .any(|h| {
+            h.split(',').any(|part| {
+                let mut parts = part.trim().split(';');
+                parts
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
+                    && !parts.any(|param| {
+                        param
+                            .trim()
+                            .strip_prefix("q=")
+                            .is_some_and(|q| q.parse::<f32>().unwrap_or(0.0) <= 0.0)
+                    })
+            })
+        })
+}
+
+fn authorization_response(outcome: AuthorizeOutcome) -> Response {
+    match outcome {
+        AuthorizeOutcome::Redirect(uri) => private_response(Redirect::to(&uri).into_response()),
+        AuthorizeOutcome::Invalid(reason) => browser_response(
+            StatusCode::BAD_REQUEST,
+            page("Prism can't continue", &reason),
+        ),
+    }
+}
+
+fn waiting_page(req: &str, agent: &str) -> String {
+    let body = crate::remote::callback_page(
+        "waiting", "", "Waiting for approval", "Open Prism in your tray.",
+        &format!("Approve <b>{}</b> in the Prism panel to continue. This page will update after you decide.", crate::remote::html_escape(agent)),
+    );
+    body.replace(
+        "</body>",
+        &format!(
+            "{}\n</body>",
+            include_str!("authorize.html").replace("{{req}}", req)
+        ),
+    )
+}
+
 async fn authorize(
     State(gateway): State<Arc<Gateway>>,
+    headers: HeaderMap,
     Query(params): Query<AuthorizeParams>,
 ) -> Response {
-    match gateway.authorize(params).await {
-        AuthorizeOutcome::Redirect(uri) => Redirect::to(&uri).into_response(),
-        AuthorizeOutcome::Invalid(reason) => (
-            StatusCode::BAD_REQUEST,
-            Html(page("Prism can't continue", &reason)),
-        )
-            .into_response(),
+    if !wants_html(&headers) {
+        return authorization_response(gateway.authorize(params).await);
     }
+    if gateway
+        .oauth
+        .browsers
+        .lock()
+        .expect("browser lock poisoned")
+        .len()
+        >= MAX_BROWSER_FLOWS
+    {
+        return too_many_requests("too many browser sign-ins; retry later", 60);
+    }
+    let wait = match gateway.start_authorization(params).await {
+        Ok(wait) => wait,
+        Err(outcome) => return authorization_response(outcome),
+    };
+    // This capability is independent of the public tray/sign-in ID and OAuth state.
+    let req = random_token();
+    {
+        let mut browsers = gateway
+            .oauth
+            .browsers
+            .lock()
+            .expect("browser lock poisoned");
+        if browsers.len() >= MAX_BROWSER_FLOWS {
+            drop(wait);
+            gateway.pending_signins();
+            return too_many_requests("too many browser sign-ins; retry later", 60);
+        }
+        browsers.insert(req.clone(), BrowserFlow::default());
+    }
+    let page = waiting_page(&req, &wait.signin.agent_name);
+    tokio::spawn(complete_browser_authorization(
+        gateway,
+        req,
+        wait,
+        AUTHORIZE_WAIT,
+        BROWSER_RESULT_TTL,
+    ));
+    browser_response(StatusCode::OK, page)
+}
+
+async fn complete_browser_authorization(
+    gateway: Arc<Gateway>,
+    req: String,
+    wait: AuthorizationWait,
+    timeout: Duration,
+    retention: Duration,
+) {
+    let outcome = gateway.finish_authorization(wait, timeout).await;
+    if let Some(flow) = gateway
+        .oauth
+        .browsers
+        .lock()
+        .expect("browser lock poisoned")
+        .get_mut(&req)
+    {
+        flow.outcome = Some(outcome);
+    }
+    // Both abandoned requests and completed redirects have bounded lifetimes.
+    tokio::time::sleep(retention).await;
+    gateway
+        .oauth
+        .browsers
+        .lock()
+        .expect("browser lock poisoned")
+        .remove(&req);
+}
+
+#[derive(Deserialize)]
+struct BrowserRequest {
+    req: String,
+}
+
+pub(crate) fn same_origin(headers: &HeaderMap) -> bool {
+    if headers
+        .get("sec-fetch-site")
+        .is_some_and(|site| site != "same-origin" && site != "none")
+    {
+        return false;
+    }
+    match headers.get(header::ORIGIN) {
+        None => true,
+        Some(origin) => headers
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|host| origin == format!("http://{host}").as_str()),
+    }
+}
+
+async fn authorize_status(
+    State(gateway): State<Arc<Gateway>>,
+    headers: HeaderMap,
+    Query(query): Query<BrowserRequest>,
+) -> Response {
+    // A custom header also prevents simple cross-origin fetches in older browsers.
+    if !same_origin(&headers) || headers.get("x-prism-oauth").is_none_or(|v| v != "1") {
+        return private_response(StatusCode::FORBIDDEN.into_response());
+    }
+    let mut browsers = gateway
+        .oauth
+        .browsers
+        .lock()
+        .expect("browser lock poisoned");
+    let Some(flow) = browsers.get_mut(&query.req) else {
+        return private_response(StatusCode::GONE.into_response());
+    };
+    if let Some(retry) = flow.polls.take(Instant::now(), 90) {
+        return too_many_requests("polling too quickly; retry later", retry);
+    }
+    // The polling response never contains a code, token, or external redirect.
+    private_response(
+        Json(serde_json::json!({
+            "status": if flow.outcome.is_some() { "ready" } else { "pending" }
+        }))
+        .into_response(),
+    )
+}
+
+async fn authorize_finish(
+    State(gateway): State<Arc<Gateway>>,
+    headers: HeaderMap,
+    Query(query): Query<BrowserRequest>,
+) -> Response {
+    if !same_origin(&headers) {
+        return private_response(StatusCode::FORBIDDEN.into_response());
+    }
+    let mut browsers = gateway
+        .oauth
+        .browsers
+        .lock()
+        .expect("browser lock poisoned");
+    match browsers.get(&query.req) {
+        Some(flow) if flow.outcome.is_none() => {
+            private_response(StatusCode::CONFLICT.into_response())
+        }
+        Some(_) => authorization_response(browsers.remove(&query.req).unwrap().outcome.unwrap()),
+        None => browser_response(
+            StatusCode::GONE,
+            page(
+                "This sign-in has ended.",
+                "Return to your app and start sign-in again.",
+            ),
+        ),
+    }
+}
+
+pub(crate) fn private_response(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    response
+}
+
+pub(crate) fn browser_response(status: StatusCode, body: String) -> Response {
+    let nonce = random_token();
+    let body = body.replace("<script>", &format!("<script nonce=\"{nonce}\">"));
+    let mut response = private_response((status, Html(body)).into_response());
+    response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, format!(
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    ).parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());
+    response
 }
 
 async fn token(State(gateway): State<Arc<Gateway>>, Form(req): Form<TokenRequest>) -> Response {
@@ -1343,24 +1618,187 @@ async fn revoke(State(gateway): State<Arc<Gateway>>, Form(req): Form<RevokeReque
 }
 
 fn page(title: &str, body: &str) -> String {
-    let esc = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    };
-    format!(
-        "<!doctype html><meta charset=utf-8><title>{t}</title>\
-         <style>body{{font:15px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#1c1a17}}\
-         h1{{font-size:19px;margin:0 0 .5rem}}p{{margin:0;opacity:.75}}</style>\
-         <h1>{t}</h1><p>{b}</p>",
-        t = esc(title),
-        b = esc(body)
+    crate::remote::callback_page(
+        "failed",
+        "warn",
+        "Sign-in stopped",
+        &crate::remote::html_escape(title),
+        &crate::remote::html_escape(body),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_negotiation_keeps_native_clients_compatible() {
+        let mut headers = HeaderMap::new();
+        assert!(!wants_html(&headers));
+        for (accept, expected) in [
+            ("*/*", false),
+            ("application/json", false),
+            ("text/html;q=0", false),
+            ("text/html;q=0.0,*/*", false),
+            ("text/html,application/xhtml+xml;q=0.9", true),
+        ] {
+            headers.insert(header::ACCEPT, accept.parse().unwrap());
+            assert_eq!(wants_html(&headers), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_timeout_redirects_and_abandoned_results_expire() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prism.json");
+        crate::config::PrismConfig {
+            listen_port: 0,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let gateway = Gateway::start(&path, dir.path().join("audit.jsonl"))
+            .await
+            .unwrap();
+        let client = gateway
+            .register_client(
+                serde_json::from_value(serde_json::json!({
+                    "client_name":"timeout", "redirect_uris":["http://localhost/cb"]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        for finish in [true, false] {
+            let wait = gateway.start_authorization(serde_json::from_value(serde_json::json!({
+                "client_id":client.client_id, "response_type":"code", "code_challenge":"challenge",
+                "code_challenge_method":"S256", "state":"kept"
+            })).unwrap()).await.unwrap();
+            let id = random_token();
+            gateway
+                .oauth
+                .browsers
+                .lock()
+                .unwrap()
+                .insert(id.clone(), BrowserFlow::default());
+            let job = tokio::spawn(complete_browser_authorization(
+                gateway.clone(),
+                id.clone(),
+                wait,
+                Duration::from_millis(5),
+                Duration::from_millis(100),
+            ));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if gateway
+                        .oauth
+                        .browsers
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .unwrap()
+                        .outcome
+                        .is_some()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(gateway.pending_signins().is_empty());
+            assert!(gateway.oauth.codes.lock().unwrap().is_empty());
+            if finish {
+                let response = authorize_finish(
+                    State(gateway.clone()),
+                    HeaderMap::new(),
+                    Query(BrowserRequest { req: id.clone() }),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                let uri = response.headers()[header::LOCATION].to_str().unwrap();
+                assert!(uri.contains("error=access_denied"));
+                assert!(uri.contains("nobody%20answered"));
+                assert!(uri.contains("state=kept"));
+            }
+            job.await.unwrap();
+            assert!(gateway.oauth.browsers.lock().unwrap().is_empty());
+            let response = authorize_finish(
+                State(gateway.clone()),
+                HeaderMap::new(),
+                Query(BrowserRequest { req: id }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::GONE);
+        }
+        // Unknown handles never create entries, and polling has a separate per-flow cap.
+        let id = random_token();
+        gateway
+            .oauth
+            .browsers
+            .lock()
+            .unwrap()
+            .insert(id.clone(), BrowserFlow::default());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-prism-oauth", "1".parse().unwrap());
+        for _ in 0..90 {
+            assert_eq!(
+                authorize_status(
+                    State(gateway.clone()),
+                    headers.clone(),
+                    Query(BrowserRequest { req: id.clone() })
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            authorize_status(
+                State(gateway.clone()),
+                headers.clone(),
+                Query(BrowserRequest { req: id })
+            )
+            .await
+            .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            authorize_status(
+                State(gateway.clone()),
+                headers,
+                Query(BrowserRequest {
+                    req: "unknown".into()
+                })
+            )
+            .await
+            .status(),
+            StatusCode::GONE
+        );
+        assert_eq!(gateway.oauth.browsers.lock().unwrap().len(), 1);
+        {
+            let mut browsers = gateway.oauth.browsers.lock().unwrap();
+            while browsers.len() < MAX_BROWSER_FLOWS {
+                browsers.insert(random_token(), BrowserFlow::default());
+            }
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, "text/html".parse().unwrap());
+        let params = serde_json::from_value(serde_json::json!({
+            "client_id":client.client_id, "response_type":"code", "code_challenge":"challenge",
+            "code_challenge_method":"S256"
+        }))
+        .unwrap();
+        let response = authorize(State(gateway.clone()), headers, Query(params)).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(gateway.pending_signins().is_empty());
+        assert_eq!(
+            gateway.oauth.browsers.lock().unwrap().len(),
+            MAX_BROWSER_FLOWS
+        );
+        gateway.shutdown().await;
+    }
 
     #[test]
     fn rate_window_recovers_without_growing_on_rejected_requests() {

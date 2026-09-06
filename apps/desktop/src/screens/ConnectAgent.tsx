@@ -1,17 +1,21 @@
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { ManualTokenDetails } from "../ManualTokenDetails";
-import { agents, errorMessage, pop, push, status } from "../state";
+import { HOSTS, hostSetup } from "../hosts";
+import { loadNativeStatus } from "../events";
+import { native, agents, errorMessage, pop, push, status } from "../state";
 import type { ConnectSnippet, ManualToken } from "../types";
-import { Button, CodeBlock, Label, Screen, Segmented, describeError } from "../ui";
+import { Button, Chip, CodeBlock, Label, Screen, Segmented, describeError } from "../ui";
 
 export function ConnectAgentScreen() {
+  const [custom, setCustom] = useState(false);
   const [snippet, setSnippet] = useState<ConnectSnippet | null>(null);
   const [mode, setMode] = useState<"oauth" | "manual">("oauth");
   const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<ManualToken | null>(null);
 
   useEffect(() => {
+    loadNativeStatus();
     api.getConnectSnippet().then(setSnippet).catch((err) => { errorMessage.value = describeError(err); });
   }, []);
 
@@ -35,6 +39,23 @@ export function ConnectAgentScreen() {
     pop();
     push({ kind: "agent", agentId });
   }} />;
+
+  if (!custom) return <div class="screen pushed"><Screen>
+    <Label>Choose your agent</Label>
+    <div class="list harness-picker">
+      {HOSTS.map((h) => {
+        const configured = hostSetup(native.value, h.host);
+        return <button key={h.host} type="button" class="item harness-choice" onClick={() => push({ kind: "harness-setup", host: h.host })}>
+          <span class="host-mark" aria-hidden="true" /><span><strong>{h.name}</strong><small>MCP + native observation</small></span>
+          {configured?.mcp_configured && configured.hook_installed ? <Chip>configured</Chip> : null}<span class="chev">›</span>
+        </button>;
+      })}
+      <button type="button" class="item harness-choice" onClick={() => setCustom(true)}>
+        <span class="host-mark" aria-hidden="true" /><span><strong>Other</strong><small>Connect any MCP client</small></span><span class="chev">›</span>
+      </button>
+    </div>
+    <p class="hint">Set up once for all your projects.</p>
+  </Screen></div>;
 
   return (
     <div class="screen pushed">

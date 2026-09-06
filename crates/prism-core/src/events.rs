@@ -12,6 +12,9 @@ use crate::oauth::PendingSignIn;
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum GatewayEvent {
     PendingCall(PendingCall),
+    CallCancelled {
+        id: String,
+    },
     CallDecided {
         id: String,
         decision: Decision,

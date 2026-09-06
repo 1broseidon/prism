@@ -19,6 +19,8 @@ function sourceText(entry: AuditEntry): string {
   switch (entry.source.kind) {
     case "human":
       return "you";
+    case "cancelled":
+      return "cancelled";
     case "rule":
       return "rule";
     case "unapproved":

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 
 use crate::config::Posture;
 use crate::error::{Error, Result};
@@ -102,6 +102,21 @@ pub struct ApprovalRegistry {
     timeout: Duration,
 }
 
+/// Removing the slot on drop also covers client disconnects and cancelled tasks.
+struct Registration {
+    inner: Arc<Mutex<HashMap<String, Slot>>>,
+    id: String,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id);
+    }
+}
+
 impl ApprovalRegistry {
     pub fn new() -> Self {
         Self::with_timeout(DEFAULT_HOLD_TIMEOUT)
@@ -123,40 +138,42 @@ impl ApprovalRegistry {
         let id = call.id.clone();
         let (tx, rx) = oneshot::channel();
         {
-            let mut map = self.inner.lock().await;
+            let mut map = self.inner.lock().unwrap_or_else(|err| err.into_inner());
             map.insert(id.clone(), Slot { call, tx });
         }
 
+        let _registration = Registration {
+            inner: self.inner.clone(),
+            id: id.clone(),
+        };
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => HoldOutcome::Decided(decision),
-            Ok(Err(_)) => {
-                self.inner.lock().await.remove(&id);
-                HoldOutcome::Timeout
-            }
-            Err(_) => {
-                self.inner.lock().await.remove(&id);
-                HoldOutcome::Timeout
-            }
+            _ => HoldOutcome::Timeout,
         }
     }
 
     pub async fn decide(&self, id: &str, decision: Decision) -> Result<PendingCall> {
-        let mut map = self.inner.lock().await;
+        let mut map = self.inner.lock().unwrap_or_else(|err| err.into_inner());
         let slot = map
             .remove(id)
             .ok_or_else(|| Error::NotFound(format!("pending call {id}")))?;
         let call = slot.call.clone();
-        let _ = slot.tx.send(decision);
+        slot.tx
+            .send(decision)
+            .map_err(|_| Error::NotFound(format!("pending call {id}")))?;
         Ok(call)
     }
 
     pub async fn list(&self) -> Vec<PendingCall> {
-        let map = self.inner.lock().await;
+        let map = self.inner.lock().unwrap_or_else(|err| err.into_inner());
         map.values().map(|slot| slot.call.clone()).collect()
     }
 
     pub async fn is_empty(&self) -> bool {
-        self.inner.lock().await.is_empty()
+        self.inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_empty()
     }
 }
 

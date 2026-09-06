@@ -14,11 +14,14 @@ import type {
   AgentConfig,
   ActivitySummary,
   AuditEntry,
+  AuditPage,
+  ExportReport,
   ConnectSnippet,
   Decision,
   Attention,
   GatewayStatus,
   HookInstallResult,
+  HarnessChanges,
   HttpAuth,
   NativeStatus,
   NewRule,
@@ -203,5 +206,12 @@ export function installHostHook(host: string) {
 
 /** Writes the would-have-asked entries to Downloads and returns the path. */
 export function exportNativeReport() {
-  return invoke<string>("export_native_report");
+  return invoke<ExportReport>("export_native_report");
+}
+
+export function setupHarness(host: string) { return invoke<HarnessChanges>("setup_harness", { host }); }
+export function removeHarnessSetup(host: string) { return invoke<HarnessChanges>("remove_harness_setup", { host }); }
+
+export function listAuditPage(filter: ActivityFilter, offset = 0, limit = 100) {
+  return invoke<AuditPage>("list_audit_page", {query: {...filter, offset, limit}});
 }

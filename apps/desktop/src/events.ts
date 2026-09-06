@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import {
   activity,
+  activityError,
   agents,
   audit,
   errorMessage,
@@ -18,14 +19,13 @@ import type { GatewayEvent, UpdateEvent } from "./types";
 
 export async function loadAll(): Promise<void> {
   try {
-    const [st, srv, ag, pend, si, ru, au] = await Promise.all([
+    const [st, srv, ag, pend, si, ru] = await Promise.all([
       api.getStatus(),
       api.listServers(),
       api.listAgents(),
       api.listPending(),
       api.listSignins(),
       api.listRules(),
-      api.listAudit(60),
     ]);
     status.value = st;
     servers.value = srv;
@@ -33,7 +33,7 @@ export async function loadAll(): Promise<void> {
     pending.value = pend;
     signins.value = si.filter((s) => s.needs_consent);
     rules.value = ru;
-    audit.value = au;
+    void api.listAudit(60).then(entries => { audit.value = entries; }).catch(() => {});
     errorMessage.value = null;
     loadNativeStatus();
     loadActivity();
@@ -54,8 +54,9 @@ export function loadNativeStatus(debounce = false): void {
     }, 2000);
     return;
   }
-  api.getNativeStatus().then((st) => (native.value = st)).catch(() => {
-    // Optional in dev; the panel works without it.
+  api.getNativeStatus().then((st) => (native.value = st)).catch(err => {
+    native.value = null;
+    errorMessage.value = err instanceof Error ? err.message : String(err);
   });
 }
 
@@ -71,8 +72,9 @@ export function loadActivity(debounce = false): void {
     }, 1000);
     return;
   }
-  api.getActivity().then((summary) => (activity.value = summary)).catch(() => {
-    // Optional in dev; the panel works without it.
+  api.getActivity().then(summary => { activity.value = summary; activityError.value = null; }).catch(err => {
+    activity.value = null;
+    activityError.value = err instanceof Error ? err.message : String(err);
   });
 }
 
@@ -114,6 +116,7 @@ export async function subscribeEvents(): Promise<() => void> {
         status.value = await api.getStatus();
         break;
       case "call_decided":
+      case "call_cancelled":
         pending.value = pending.value.filter((p) => p.id !== payload.data.id);
         rules.value = await api.listRules();
         status.value = await api.getStatus();
