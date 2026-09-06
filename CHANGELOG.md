@@ -4,6 +4,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Fixed
+- Linux: the deb and rpm desktop entry had no category, so menus that group by category (Cinnamon, KDE) did not list Prism. It now sits under Development.
+
 ## [0.2.0] - 2026-09-06
 
 ### Added

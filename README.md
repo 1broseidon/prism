@@ -31,6 +31,8 @@ Download the build for your machine from the [latest release](https://github.com
 
 **macOS.** Builds are signed with a Developer ID certificate and notarized by Apple, so the app opens without a Gatekeeper prompt. If you installed an earlier unsigned build, replace it with the current download.
 
+**Linux.** The deb and rpm install the binary as `prism-desktop` and add a **Prism** entry under Development in the application menu. Launching it puts the icon in the tray and nothing else on screen.
+
 **Linux requirements.** Prism needs a session D-Bus and an unlocked Secret Service provider such as GNOME Keyring or KWallet, because that is where server credentials live. GNOME users also need an AppIndicator extension for the tray icon to appear. Ubuntu and Fedora desktops ship both.
 
 A Homebrew cask via `1broseidon/tap` is coming. Installed copies update themselves; see [Updates](#updates).

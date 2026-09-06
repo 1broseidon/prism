@@ -65,7 +65,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "category": "DeveloperTool"
   },
   "plugins": {
     "updater": {
