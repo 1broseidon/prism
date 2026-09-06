@@ -2,22 +2,23 @@ import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { loadNativeStatus } from "../events";
 import { hostOf, hostSetup, hostStatus } from "../hosts";
-import { agents, errorMessage, native, status } from "../state";
+import { agents, errorMessage, native, push, status } from "../state";
 import { relative } from "../time";
-import { Button, Chip, CodeBlock, Label, Screen, describeError } from "../ui";
+import { Button, Chip, CodeBlock, ConfirmButton, Label, Screen, describeError, useCopy } from "../ui";
 
-/** One agent host: how to connect its hooks, whether they are talking, and what is being recorded. */
+/** One agent host: whether its hook is talking, how to set it up, and what would have been asked. */
 export function HostScreen({ agentId }: { agentId: string }) {
   const agent = agents.value.find((a) => a.id === agentId);
   const known = hostOf(agentId);
   const host = known?.host ?? agent?.host ?? "";
-  const name = known?.name ?? agent?.name ?? "This host";
   const st = native.value;
   const hs = hostStatus(st, host);
   const setup = hostSetup(st, host);
   const [snippet, setSnippet] = useState<string>("");
-  const [wrote, setWrote] = useState<{ path: string; backup: string | null } | null>(null);
+  const [showSnippet, setShowSnippet] = useState(false);
+  const [wrote, setWrote] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [copyState, copy] = useCopy();
 
   useEffect(() => {
     if (!host) return;
@@ -42,12 +43,13 @@ export function HostScreen({ agentId }: { agentId: string }) {
 
   const install = () =>
     run(async () => {
-      setWrote(await api.installHostHook(host));
+      await api.installHostHook(host);
+      setWrote(true);
     });
   const rotate = () =>
     run(async () => {
       await api.rotateHookToken();
-      setWrote(null);
+      setWrote(false);
     });
   const revoke = (deny: boolean) =>
     run(async () => {
@@ -58,85 +60,84 @@ export function HostScreen({ agentId }: { agentId: string }) {
 
   const revoked = agent?.status === "denied";
   const installed = setup?.hook_installed ?? false;
+  const needsReview = installed && setup?.hook_trusted === false;
+  const isCodex = host === "codex";
+  const path = setup?.settings_path ?? (isCodex ? "~/.codex/hooks.json" : "~/.claude/settings.json");
   const coverage = revoked ? (
-    <Chip tone="danger">revoked</Chip>
+    <Chip tone="danger">refused</Chip>
   ) : st?.observe_native && hs?.last_event_at ? (
     <Chip tone="ok">observed</Chip>
-  ) : (
-    <Chip>MCP only</Chip>
-  );
-  const isCodex = host === "codex";
-  const defaultPath = isCodex ? "~/.codex/hooks.json" : "~/.claude/settings.json";
-  const needsReview = installed && setup?.hook_trusted === false;
-  const hookChip = !installed ? null : needsReview ? (
+  ) : needsReview ? (
     <Chip tone="warn">review in Codex</Chip>
+  ) : installed ? (
+    <Chip tone="ok">hooked</Chip>
   ) : (
-    <Chip tone="ok">installed</Chip>
+    <Chip>not hooked up</Chip>
   );
+  const asked = st ? st.by_reason.reduce((n, r) => n + r.count, 0) : 0;
 
   return (
     <div class="screen pushed">
       <Screen>
-        <section class="section">
-          <Label right={coverage}>Coverage</Label>
-          <p class="hint">
-            {revoked
-              ? "Prism refuses this host's hook events. Restore it to start recording again."
-              : hs?.last_event_at
-                ? `Recording. Last action ${relative(hs.last_event_at)}, ${hs.actions_7d} this week. Nothing is held or changed; ${name}'s own permissions still apply.`
-                : needsReview
-                  ? "The hook is written but Codex has not run it yet. Codex reviews new hooks: open /hooks in a Codex session and trust the Prism entry. Until then Codex skips it."
-                  : installed
-                    ? `The hook is in place. The first action ${name} takes will show up in the Now feed.`
-                  : "Only MCP calls through Prism are visible. Add the hook below and every command, file edit and fetch is recorded too."}
-          </p>
-        </section>
+        <div class="agent-head">
+          {coverage}
+          <span class="grow" />
+          {hs?.last_event_at ? (
+            <button type="button" class="link" onClick={() => push({ kind: "activity", agentId })}>
+              {hs.actions_7d} this week · {relative(hs.last_event_at)} ›
+            </button>
+          ) : (
+            <span class="sub">
+              {revoked ? "events dropped" : needsReview ? "Codex skips it until trusted: /hooks" : installed ? "nothing yet" : ""}
+            </span>
+          )}
+        </div>
 
         <section class="section">
-          <Label right={hookChip}>Hook</Label>
-          <p class="hint">
-            {isCodex
-              ? "Codex runs a one-line curl before each tool call, bounded to a few milliseconds on loopback, and carries on regardless of the answer. Prism keeps one line per action, redacted; never the raw input or the patch text."
-              : "Claude Code posts each action to Prism before it runs and carries on regardless of the answer. Prism keeps one line per action, redacted; never the raw input."}
-          </p>
+          <Label right={installed ? <Chip tone="ok">installed</Chip> : null}>Hook</Label>
+          <p class="hint">Posts each action to Prism before it runs. One redacted line is kept.</p>
           <div class="actions update-actions">
             <Button variant="primary" busy={busy} onClick={() => void install()}>
               {installed ? "Rewrite the hook" : "Write it for me"}
             </Button>
-            <Button variant="quiet" busy={busy} onClick={() => void rotate()}>
+            <Button variant="quiet" busy={busy} onClick={() => void rotate()} title="New token; rewrite the hook afterwards">
               Rotate token
             </Button>
           </div>
-          {wrote ? (
-            <p class="hint">
-              Written to {wrote.path}
-              {wrote.backup ? `, previous file kept as ${wrote.backup}` : ""}.{" "}
-              {isCodex
-                ? "Codex asks you to review new hooks: open /hooks in your next Codex session and trust the Prism entry."
-                : `Running ${name} sessions pick it up on their next action.`}
-            </p>
-          ) : (
-            <p class="hint">
-              Merges into {setup?.settings_path ?? defaultPath} and keeps a backup. Or paste this yourself:
-            </p>
-          )}
-          <CodeBlock text={snippet} copyable emptyText="Loading…" />
+          <p class="hint">{wrote ? (isCodex ? "Written. Trust it in Codex: /hooks." : "Written.") : `Writes ${path}, backup kept.`}</p>
+          <div class="snippet-row">
+            <button type="button" class="link" aria-expanded={showSnippet} onClick={() => setShowSnippet(!showSnippet)}>
+              {showSnippet ? "Hide snippet" : "Show snippet"}
+            </button>
+            {showSnippet ? null : (
+              <Button variant="quiet" state={copyState} disabled={!snippet} onClick={() => void copy(snippet)}>
+                {copyState === "success" ? "Copied" : copyState === "error" ? "Copy failed" : "Copy"}
+              </Button>
+            )}
+          </div>
+          {showSnippet ? <CodeBlock text={snippet} copyable emptyText="Loading…" /> : null}
         </section>
 
         <section class="section">
-          <Label>Would have asked</Label>
-          <p class="hint">
-            A short list runs in shadow to measure how often a real gate would interrupt. It marks entries in the
-            feed and counts them in Settings; it never stops anything.
-          </p>
+          <Label right={<span class={asked ? "accent" : ""}>{asked}</span>}>Would have asked</Label>
           <ul class="shadow-rules">
             {(st?.rules ?? []).map((rule) => {
               const count = st?.by_reason.find((r) => r.reason === rule.id)?.count ?? 0;
-              return (
-                <li key={rule.id}>
+              const body = (
+                <>
                   <span class="mono">{rule.id.replace(/_/g, " ")}</span>
-                  <span class="hint">{rule.summary}</span>
                   <span class={`shadow-count ${count ? "hit" : ""}`}>{count}</span>
+                </>
+              );
+              return (
+                <li key={rule.id} title={rule.summary}>
+                  {count ? (
+                    <button type="button" class="row-btn" onClick={() => push({ kind: "activity", agentId, reason: rule.id })}>
+                      {body}
+                    </button>
+                  ) : (
+                    body
+                  )}
                 </li>
               );
             })}
@@ -151,15 +152,11 @@ export function HostScreen({ agentId }: { agentId: string }) {
                 Restore
               </Button>
             ) : (
-              <Button variant="quiet" class="danger" busy={busy} onClick={() => void revoke(true)}>
-                Refuse this host
-              </Button>
+              <ConfirmButton variant="quiet" class="danger" busy={busy} confirm="Refuse?" onConfirm={() => void revoke(true)}>
+                Refuse
+              </ConfirmButton>
             )}
           </div>
-          <p class="hint">
-            Coverage depends on {name} honouring its own hooks. Prism shows what it can see and never claims
-            more; it does not sandbox anything.
-          </p>
         </section>
       </Screen>
     </div>

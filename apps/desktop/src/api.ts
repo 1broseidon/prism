@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { mock } from "./mock";
+import type { ActivityFilter } from "./state";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
 
@@ -117,8 +118,14 @@ export function listServerTools(serverId: string) {
   return invoke<ToolInfo[]>("list_server_tools", { serverId });
 }
 
-export function listAudit(limit = 20, agentId?: string) {
-  return invoke<AuditEntry[]>("list_audit", { limit, agentId });
+export function listAudit(limit = 20, filter: ActivityFilter = {}) {
+  return invoke<AuditEntry[]>("list_audit", {
+    limit,
+    agentId: filter.agentId ?? null,
+    attention: filter.attention ?? null,
+    day: filter.day ?? null,
+    reason: filter.reason ?? null,
+  });
 }
 
 export function getActivity(days = 7) {

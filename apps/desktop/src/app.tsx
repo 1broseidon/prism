@@ -39,7 +39,7 @@ function titleOf(screen: Screen): string {
     case "host":
       return agents.value.find((a) => a.id === screen.agentId)?.name ?? hostName(screen.agentId);
     case "activity":
-      return screen.agentId ? (agents.value.find((a) => a.id === screen.agentId)?.name ?? hostName(screen.agentId)) : "Every action";
+      return screen.agentId ? (agents.value.find((a) => a.id === screen.agentId)?.name ?? hostName(screen.agentId)) : "Actions";
   }
 }
 
@@ -98,10 +98,15 @@ export function App() {
           <>
             <Mark />
             <h1 class="wordmark">Prism</h1>
-            <span class="status" title={st?.listening ? "Gateway listening" : "Gateway not listening"}>
+            <button
+              type="button"
+              class="status"
+              title={st?.listening ? "Listening. Connect an agent." : "Not listening"}
+              onClick={() => push({ kind: "connect-agent" })}
+            >
               <span class={`dot ${st ? (st.listening ? "ok" : "danger") : ""}`} />
               {st ? `:${st.listen_port}` : "…"}
-            </span>
+            </button>
           </>
         )}
         <span class="spacer" />
@@ -153,7 +158,7 @@ export function App() {
         {top?.kind === "settings" ? <SettingsScreen /> : null}
         {top?.kind === "agent" ? <AgentScreen agentId={top.agentId} /> : null}
         {top?.kind === "host" ? <HostScreen agentId={top.agentId} /> : null}
-        {top?.kind === "activity" ? <ActivityScreen agentId={top.agentId} /> : null}
+        {top?.kind === "activity" ? <ActivityScreen filter={top} /> : null}
         {top?.kind === "agent-server" ? <AgentToolsScreen agentId={top.agentId} serverId={top.serverId} /> : null}
         {!top && tab.value === "now" ? <NowScreen /> : null}
         {!top && tab.value === "servers" ? <ServersScreen /> : null}

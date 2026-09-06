@@ -67,9 +67,11 @@ function AgentRow({ agent }: { agent: AgentConfig }) {
 export function coverageChip(agent: AgentConfig) {
   const st = native.value;
   const hs = hostStatus(st, agent.host ?? "");
-  if (agent.status === "denied") return <Chip tone="danger">revoked</Chip>;
+  const setup = hostSetup(st, agent.host ?? "");
+  if (agent.status === "denied") return <Chip tone="danger">refused</Chip>;
   if (st?.observe_native && hs?.last_event_at) return <Chip tone="ok">observed</Chip>;
-  return <Chip>MCP only</Chip>;
+  if (setup?.hook_installed) return <Chip tone="ok">hooked</Chip>;
+  return <Chip>not hooked up</Chip>;
 }
 
 function HostRow({ agent }: { agent: AgentConfig }) {
@@ -78,12 +80,12 @@ function HostRow({ agent }: { agent: AgentConfig }) {
   const setup = hostSetup(st, agent.host ?? "");
   const sub =
     agent.status === "denied"
-      ? "Its hook events are refused"
+      ? "Refused"
       : hs?.last_event_at
-        ? `Last action ${relative(hs.last_event_at)} · ${hs.actions_7d} this week`
+        ? `${hs.actions_7d} this week · ${relative(hs.last_event_at)}`
         : setup?.hook_installed
-          ? "Hook installed · waiting for the first action"
-          : "Set up the hook to see what it does";
+          ? "Hooked · nothing yet"
+          : "Not hooked up";
   return (
     <div class="item">
       <button type="button" class="title row-btn" onClick={() => push({ kind: "host", agentId: agent.id })}>
@@ -115,7 +117,7 @@ export function AgentsScreen() {
         </div>
         <Label right={<span>{list.length}</span>}>MCP agents</Label>
         {list.length === 0 ? (
-          <Empty title="No agents yet.">Point any MCP client at Prism. It shows up here the first time it connects, and you approve it before it sees a single tool.</Empty>
+          <Empty title="No agents yet." />
         ) : (
           <div class="list">
             {list.map((agent) => (

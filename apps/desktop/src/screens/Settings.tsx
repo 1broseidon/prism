@@ -4,7 +4,7 @@ import * as api from "../api";
 import { errorMessage, status, update, updateProgress } from "../state";
 import type { Settings, UpdateStatus } from "../types";
 import { Button, Chip, Label, Screen, Segmented, Switch, describeError } from "../ui";
-import { native, push } from "../state";
+import { native } from "../state";
 import { loadNativeStatus } from "../events";
 
 const RELEASES_URL = "https://github.com/1broseidon/prism/releases/latest";
@@ -116,13 +116,13 @@ function UpdatesSection() {
               Downloading {mb(progress.downloaded)}{progress.total ? ` of ${mb(progress.total)}` : ""}
             </p>
           ) : progress?.state === "installing" ? (
-            <p class="hint">Installing. Prism restarts in a moment.</p>
+            <p class="hint">Installing…</p>
           ) : progress?.state === "error" ? (
             <p class="hint danger">{progress.message}</p>
           ) : installable ? (
-            <p class="hint">Downloads in the background, installs in place, and restarts Prism. Held calls are denied while it restarts.</p>
+            <p class="hint">Installs and restarts Prism.</p>
           ) : (
-            <p class="hint">This install came from a package, so it cannot replace itself. Get the new build from the release page.</p>
+            <p class="hint">Packaged install: update from the release page.</p>
           )}
           <div class="actions update-actions">
             {installable ? (
@@ -140,10 +140,9 @@ function UpdatesSection() {
         <div class="list">
           <div class="setting">
             <div>
-              <div class="setting-title">{checkedNow === "latest" ? "You have the latest version" : "Checks every six hours"}</div>
+              <div class="setting-title">{checkedNow === "latest" ? "Up to date" : "Checks every 6 hours"}</div>
               <div class="hint">
-                {info?.checked_at ? `Last checked ${new Date(info.checked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : "Not checked yet."}{" "}
-                Updates come from the GitHub releases and are verified before they install.
+                {info?.checked_at ? `Last checked ${new Date(info.checked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : "Not checked yet."}
               </div>
             </div>
             <Button busy={checking} onClick={() => void check()}>
@@ -177,36 +176,19 @@ function NativeSection() {
   };
   return (
     <section class="section">
-      <Label right={st?.last_event_at ? <Chip tone="ok">observed</Chip> : <Chip>MCP only</Chip>}>Native actions</Label>
+      <Label right={st?.last_event_at ? <Chip tone="ok">observed</Chip> : <Chip>none yet</Chip>}>Native actions</Label>
       <div class="list">
         <div class="setting">
           <div>
             <div class="setting-title">Observe native actions</div>
-            <div class="hint">Record what Claude Code does outside MCP: commands, files, fetches. Nothing is held or changed.</div>
+            <div class="hint">Commands, files, fetches from hooked hosts. Logged only.</div>
           </div>
           <Switch label="Observe native actions" checked={st?.observe_native ?? true} onChange={(v) => void toggle(v)} />
         </div>
-        <div class="setting">
-          <div>
-            <div class="setting-title">This week</div>
-            <div class="hint">
-              {st ? (
-                <>
-                  <b>{st.actions_7d}</b> native actions seen. The deny list would have asked about <b>{st.would_hold_7d}</b>
-                  {st.by_reason.length ? ` (${st.by_reason.map((r) => `${r.reason.replace(/_/g, " ")} ${r.count}`).join(", ")})` : ""}.
-                </>
-              ) : (
-                "Not loaded."
-              )}
-            </div>
-          </div>
-        </div>
       </div>
       <div class="actions update-actions">
-        <Button onClick={() => push({ kind: "host", agentId: "host:claude-code" })}>Claude Code</Button>
-        <Button onClick={() => push({ kind: "host", agentId: "host:codex" })}>Codex</Button>
         <Button variant="quiet" onClick={() => void exportReport()}>
-          Export would-ask entries
+          Export needed attention, 30 days
         </Button>
       </div>
       {exported ? <p class="hint">Saved to {exported}</p> : null}
@@ -250,14 +232,14 @@ export function SettingsScreen() {
             <div class="setting">
               <div>
                 <div class="setting-title">Do not disturb</div>
-                <div class="hint">Held calls resolve on their own, using the rule below. New agents still ask.</div>
+                <div class="hint">Held calls use the rule below. New agents still ask.</div>
               </div>
               <Switch label="Do not disturb" checked={settings.do_not_disturb} onChange={(v) => void save({ do_not_disturb: v })} />
             </div>
             <div class="setting">
               <div>
-                <div class="setting-title">Open the panel when something needs you</div>
-                <div class="hint">Off means a notification and the tray badge only.</div>
+                <div class="setting-title">Open on hold</div>
+                <div class="hint">Off: notification and badge only.</div>
               </div>
               <Switch label="Open the panel on request" checked={settings.auto_open_on_pending} onChange={(v) => void save({ auto_open_on_pending: v })} />
             </div>
@@ -277,8 +259,8 @@ export function SettingsScreen() {
           />
           <p class="hint">
             {settings.on_timeout === "deny"
-              ? "The agent gets a refusal and can retry once you are back."
-              : "Tools the server marks read-only go through. Anything that writes is refused."}
+              ? "Refused. The agent can retry."
+              : "Read-only tools pass. Writes are refused."}
           </p>
         </section>
 
@@ -288,7 +270,7 @@ export function SettingsScreen() {
             <label class="setting">
               <div>
                 <div class="setting-title">Hold a call for</div>
-                <div class="hint">Seconds before the rule above kicks in.</div>
+                <div class="hint">Before the rule above applies.</div>
               </div>
               <span class="num">
                 <input
@@ -305,7 +287,7 @@ export function SettingsScreen() {
             <label class="setting">
               <div>
                 <div class="setting-title">Rate tripwire</div>
-                <div class="hint">Above this many calls a minute, an agent's allowed calls start asking. Empty turns it off.</div>
+                <div class="hint">Above this, allowed calls ask. Empty: off.</div>
               </div>
               <span class="num">
                 <input

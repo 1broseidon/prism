@@ -8,7 +8,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - Native actions, observed. Claude Code and Codex can report every shell command, file edit and fetch to Prism through their hooks; **Agents → Claude Code** writes an HTTP hook into `~/.claude/settings.json` and **Agents → Codex** writes a `curl` hook into `~/.codex/hooks.json`, which Codex asks you to trust in `/hooks` before it runs. Each action becomes a redacted one-line audit entry (a Codex patch is recorded by the paths it touches, never its content), the Now feed shows them beside MCP calls, and a short deny list runs in shadow to count what a real gate would have held. Nothing is held or changed in this phase.
 
 ### Changed
-- The Now tab sums up the last seven days instead of listing every call: actions, how many needed a person, a bar per day, and the busiest agents. Tap an agent or **Every action** for the list.
+- The Now tab sums up the last seven days instead of listing every call: actions, how many needed a person, a bar per day, and the busiest agents. Every number is a door: the attention count, a day's bar, an agent's row or a would-have-asked rule opens the action list narrowed to exactly those rows, with each narrowing shown as a chip that can be dropped. A row in the list unfolds to show what it had to cut.
+- Less prose everywhere. Cards, hints and empty states say what they must and no more; the hook snippet is folded away behind **Show snippet**; the MCP verdict line and the Settings "This week" row are gone, since the numbers above them already say it.
+- Destructive buttons (revoke, forget, sign out, remove, delete, refuse) ask once, on the button itself: tap, then tap again within three seconds.
 
 ### Fixed
 - The panel shortcut was `Ctrl+Shift+Space` (`Cmd+Shift+Space` on macOS), which 1Password takes on every platform. It is now `Ctrl+Alt+P`, and `panel_shortcut` in `prism.json` overrides it.

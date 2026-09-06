@@ -25,6 +25,28 @@ export function Button({ variant = "default", busy, state, hint, children, class
   );
 }
 
+/** A destructive button that asks once, on itself: the first tap arms it, the second within 3 s fires. */
+export function ConfirmButton({ confirm, onConfirm, children, class: cls, ...rest }: Omit<ButtonProps, "onClick"> & { confirm: string; onConfirm: () => void }) {
+  const [armed, setArmed] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const click = () => {
+    if (armed) {
+      window.clearTimeout(timer.current);
+      setArmed(false);
+      onConfirm();
+      return;
+    }
+    setArmed(true);
+    timer.current = window.setTimeout(() => setArmed(false), 3000);
+  };
+  return (
+    <Button {...rest} class={`${cls ?? ""} ${armed ? "armed" : ""}`} aria-pressed={armed} onClick={click} onBlur={() => setArmed(false)}>
+      {armed ? confirm : children}
+    </Button>
+  );
+}
+
 export function Chip({ tone, children }: { tone?: "ok" | "warn" | "danger" | "accent"; children: ComponentChildren }) {
   return <span class={`chip ${tone ?? ""}`}>{children}</span>;
 }

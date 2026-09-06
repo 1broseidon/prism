@@ -1,9 +1,9 @@
 import { useEffect } from "preact/hooks";
 import * as api from "../api";
-import { activity, agents, errorMessage, pending, push, signins, status } from "../state";
+import { activity, agents, errorMessage, pending, push, signins, status, tab } from "../state";
 import { mmss, now, relative, secondsUntil } from "../time";
 import type { ActivitySummary, AgentConfig, DayActivity, Decision, PendingCall, PendingSignIn } from "../types";
-import { Button, CodeBlock, Empty, Label, Screen, describeError } from "../ui";
+import { Button, Chip, CodeBlock, Empty, Label, Screen, describeError } from "../ui";
 
 /** Fallback when a call carries no deadline; mirrors DEFAULT_HOLD_TIMEOUT in prism-core. */
 const HOLD_SECONDS = 120;
@@ -60,13 +60,17 @@ function AgentCard({ agent, first }: { agent: AgentConfig; first: boolean }) {
       <div class="via">
         {agent.client_version ? (
           <>
-            version <code>{agent.client_version}</code> ·{" "}
+            <code>{agent.client_version}</code> ·{" "}
           </>
         ) : null}
-        {agent.connected ? "session open, waiting" : "not connected right now"}
+        {agent.connected ? "connected" : "offline"}
+        {!agent.client_id ? (
+          <>
+            {" "}
+            <Chip>needs token</Chip>
+          </>
+        ) : null}
       </div>
-      <p class="note">It sees no tools until you approve. Every call it makes afterwards still goes through your rules.</p>
-      {!agent.client_id ? <p class="note">This client also needs a manual token. Create one on its agent screen after approving it.</p> : null}
       <div class="actions">
         <Button variant="primary" hint={first ? "A" : undefined} autoFocus={first} onClick={() => void decideAgent(agent, true)}>
           Approve
@@ -91,14 +95,12 @@ function SignInCard({ signin, first }: { signin: PendingSignIn; first: boolean }
         <b>{signin.agent_name}</b> wants to sign in again
       </div>
       <div class="via">
-        client <code>{signin.client_name}</code> · a browser is waiting on this
+        client <code>{signin.client_name}</code> · a browser is waiting
       </div>
-      <p class="note">
-        Expected when the client lost its tokens. If nothing on your side asked to sign in, refuse: an approved name is not proof of who is asking.
-      </p>
+      <p class="note">If you didn't start this, refuse.</p>
       <div class="actions">
         <Button variant="primary" hint={first ? "A" : undefined} autoFocus={first} onClick={() => void decideSignin(signin, true)}>
-          Allow sign-in
+          Allow
         </Button>
         <Button variant="danger" hint={first ? "D" : undefined} onClick={() => void decideSignin(signin, false)}>
           Refuse
@@ -120,7 +122,7 @@ function HoldCard({ call, first }: { call: PendingCall; first: boolean }) {
   return (
     <section class="hold" aria-live="polite">
       <div class="top">
-        <span class="eyebrow">{call.reason === "rate_limit" ? "Running hot · waiting for you" : "Waiting for you"}</span>
+        <span class="eyebrow">{call.reason === "rate_limit" ? "Running hot" : "Waiting for you"}</span>
         <span class={`countdown ${left < 20 ? "late" : ""}`} aria-label={`${Math.floor(left)} seconds left`}>
           {mmss(left)}
         </span>
@@ -137,32 +139,33 @@ function HoldCard({ call, first }: { call: PendingCall; first: boolean }) {
           variant="primary"
           hint={first ? "A" : undefined}
           autoFocus={first}
+          title={remembers ? "Remembered for this tool" : "This call only"}
           onClick={() => void decide(call, "allow", primaryScope(call))}
         >
-          {remembers ? "Allow" : "Allow once"}
+          Allow
         </Button>
         <Button variant="danger" hint={first ? "D" : undefined} onClick={() => void decide(call, "deny", "once")}>
           Deny
         </Button>
       </div>
+      <div class="actions-caption">{remembers ? "Allow is remembered for this tool." : "Allow is this call only."}</div>
       <div class="actions secondary">
         {remembers ? (
           <Button variant="quiet" onClick={() => void decide(call, "allow", "once")}>
-            Just this once
+            Once
           </Button>
         ) : (
           <Button variant="quiet" onClick={() => void decide(call, "allow", "always")}>
-            Always allow this tool
+            Always
           </Button>
         )}
         <Button variant="quiet" onClick={() => void decide(call, "allow", { for: { minutes: 30 } })}>
-          Allow for 30 min
+          30 min
         </Button>
         <Button variant="quiet" onClick={() => void decide(call, "allow", "always", "server")}>
-          Everything on {call.server_name}
+          All of {call.server_name}
         </Button>
       </div>
-      {remembers ? <p class="note">First use: Prism remembers this answer for {call.tool} from now on.</p> : null}
     </section>
   );
 }
@@ -172,23 +175,39 @@ function dayLabel(day: DayActivity, today: boolean): string {
   return new Date(`${day.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "narrow" });
 }
 
-/** One bar per day. Routine actions in ink, the ones that needed a person in amber on top. */
+/** One bar per day. Routine actions in ink, the ones that needed a person in amber on top. Each bar is a door. */
 function DailyChart({ days }: { days: DayActivity[] }) {
   const max = Math.max(1, ...days.map((d) => d.routine + d.attention));
   const last = days.length - 1;
   return (
-    <div class="daily" role="img" aria-label="Actions per day">
+    <div class="daily" role="group" aria-label="Actions per day">
       {days.map((d, i) => {
         const total = d.routine + d.attention;
-        const title = `${d.date}: ${total} action${total === 1 ? "" : "s"}${d.attention ? `, ${d.attention} needed attention` : ""}`;
+        const title = `${total} action${total === 1 ? "" : "s"}${d.attention ? `, ${d.attention} needed attention` : ""}`;
         return (
-          <div class={`day ${i === last ? "today" : ""}`} key={d.date} title={title}>
-            <div class="bar">
-              <span class="attention" style={{ height: `${(d.attention / max) * 100}%` }} />
+          <button
+            type="button"
+            class={`day ${i === last ? "today" : ""}`}
+            key={d.date}
+            title={title}
+            disabled={total === 0}
+            onClick={() => push({ kind: "activity", day: d.date })}
+          >
+            <span class="bar">
+              <span
+                class="attention"
+                style={{ height: `${(d.attention / max) * 100}%` }}
+                title={d.attention ? `${d.attention} needed attention` : undefined}
+                onClick={(e) => {
+                  if (!d.attention) return;
+                  e.stopPropagation();
+                  push({ kind: "activity", day: d.date, attention: true });
+                }}
+              />
               <span class="routine" style={{ height: `${(d.routine / max) * 100}%` }} />
-            </div>
+            </span>
             <span class="lbl">{dayLabel(d, i === last)}</span>
-          </div>
+          </button>
         );
       })}
     </div>
@@ -199,23 +218,17 @@ function DailyChart({ days }: { days: DayActivity[] }) {
 function ActivityBlock({ summary }: { summary: ActivitySummary }) {
   const top = summary.agents.slice(0, 3);
   const widest = Math.max(1, ...top.map((a) => a.total));
-  const mcpBits = [
-    `${summary.mcp.allowed} allowed`,
-    summary.mcp.asked ? `${summary.mcp.asked} asked you` : null,
-    summary.mcp.denied ? `${summary.mcp.denied} denied` : null,
-    summary.mcp.errors ? `${summary.mcp.errors} failed` : null,
-  ].filter(Boolean);
   return (
     <>
       <div class="activity-head">
-        <div class="stat">
+        <button type="button" class="stat" onClick={() => push({ kind: "activity" })}>
           <b>{summary.total}</b>
           <span>actions</span>
-        </div>
-        <div class="stat">
+        </button>
+        <button type="button" class="stat" disabled={summary.attention === 0} onClick={() => push({ kind: "activity", attention: true })}>
           <b class={summary.attention ? "accent" : ""}>{summary.attention}</b>
           <span>needed attention</span>
-        </div>
+        </button>
       </div>
       <DailyChart days={summary.daily} />
       <div class="agent-bars">
@@ -224,8 +237,8 @@ function ActivityBlock({ summary }: { summary: ActivitySummary }) {
             type="button"
             class="agent-bar"
             key={a.id}
-            title={`${a.total} actions, ${a.attention} needed attention. Show them.`}
-            onClick={() => push({ kind: "activity", agentId: a.id })}
+            title={a.attention ? `${a.attention} of ${a.total} needed attention` : `${a.total} actions`}
+            onClick={() => push(a.attention ? { kind: "activity", agentId: a.id, attention: true } : { kind: "activity", agentId: a.id })}
           >
             <span class="name">
               {a.name}
@@ -235,15 +248,18 @@ function ActivityBlock({ summary }: { summary: ActivitySummary }) {
               <span class="share" style={{ width: `${(a.total / widest) * 100}%` }} />
               <span class="attention" style={{ width: `${(a.attention / widest) * 100}%` }} />
             </span>
-            <span class="agent-count">{a.total}</span>
+            <span class="agent-count">
+              {a.attention ? <b class="accent">{a.attention}</b> : null}
+              {a.attention ? "/" : ""}
+              {a.total}
+            </span>
           </button>
         ))}
       </div>
       <div class="activity-foot">
-        <span class="hint">{summary.mcp.allowed + summary.mcp.denied + summary.mcp.asked ? `MCP: ${mcpBits.join(" · ")}` : "No MCP calls yet"}</span>
-        <Button variant="quiet" onClick={() => push({ kind: "activity" })}>
-          Every action
-        </Button>
+        <button type="button" class="link" onClick={() => push({ kind: "activity" })}>
+          All {summary.total} ›
+        </button>
       </div>
     </>
   );
@@ -284,44 +300,48 @@ export function NowScreen() {
   return (
     <div class="screen">
       <Screen>
-      {nothing ? (
-        <Empty title="Nothing waiting.">
-          New agents and held calls show up here the moment they ask. Your rules decide the rest.
-        </Empty>
-      ) : (
-        <>
-          {requests.map((agent, i) => (
-            <AgentCard key={agent.id} agent={agent} first={i === 0} />
-          ))}
-          {logins.map((signin, i) => (
-            <SignInCard key={signin.id} signin={signin} first={requests.length === 0 && i === 0} />
-          ))}
-          {calls.map((call, i) => (
-            <HoldCard key={call.id} call={call} first={requests.length === 0 && logins.length === 0 && i === 0} />
-          ))}
-        </>
-      )}
-
-      <div class="section activity">
-        <Label
-          right={
-            st ? (
-              <span>
-                {st.servers_running}/{st.servers_total} servers · {st.agent_count} agents
-              </span>
-            ) : null
-          }
-        >
-          Last {summary?.days ?? 7} days
-        </Label>
-        {summary === null ? (
-          <div class="muted small">Loading…</div>
-        ) : summary.total === 0 ? (
-          <div class="muted small">No actions yet. Connect an agent, or set up a host hook under Agents.</div>
+        {nothing ? (
+          <Empty title="Nothing waiting." />
         ) : (
-          <ActivityBlock summary={summary} />
+          <>
+            {requests.map((agent, i) => (
+              <AgentCard key={agent.id} agent={agent} first={i === 0} />
+            ))}
+            {logins.map((signin, i) => (
+              <SignInCard key={signin.id} signin={signin} first={requests.length === 0 && i === 0} />
+            ))}
+            {calls.map((call, i) => (
+              <HoldCard key={call.id} call={call} first={requests.length === 0 && logins.length === 0 && i === 0} />
+            ))}
+          </>
         )}
-      </div>
+
+        <div class="section activity">
+          <Label
+            right={
+              st ? (
+                <span class="counts">
+                  <button type="button" class="link" onClick={() => (tab.value = "servers")}>
+                    {st.servers_running}/{st.servers_total} servers
+                  </button>
+                  {" · "}
+                  <button type="button" class="link" onClick={() => (tab.value = "agents")}>
+                    {st.agent_count} agents
+                  </button>
+                </span>
+              ) : null
+            }
+          >
+            Last {summary?.days ?? 7} days
+          </Label>
+          {summary === null ? (
+            <div class="muted small">Loading…</div>
+          ) : summary.total === 0 ? (
+            <div class="muted small">No actions yet.</div>
+          ) : (
+            <ActivityBlock summary={summary} />
+          )}
+        </div>
       </Screen>
     </div>
   );

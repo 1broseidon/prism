@@ -41,7 +41,6 @@ export function AddServerScreen() {
           </Button>
         }
       >
-        <p class="lede">Prism starts the server for you and hands its tools to every approved agent.</p>
         <div class="fields">
           <label class="field">
             <span>Name</span>
@@ -54,12 +53,12 @@ export function AddServerScreen() {
           <label class="field">
             <span>Arguments</span>
             <input class="input mono" name="args" placeholder="-y @modelcontextprotocol/server-filesystem ~/Projects" />
-            <small>Split on whitespace. Values are kept in your OS credential store.</small>
+            <small>Space-separated.</small>
           </label>
           <label class="field">
             <span>Environment</span>
             <textarea class="input mono" name="env" placeholder={"API_KEY=…\nONE_PER_LINE=true"} />
-            <small>One KEY=value per line. Values are kept in your OS credential store, never shown to agents.</small>
+            <small>KEY=value per line. Stored in your keyring.</small>
           </label>
         </div>
       </Screen>

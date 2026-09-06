@@ -593,13 +593,142 @@ kbd {
 }
 
 .feed .row {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--color-line);
+}
+
+/* The visible line of a row is a button: tap to unfold what it had to cut. */
+.feed .row-main {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr) auto;
   align-items: center;
   column-gap: var(--space-3);
   min-height: var(--row-h);
-  padding: 6px 0;
-  border-bottom: 1px solid var(--color-line);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.feed .row-main:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.feed .row-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: var(--space-3);
+  row-gap: 2px;
+  margin: 4px 0 4px 64px;
+  padding-left: var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.feed .row-details > div {
+  display: contents;
+}
+
+.feed .row-details dt {
+  color: var(--color-ink-3);
+}
+
+.feed .row-details dd {
+  margin: 0;
+  color: var(--color-ink-2);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* Active filters as chips; tapping one drops it. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+}
+
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-ink-3);
+  font: inherit;
+  cursor: pointer;
+}
+
+.filter:hover {
+  color: var(--color-ink);
+}
+
+/* A quiet inline door. */
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-ink-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.link:hover,
+.link:focus-visible {
+  color: var(--color-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  outline: none;
+}
+
+.label .counts .link {
+  font-size: inherit;
+  color: inherit;
+}
+
+.label .counts .link:hover {
+  color: var(--color-ink);
+}
+
+/* Two-tap destructive buttons: armed for 3 s after the first tap. */
+.btn.armed {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  background: color-mix(in oklab, var(--color-danger) 10%, transparent);
+}
+
+button.status {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+button.status:hover {
+  color: var(--color-ink);
+}
+
+.snippet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-2) var(--space-2) 0;
+}
+
+.hold .actions-caption {
+  margin: 6px 0 0;
+  color: var(--color-ink-3);
+  font-size: var(--text-xs);
 }
 
 .feed .row:last-child {
@@ -1298,6 +1427,28 @@ textarea.input {
   color: var(--color-accent);
 }
 
+/* A rule with hits is a door into those rows; it keeps the row's grid. */
+.shadow-rules li > .row-btn {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--space-3);
+  align-items: center;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+}
+
+.shadow-rules .row-btn .mono,
+.shadow-rules .row-btn .shadow-count {
+  grid-area: auto;
+}
+
+.shadow-rules .row-btn:hover .mono {
+  color: var(--color-accent-text);
+}
+
 /* ---- Activity: the week at a glance ------------------------------------------------------ */
 
 .activity-head {
@@ -1310,7 +1461,29 @@ textarea.input {
 .activity-head .stat {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.activity-head .stat:disabled {
+  cursor: default;
+}
+
+.activity-head .stat:not(:disabled):hover span {
+  color: var(--color-ink);
+}
+
+.activity-head .stat:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 4px;
 }
 
 .activity-head .stat b {
@@ -1344,6 +1517,29 @@ textarea.input {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.daily .day:disabled {
+  cursor: default;
+}
+
+.daily .day:not(:disabled):hover .routine {
+  opacity: 0.8;
+}
+
+.daily .day:not(:disabled):hover .lbl {
+  color: var(--color-ink);
+}
+
+.daily .day:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 .daily .bar {
@@ -1462,17 +1658,16 @@ textarea.input {
   font-variant-numeric: tabular-nums;
 }
 
-.activity-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-2);
+.agent-bar .agent-count b {
+  font-weight: 500;
+  color: var(--color-accent-text);
 }
 
-.activity-foot .hint {
-  margin: 0;
-  min-width: 0;
+.activity-foot {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: var(--space-2);
 }
 
 .agent-bar .name .kind {

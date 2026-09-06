@@ -1,3 +1,4 @@
+import { useState } from "preact/hooks";
 import { clock } from "./time";
 import type { AuditEntry } from "./types";
 
@@ -40,35 +41,62 @@ function nativeTool(entry: AuditEntry): string {
   return t;
 }
 
-function NativeRow({ entry }: { entry: AuditEntry }) {
-  const n = entry.native!;
-  const reason = n.would_hold ? `Would have asked: ${n.would_hold.replace(/_/g, " ")}` : undefined;
+const reasonText = (id: string) => id.replace(/_/g, " ");
+
+/** What the row cannot fit: the whole subject, why it was flagged, where and in which session. */
+function Details({ entry }: { entry: AuditEntry }) {
+  const n = entry.native;
+  const lines: [string, string][] = n
+    ? [
+        ["subject", n.subject],
+        ...(n.would_hold ? ([["would have asked", reasonText(n.would_hold)]] as [string, string][]) : []),
+        ...(n.cwd ? ([["in", n.cwd]] as [string, string][]) : []),
+        ...(n.session ? ([["session", n.session.slice(0, 8)]] as [string, string][]) : []),
+      ]
+    : [
+        ["tool", entry.tool],
+        ["server", entry.server_id],
+        ["decided by", sourceText(entry)],
+        ["took", `${entry.duration_ms} ms`],
+        ...(entry.error ? ([["error", entry.error]] as [string, string][]) : []),
+      ];
   return (
-    <div class={`row native ${n.would_hold ? "would-hold" : ""}`} title={reason}>
-      <time dateTime={entry.at}>{clock(entry.at)}</time>
-      <span class="who">
-        <span class={`dot ${n.would_hold ? "accent" : ""}`} />
-        <b>{nativeTool(entry)}</b>
-        <span class="subject">{n.subject}</span>
-      </span>
-      <span class="src">{n.would_hold ? "would ask" : entry.agent_name.toLowerCase()}</span>
-    </div>
+    <dl class="row-details">
+      {lines.map(([k, v]) => (
+        <div key={k}>
+          <dt>{k}</dt>
+          <dd>{v}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
-/** One audit entry as a feed row: a native action seen through a hook, or an MCP call and its verdict. */
+/** One audit entry. Tap to see everything the row had to cut. */
 export function FeedRow({ entry }: { entry: AuditEntry }) {
-  if (entry.native) return <NativeRow entry={entry} />;
+  const [open, setOpen] = useState(false);
+  const n = entry.native;
+  const flagged = n ? !!n.would_hold : entry.verdict === "denied" || entry.source.kind === "human" || entry.source.kind === "timeout";
   return (
-    <div class="row">
-      <time dateTime={entry.at}>{clock(entry.at)}</time>
-      <span class="who">
-        <span class={`dot ${verdictTone(entry)}`} />
-        <b>{entry.agent_name}</b>
-        <code>{entry.tool}</code>
-      </span>
-      <span class="src">{sourceText(entry)}</span>
-      {entry.error ? <span class="err">{entry.error}</span> : null}
+    <div class={`row ${n ? "native" : ""} ${flagged ? "would-hold" : ""} ${open ? "open" : ""}`}>
+      <button type="button" class="row-main" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <time dateTime={entry.at}>{clock(entry.at)}</time>
+        {n ? (
+          <span class="who">
+            <span class={`dot ${n.would_hold ? "accent" : ""}`} />
+            <b>{nativeTool(entry)}</b>
+            <span class="subject">{n.subject}</span>
+          </span>
+        ) : (
+          <span class="who">
+            <span class={`dot ${verdictTone(entry)}`} />
+            <b>{entry.agent_name}</b>
+            <code>{entry.tool}</code>
+          </span>
+        )}
+        <span class="src">{n ? (n.would_hold ? reasonText(n.would_hold) : entry.agent_name.toLowerCase()) : sourceText(entry)}</span>
+      </button>
+      {open ? <Details entry={entry} /> : null}
     </div>
   );
 }

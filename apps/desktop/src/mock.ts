@@ -71,10 +71,16 @@ const nativeStatus = {
   ],
 };
 const nat = (host: string, subject: string, extra: Partial<import("./types").NativeDetail> = {}) => ({ host, subject, cwd: "/home/george/Projects/prism", session: "s-1", via_prism: false, ...extra });
+/** Mirrors prism_core::activity::needs_attention. */
+const needsAttention = (e: AuditEntry) => (e.native ? !!e.native.would_hold : e.source.kind === "human" || e.source.kind === "timeout" || e.verdict === "denied");
+const localDay = (at: string) => {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 /** A week that looks lived in: today's rows come from the feed above, earlier days are made up. */
 function activitySummary(): ActivitySummary {
   const seen = audit.filter((e) => !e.native?.via_prism);
-  const flagged = (e: AuditEntry) => (e.native ? !!e.native.would_hold : e.source.kind === "human" || e.source.kind === "timeout" || e.verdict === "denied");
+  const flagged = needsAttention;
   const byAgent = new Map<string, AgentActivity>();
   for (const e of seen) {
     const a = byAgent.get(e.agent_id) ?? { id: e.agent_id, name: e.agent_name, host: !!e.native, total: 0, attention: 0 };
@@ -217,8 +223,15 @@ export const mock = {
   get_settings: () => delay(settings),
   set_settings: (a: { settings: Settings }) => { settings = { ...a.settings }; return delay(undefined); },
   list_server_tools: (a: { serverId: string }) => delay(tools[a.serverId] ?? []),
-  list_audit: (a: { limit: number; agentId?: string }) =>
-    delay(audit.filter((e) => !a.agentId || e.agent_id === a.agentId).slice(0, a.limit)),
+  list_audit: (a: { limit: number; agentId?: string | null; attention?: boolean | null; day?: string | null; reason?: string | null }) =>
+    delay(
+      audit
+        .filter((e) => !a.agentId || e.agent_id === a.agentId)
+        .filter((e) => !a.attention || needsAttention(e))
+        .filter((e) => !a.day || localDay(e.at) === a.day)
+        .filter((e) => !a.reason || e.native?.would_hold === a.reason)
+        .slice(0, a.limit),
+    ),
   get_activity: () => delay(activitySummary()),
   get_native_status: () => delay(nativeStatus),
   set_observe_native: (a: { on: boolean }) => { nativeStatus.observe_native = a.on; return delay(undefined); },

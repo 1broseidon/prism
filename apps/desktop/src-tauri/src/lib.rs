@@ -694,19 +694,39 @@ async fn list_audit(
     state: State<'_, AppState>,
     limit: Option<usize>,
     agent_id: Option<String>,
+    attention: Option<bool>,
+    day: Option<String>,
+    reason: Option<String>,
 ) -> Result<Vec<prism_core::AuditEntry>, String> {
     let limit = limit.unwrap_or(20);
-    Ok(match agent_id {
-        Some(id) => state
-            .gateway
-            .audit(usize::MAX)
-            .await
-            .into_iter()
-            .filter(|entry| entry.agent_id == id)
-            .take(limit)
-            .collect(),
-        None => state.gateway.audit(limit).await,
-    })
+    let attention = attention.unwrap_or(false);
+    if agent_id.is_none() && !attention && day.is_none() && reason.is_none() {
+        return Ok(state.gateway.audit(limit).await);
+    }
+    Ok(state
+        .gateway
+        .audit(usize::MAX)
+        .await
+        .into_iter()
+        .filter(|entry| agent_id.as_deref().is_none_or(|id| entry.agent_id == id))
+        .filter(|entry| !attention || prism_core::activity::needs_attention(entry))
+        .filter(|entry| {
+            day.as_deref().is_none_or(|day| {
+                entry
+                    .at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string()
+                    == day
+            })
+        })
+        .filter(|entry| {
+            reason.as_deref().is_none_or(|reason| {
+                entry.native.as_ref().and_then(|n| n.would_hold.as_deref()) == Some(reason)
+            })
+        })
+        .take(limit)
+        .collect())
 }
 
 #[tauri::command]
@@ -1056,7 +1076,7 @@ async fn handle_gateway_event(app: &AppHandle, gateway: &Gateway, event: &Gatewa
             attention(app, gateway, &body).await;
         }
         GatewayEvent::AgentRequested(agent) => {
-            let body = format!("{} wants to connect to Prism", agent.name);
+            let body = format!("{} wants to connect", agent.name);
             attention(app, gateway, &body).await;
         }
         GatewayEvent::SignInRequested(signin) => {

@@ -41,15 +41,14 @@ export function ConnectAgentScreen() {
       <Screen footer={mode === "manual" ? <Button variant="primary" type="submit" form="manual-client" busy={busy} disabled={busy}>Create token</Button> : undefined}>
         <Segmented label="Connection method" value={mode} options={[{ value: "oauth", label: "OAuth sign-in" }, { value: "manual", label: "Manual token" }]} onChange={setMode} />
         {mode === "oauth" ? <>
-          <p class="lede">Give your MCP client this URL. It opens a sign-in, and you approve it here before it gets access.</p>
+          <p class="lede">Add to your client. Approve it here when it signs in.</p>
           {snippet ? <>
             <section class="section"><Label>URL</Label><CodeBlock text={snippet.url} copyable /></section>
             <section class="section"><Label>mcp.json</Label><CodeBlock text={snippet.mcp_json} copyable /></section>
           </> : null}
         </> : <form id="manual-client" onSubmit={create}>
-          <p class="lede">For clients that support a bearer token or custom HTTP headers. Create a token here, then paste it into your client.</p>
           <label class="field"><span>Client name</span><input class="input" required maxLength={80} name="name" placeholder="My script" /></label>
-          <p class="hint">Creating a token approves this client. Its first use of each tool will ask you for permission.</p>
+          <p class="hint">Creating the token approves the client.</p>
         </form>}
       </Screen>
     </div>

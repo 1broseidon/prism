@@ -1,7 +1,7 @@
 import * as api from "../api";
 import { errorMessage, push, servers, status } from "../state";
 import type { BackendStatus } from "../types";
-import { Button, Chip, Empty, Label, Screen, describeError } from "../ui";
+import { Button, Chip, ConfirmButton, Empty, Label, Screen, describeError } from "../ui";
 
 function statusChip(s: BackendStatus) {
   switch (s.kind) {
@@ -38,7 +38,7 @@ export function ServersScreen() {
       <Screen footer={<Button onClick={() => push({ kind: "add-server" })}>Add server</Button>}>
         <Label right={<span>{list.length}</span>}>MCP servers</Label>
         {list.length === 0 ? (
-          <Empty title="No servers yet.">Add the MCP servers you already use. Prism starts them and hands their tools to every agent.</Empty>
+          <Empty title="No servers yet." />
         ) : (
           <div class="list">
             {list.map((server) => (
@@ -51,12 +51,12 @@ export function ServersScreen() {
                   <Button variant="quiet" onClick={() => void act(() => api.restartServer(server.id))}>
                     Restart
                   </Button>
-                  <Button variant="quiet" class="danger" onClick={() => void act(() => api.removeServer(server.id))}>
+                  <ConfirmButton variant="quiet" class="danger" confirm="Remove?" onConfirm={() => void act(() => api.removeServer(server.id))}>
                     Remove
-                  </Button>
+                  </ConfirmButton>
                 </div>
                 <div class="sub truncate" title={server.command}>
-                  {server.command}{server.credentials_stored ? " · launch settings secured" : ""}
+                  {server.command}
                 </div>
                 {server.status.kind === "failed" ? <div class="sub danger">{server.status.error}</div> : null}
               </div>

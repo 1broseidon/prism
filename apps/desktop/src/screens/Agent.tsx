@@ -5,7 +5,7 @@ import { ATTENTIONS, POSTURES, findRule, setAccess } from "../policy";
 import { agents, errorMessage, pop, push, rules, servers, status } from "../state";
 import { relative, remaining } from "../time";
 import type { AgentConfig, Attention, Posture, Rule, RuleDecision, ManualToken } from "../types";
-import { Button, Chip, Label, Screen, Segmented, describeError } from "../ui";
+import { Button, Chip, ConfirmButton, Label, Screen, Segmented, describeError } from "../ui";
 
 async function refresh() {
   agents.value = await api.listAgents();
@@ -70,9 +70,9 @@ export function AgentScreen({ agentId }: { agentId: string }) {
 
   const footer =
     agent.status === "approved" ? (
-      <Button variant="danger" onClick={() => void act(() => api.decideAgent(agent.id, false))}>
+      <ConfirmButton variant="danger" confirm="Revoke?" onConfirm={() => void act(() => api.decideAgent(agent.id, false))}>
         Revoke access
-      </Button>
+      </ConfirmButton>
     ) : agent.status === "pending" ? (
       <>
         <Button variant="danger" onClick={() => void act(() => api.decideAgent(agent.id, false))}>
@@ -84,9 +84,10 @@ export function AgentScreen({ agentId }: { agentId: string }) {
       </>
     ) : (
       <>
-        <Button
+        <ConfirmButton
           variant="danger"
-          onClick={() =>
+          confirm="Forget?"
+          onConfirm={() =>
             void act(async () => {
               await api.removeAgent(agent.id);
               pop();
@@ -94,7 +95,7 @@ export function AgentScreen({ agentId }: { agentId: string }) {
           }
         >
           Forget
-        </Button>
+        </ConfirmButton>
         <Button variant="primary" onClick={() => void act(() => api.decideAgent(agent.id, true))}>
           Approve
         </Button>
@@ -121,45 +122,44 @@ export function AgentScreen({ agentId }: { agentId: string }) {
             <div class="list">
               <div class="setting">
                 <div>
-                  <div class="setting-title">{signedIn ? "Signed in with OAuth" : agent.status === "approved" ? "Approved, not signed in yet" : "Waiting to sign in"}</div>
-                  <div class="hint">
-                    {signedIn
-                      ? [
-                          access.length > 0 ? `access ${remaining(access[access.length - 1].expires_at!)} left` : "access expired",
-                          refreshes.length > 0 ? `refresh ${remaining(refreshes[refreshes.length - 1].expires_at!)} left` : null,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")
-                      : "Tokens appear here once the client finishes the OAuth flow."}
-                  </div>
+                  <div class="setting-title">{signedIn ? "Signed in" : "Not signed in"}</div>
+                  {signedIn ? (
+                    <div class="hint">
+                      {[
+                        access.length > 0 ? `access ${remaining(access[access.length - 1].expires_at!)} left` : "access expired",
+                        refreshes.length > 0 ? `refresh ${remaining(refreshes[refreshes.length - 1].expires_at!)} left` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </div>
+                  ) : null}
                 </div>
                 {signedIn ? (
-                  <Button variant="quiet" class="danger" onClick={() => void act(() => api.revokeAgentTokens(agent.id))}>
+                  <ConfirmButton variant="quiet" class="danger" confirm="Sign out?" onConfirm={() => void act(() => api.revokeAgentTokens(agent.id))}>
                     Sign out
-                  </Button>
+                  </ConfirmButton>
                 ) : null}
               </div>
             </div>
           ) : (
             <>
-              <p class="hint">{signedIn ? "One manual token is active. It works until revoked or replaced." : "This client needs a token before it can connect. Existing tool permissions are preserved."}</p>
-              {agent.status === "approved" ? <>
+              {signedIn ? null : <p class="hint">Needs a token.</p>}
+              {agent.status === "approved" ? <div class="actions update-actions">
                 <Button busy={tokenBusy} onClick={() => void replaceToken()}>{signedIn ? "Replace token" : "Create token"}</Button>
-                {signedIn ? <Button variant="quiet" class="danger" onClick={() => void act(() => api.revokeAgentTokens(agent.id))}>Revoke token</Button> : null}
-                {signedIn ? <p class="hint">Replacing the token immediately stops the old one from working.</p> : null}
-              </> : <p class="hint">Approve this client before creating a token.</p>}
+                {signedIn ? <ConfirmButton variant="quiet" class="danger" confirm="Revoke?" onConfirm={() => void act(() => api.revokeAgentTokens(agent.id))}>Revoke token</ConfirmButton> : null}
+              </div> : <p class="hint">Approve first.</p>}
             </>
           )}
         </section>
 
         <section class="section">
-          <Label>When no rule matches</Label>
+          <Label>Posture</Label>
           <Segmented label="Posture" value={agent.posture} options={POSTURES} onChange={(posture) => setPolicy({ posture })} />
           <p class="hint">{postureHint}</p>
         </section>
 
         <section class="section">
-          <Label>Tell me about its calls</Label>
+          <Label>Attention</Label>
           <Segmented label="Attention" value={agent.attention} options={ATTENTIONS} onChange={(attention) => setPolicy({ attention })} />
           <p class="hint">{attentionHint}</p>
         </section>
@@ -167,7 +167,7 @@ export function AgentScreen({ agentId }: { agentId: string }) {
         <section class="section">
           <Label right={<span>{servers.value.length}</span>}>Servers</Label>
           {servers.value.length === 0 ? (
-            <p class="hint">No servers yet. Add one under Servers and it shows up here.</p>
+            <p class="hint">No servers yet.</p>
           ) : (
             <div class="list">
               {servers.value.map((server) => {
@@ -212,7 +212,7 @@ export function AgentScreen({ agentId }: { agentId: string }) {
         <section class="section">
           <Label right={<span>{grants.length}</span>}>Grants</Label>
           {grants.length === 0 ? (
-            <p class="hint">Answers you asked Prism to remember land here, with their time boxes.</p>
+            <p class="hint">None.</p>
           ) : (
             <div class="list">
               {grants.map((rule) => (
@@ -225,9 +225,9 @@ export function AgentScreen({ agentId }: { agentId: string }) {
                     </span>
                   </div>
                   <div class="side">
-                    <Button variant="quiet" class="danger" onClick={() => void act(async () => { await api.deleteRule(rule.id); rules.value = await api.listRules(); })}>
+                    <ConfirmButton variant="quiet" class="danger" confirm="Remove?" onConfirm={() => void act(async () => { await api.deleteRule(rule.id); rules.value = await api.listRules(); })}>
                       Remove
-                    </Button>
+                    </ConfirmButton>
                   </div>
                   <div class="sub">
                     {rule.expires_at ? `${remaining(rule.expires_at)} left` : rule.scope === "session" ? "this session" : "always"}

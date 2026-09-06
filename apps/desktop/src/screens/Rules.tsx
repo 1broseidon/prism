@@ -2,7 +2,7 @@ import * as api from "../api";
 import { agents, errorMessage, rules, servers } from "../state";
 import { relative, remaining } from "../time";
 import type { Rule } from "../types";
-import { Button, Chip, Empty, Label, Screen, describeError } from "../ui";
+import { Chip, ConfirmButton, Empty, Label, Screen, describeError } from "../ui";
 
 function nameOf(list: { id: string; name: string }[], id: string | null): string {
   if (!id) return "any";
@@ -34,7 +34,7 @@ export function RulesScreen() {
       <Screen>
       <Label right={<span>{list.length}</span>}>Rules</Label>
       {list.length === 0 ? (
-        <Empty title="No rules yet.">Every remembered answer and every setting you make on an agent lands here. Session rules vanish when Prism quits.</Empty>
+        <Empty title="No rules yet." />
       ) : (
         <div class="list">
           {list.map((rule) => (
@@ -45,9 +45,9 @@ export function RulesScreen() {
                 {rule.attention ? <Chip tone="accent">{rule.attention}</Chip> : null}
               </div>
               <div class="side">
-                <Button variant="quiet" class="danger" onClick={() => void remove(rule.id)}>
+                <ConfirmButton variant="quiet" class="danger" confirm="Delete?" onConfirm={() => void remove(rule.id)}>
                   Delete
-                </Button>
+                </ConfirmButton>
               </div>
               <div class="sub truncate">
                 {nameOf(agents.value, rule.agent_id)} · {nameOf(servers.value, rule.server_id)} · {rule.tool ?? "any tool"} · {relative(rule.created_at)}

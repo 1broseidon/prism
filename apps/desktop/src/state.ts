@@ -26,8 +26,6 @@ export const activity = signal<ActivitySummary | null>(null);
 export const lastCreatedSnippet = signal<ConnectSnippet | null>(null);
 /** Coverage and this week's counts for native actions. Null until loaded. */
 export const native = signal<NativeStatus | null>(null);
-/** Which rows the Recent feed shows. */
-export const feedFilter = signal<"all" | "mcp" | "native">("all");
 export const lastCreatedAgentId = signal<string | null>(null);
 export const errorMessage = signal<string | null>(null);
 /** A newer release, once a check has found one. Drives the dot on the settings button. */
@@ -38,6 +36,16 @@ export const updateProgress = signal<UpdateEvent | null>(null);
 export type Tab = "now" | "servers" | "agents" | "rules";
 const TABS: Tab[] = ["now", "servers", "agents", "rules"];
 
+/** What the Actions list is narrowed to. Every field is a chip the reader can drop. */
+export interface ActivityFilter {
+  agentId?: string;
+  attention?: boolean;
+  /** Local calendar day, YYYY-MM-DD. */
+  day?: string;
+  /** A would-have-asked rule id. */
+  reason?: string;
+}
+
 /** Screens pushed on top of a tab, phone-style. Each owns the whole panel until it is popped. */
 export type Screen =
   | { kind: "add-server" }
@@ -45,7 +53,7 @@ export type Screen =
   | { kind: "agent"; agentId: string }
   | { kind: "agent-server"; agentId: string; serverId: string }
   | { kind: "host"; agentId: string }
-  | { kind: "activity"; agentId?: string }
+  | ({ kind: "activity" } & ActivityFilter)
   | { kind: "settings" };
 export const stack = signal<Screen[]>([]);
 
@@ -55,6 +63,11 @@ export function push(screen: Screen): void {
 
 export function pop(): void {
   stack.value = stack.value.slice(0, -1);
+}
+
+/** Swap the top screen in place, for a screen that re-narrows itself. */
+export function replace(screen: Screen): void {
+  stack.value = [...stack.value.slice(0, -1), screen];
 }
 
 /** Dev affordance: `#servers/add` or `#agents/connect` opens a tab with a screen already pushed. */

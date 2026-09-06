@@ -16,16 +16,15 @@ export function ManualTokenDetails({ issued, onDone }: { issued: ManualToken; on
   return (
     <div class="screen pushed">
       <Screen footer={<Button variant="primary" onClick={onDone}>Done</Button>}>
-        <p class="lede">Copy this token now. Prism cannot show it again after you leave this screen.</p>
+        <p class="lede">Shown once. Copy it now.</p>
         <section class="section">
           <Label>API key</Label>
           <CodeBlock text={issued.token} copyable />
-          <p class="hint">Works until you revoke or replace it. Your agent's tool permissions still apply.</p>
         </section>
         {url ? <section class="section">
           <Label>Connection settings</Label>
           <CodeBlock text={JSON.stringify({ mcpServers: { prism: { url, headers: { Authorization: `Bearer ${issued.token}` } } } }, null, 2)} copyable />
-          <p class="hint">For clients that accept custom HTTP headers. If it has a bearer-token field, paste only the token.</p>
+          <p class="hint">Bearer-token field? Paste only the token.</p>
         </section> : null}
       </Screen>
     </div>
