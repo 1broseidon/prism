@@ -133,11 +133,11 @@ export const mock = {
   get_update_status: () =>
     delay({
       current: "0.2.0",
-      available: { version: "0.3.0", current: "0.2.0", notes: "Example release notes.", date: null, installable: true },
+      available: { version: "0.3.0", current: "0.2.0", notes: "### Added\n- Built-in updater. Prism checks the latest release after launch and every six hours, and **Settings → Updates** installs it in place.\n\n### Fixed\n- Linux: the deb desktop entry had no category, so Cinnamon did not list Prism. It now sits under Development. See `prism.json` for the rest.", date: null, installable: true },
       checked_at: new Date().toISOString(),
       installable: true,
     }),
-  check_update: () => delay({ version: "0.3.0", current: "0.2.0", notes: "Example release notes.", date: null, installable: true }),
+  check_update: () => delay({ version: "0.3.0", current: "0.2.0", notes: "### Added\n- Built-in updater. Prism checks the latest release after launch and every six hours, and **Settings → Updates** installs it in place.\n\n### Fixed\n- Linux: the deb desktop entry had no category, so Cinnamon did not list Prism. It now sits under Development. See `prism.json` for the rest.", date: null, installable: true }),
   install_update: () => delay(undefined),
   get_connect_snippet: (): Promise<ConnectSnippet> =>
     delay({

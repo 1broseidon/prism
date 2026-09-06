@@ -1106,9 +1106,54 @@ textarea.input {
 
 .update-notes {
   margin-top: 6px;
-  white-space: pre-wrap;
-  max-height: 120px;
+  max-height: 160px;
   overflow: auto;
+  color: var(--color-ink-3);
+  font-size: var(--text-sm);
+  text-wrap: pretty;
+}
+
+.update-notes .notes-heading {
+  margin-top: 8px;
+  color: var(--color-ink-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.update-notes .notes-heading:first-child {
+  margin-top: 0;
+}
+
+.update-notes p {
+  margin: 4px 0 0;
+}
+
+.update-notes ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+
+.update-notes li + li {
+  margin-top: 3px;
+}
+
+.update-notes code {
+  color: var(--color-ink-2);
+  font-size: var(--text-xs);
+}
+
+.update-link {
+  display: inline-block;
+  margin-top: 6px;
+  color: var(--color-accent);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.update-link:hover {
+  text-decoration: underline;
 }
 
 .update .hint {

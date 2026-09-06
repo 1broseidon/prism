@@ -1,3 +1,4 @@
+import type * as preact from "preact";
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { errorMessage, status, update, updateProgress } from "../state";
@@ -5,6 +6,51 @@ import type { Settings, UpdateStatus } from "../types";
 import { Button, Label, Screen, Segmented, Switch, describeError } from "../ui";
 
 const RELEASES_URL = "https://github.com/1broseidon/prism/releases/latest";
+const releaseUrl = (version: string) => `https://github.com/1broseidon/prism/releases/tag/v${version}`;
+
+/** Inline markdown from the changelog: code spans, bold, links reduced to their text. */
+function inline(text: string) {
+  const out: preact.ComponentChildren[] = [];
+  const re = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\([^)]*\)/g;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index! > last) out.push(text.slice(last, m.index));
+    if (m[1] !== undefined) out.push(<code>{m[1]}</code>);
+    else if (m[2] !== undefined) out.push(<strong>{m[2]}</strong>);
+    else out.push(m[3]);
+    last = m.index! + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/** Release notes are the changelog section: `### Added` headings and `- ` bullets, nothing fancier. */
+function Notes({ text }: { text: string }) {
+  const blocks: preact.ComponentChildren[] = [];
+  let items: string[] = [];
+  const flush = () => {
+    if (items.length) blocks.push(<ul>{items.map((item) => <li>{inline(item)}</li>)}</ul>);
+    items = [];
+  };
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const heading = /^#{1,6}\s+(.*)$/.exec(line);
+    const bullet = /^[-*]\s+(.*)$/.exec(line);
+    if (heading) {
+      flush();
+      blocks.push(<div class="notes-heading">{heading[1]}</div>);
+    } else if (bullet) {
+      items.push(bullet[1]);
+    } else if (items.length) {
+      items[items.length - 1] += ` ${line}`;
+    } else {
+      blocks.push(<p>{inline(line)}</p>);
+    }
+  }
+  flush();
+  return <div class="update-notes">{blocks}</div>;
+}
 
 function mb(bytes: number): string {
   return `${(bytes / 1_000_000).toFixed(1)} MB`;
@@ -54,7 +100,10 @@ function UpdatesSection() {
       {available ? (
         <div class="update">
           <div class="update-title">Prism {available.version} is ready</div>
-          {available.notes ? <p class="hint update-notes">{available.notes}</p> : null}
+          {available.notes ? <Notes text={available.notes} /> : null}
+          <a class="update-link" href={releaseUrl(available.version)} target="_blank" rel="noreferrer">
+            Full release notes
+          </a>
           {progress?.state === "downloading" ? (
             <div class="update-progress" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total ?? undefined} aria-valuenow={progress.downloaded}>
               <span style={{ width: progress.total ? `${Math.min(100, (progress.downloaded / progress.total) * 100)}%` : "30%" }} />
