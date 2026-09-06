@@ -91,9 +91,15 @@ pub struct PendingSignIn {
     pub agent_id: String,
     pub agent_name: String,
     pub client_name: String,
+    #[serde(default)]
+    pub client_id: String,
     pub requested_at: DateTime<Utc>,
     /// True when the agent was already approved, so this needs its own answer.
     pub needs_consent: bool,
+    /// True when this client has never held a token: a harness connecting from a new scope or
+    /// install rather than the same one signing in again.
+    #[serde(default)]
+    pub new_client: bool,
 }
 
 struct SignInEntry {
@@ -149,10 +155,15 @@ struct RateLimits {
 
 fn decided_clients(config: &crate::config::PrismConfig) -> HashSet<String> {
     config
-        .agents
+        .clients
         .iter()
-        .filter(|agent| agent.status != AgentStatus::Pending)
-        .filter_map(|agent| agent.client_id.clone())
+        .filter(|client| {
+            config
+                .client_agent_id(&client.client_id)
+                .and_then(|id| config.agents.iter().find(|a| a.id == id))
+                .is_some_and(|agent| agent.status != AgentStatus::Pending)
+        })
+        .map(|client| client.client_id.clone())
         .collect()
 }
 
@@ -169,14 +180,15 @@ pub(crate) fn prune_unused_clients(config: &mut crate::config::PrismConfig, now:
     config
         .clients
         .retain(|client| !removed.contains(&client.client_id));
+    // An agent goes with its clients only when every client it had is gone and it is not a
+    // harness record, which outlives any one registration.
     let removed_agents: HashSet<String> = config
         .agents
         .iter()
+        .filter(|agent| agent.host.is_none())
         .filter(|agent| {
-            agent
-                .client_id
-                .as_ref()
-                .is_some_and(|id| removed.contains(id))
+            let ids = config.agent_client_ids(&agent.id);
+            !ids.is_empty() && ids.iter().all(|id| removed.contains(id))
         })
         .map(|agent| agent.id.clone())
         .collect();
@@ -482,7 +494,7 @@ impl Gateway {
             .iter()
             .find(|a| a.id == agent_id)
             .ok_or_else(|| Error::NotFound(format!("agent {agent_id}")))?;
-        if agent.client_id.is_some() || agent.status != AgentStatus::Approved {
+        if !config.agent_client_ids(agent_id).is_empty() || agent.status != AgentStatus::Approved {
             return Err(Error::Invalid(
                 "tokens can only be created for approved manual clients".into(),
             ));
@@ -546,6 +558,8 @@ impl Gateway {
             client_name: name,
             redirect_uris: req.redirect_uris,
             created_at: Utc::now(),
+            agent_id: None,
+            origin: None,
         };
         let mut config = self.config.write().await;
         let mut updated = config.clone();
@@ -629,12 +643,9 @@ impl Gateway {
             let mut signins = self.oauth.signins.lock().expect("sign-in lock poisoned");
             self.prune_signins(&mut signins);
             if signins.len() >= MAX_PENDING_SIGNINS
-                || config.agents.iter().any(|agent| {
-                    agent.client_id.as_deref() == Some(client_id)
-                        && signins
-                            .values()
-                            .any(|entry| entry.view.agent_id == agent.id)
-                })
+                || signins
+                    .values()
+                    .any(|entry| entry.view.client_id == client_id)
             {
                 return fail(
                     "temporarily_unavailable",
@@ -650,13 +661,19 @@ impl Gateway {
                 return fail("server_error", "could not save the agent request");
             }
             let (tx, rx) = oneshot::channel();
+            let new_client = !config
+                .tokens
+                .iter()
+                .any(|t| t.client_id.as_deref() == Some(client_id));
             let signin = PendingSignIn {
                 id: uuid::Uuid::new_v4().to_string(),
                 agent_id: agent.id.clone(),
                 agent_name: agent.name.clone(),
                 client_name: client.client_name.clone(),
+                client_id: client_id.to_string(),
                 requested_at: Utc::now(),
                 needs_consent: agent.status == AgentStatus::Approved,
+                new_client,
             };
             signins.insert(
                 signin.id.clone(),
@@ -1019,15 +1036,36 @@ impl Gateway {
 
     /// Drop an agent's tokens and its client registration without touching the agent record.
     pub(crate) fn forget_credentials(config: &mut crate::config::PrismConfig, agent_id: &str) {
-        let client_id = config
-            .agents
-            .iter()
-            .find(|a| a.id == agent_id)
-            .and_then(|a| a.client_id.clone());
+        let client_ids = config.agent_client_ids(agent_id);
         config.tokens.retain(|t| t.agent_id != agent_id);
-        if let Some(client_id) = client_id {
+        config
+            .clients
+            .retain(|c| !client_ids.contains(&c.client_id));
+    }
+
+    /// Drop one client registration and its tokens, leaving the agent and its other clients.
+    /// A harness that registered from a project you no longer use is forgotten this way.
+    pub async fn forget_client(&self, agent_id: &str, client_id: &str) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            if config.client_agent_id(client_id).as_deref() != Some(agent_id) {
+                return Err(Error::NotFound(format!("client {client_id}")));
+            }
+            config
+                .tokens
+                .retain(|t| t.client_id.as_deref() != Some(client_id));
             config.clients.retain(|c| c.client_id != client_id);
+            if let Some(agent) = config.agents.iter_mut().find(|a| a.id == agent_id) {
+                if agent.client_id.as_deref() == Some(client_id) {
+                    agent.client_id = None;
+                }
+            }
+            config.save(&self.config_path)?;
         }
+        let _ = self.events.send(GatewayEvent::AgentUpdated {
+            agent_id: agent_id.to_string(),
+        });
+        Ok(())
     }
 
     pub async fn agent_tokens(&self, agent_id: &str) -> Vec<TokenView> {
@@ -1331,6 +1369,8 @@ mod tests {
                 client_name: format!("Client {i}"),
                 redirect_uris: vec!["http://localhost/cb".into()],
                 created_at: Utc::now(),
+                agent_id: None,
+                origin: None,
             });
         }
         config.save(&path).unwrap();

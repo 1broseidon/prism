@@ -7,7 +7,6 @@ import { AgentToolsScreen } from "./screens/AgentTools";
 import { ActivityScreen } from "./screens/Activity";
 import { AgentsScreen } from "./screens/Agents";
 import { ConnectAgentScreen } from "./screens/ConnectAgent";
-import { HostScreen } from "./screens/Host";
 import { hostName } from "./hosts";
 import { NowScreen } from "./screens/Now";
 import { RulesScreen } from "./screens/Rules";
@@ -157,7 +156,7 @@ export function App() {
         {top?.kind === "connect-agent" ? <ConnectAgentScreen /> : null}
         {top?.kind === "settings" ? <SettingsScreen /> : null}
         {top?.kind === "agent" ? <AgentScreen agentId={top.agentId} /> : null}
-        {top?.kind === "host" ? <HostScreen agentId={top.agentId} /> : null}
+        {top?.kind === "host" ? <AgentScreen agentId={top.agentId} /> : null}
         {top?.kind === "activity" ? <ActivityScreen filter={top} /> : null}
         {top?.kind === "agent-server" ? <AgentToolsScreen agentId={top.agentId} serverId={top.serverId} /> : null}
         {!top && tab.value === "now" ? <NowScreen /> : null}

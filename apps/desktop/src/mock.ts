@@ -28,22 +28,21 @@ const servers: ServerView[] = [
   { id: "s5", name: "cloudflare docs", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "running", tool_count: 2 }, url: "https://docs.mcp.cloudflare.com/mcp", auth: "none" },
 ];
 const agents: AgentConfig[] = [
-  { id: "host:claude-code", name: "Claude Code", client_name: "claude-code", client_version: null, status: "approved", created_at: iso(3600 * 30), decided_at: iso(3600 * 30), posture: "trusted", attention: "silent", client_id: null, host: "claude-code", connected: false, tokens: [] },
-  { id: "host:codex", name: "Codex", client_name: "codex", client_version: null, status: "approved", created_at: iso(3600 * 20), decided_at: iso(3600 * 20), posture: "trusted", attention: "silent", client_id: null, host: "codex", connected: false, tokens: [] },
-  { id: "a1", name: "claude-code", client_name: "claude-code", client_version: "2.1.14", status: "approved", created_at: iso(3600 * 26), decided_at: iso(3600 * 26), posture: "guided", attention: "badge", client_id: "c-claude", connected: true, tokens: [{ kind: "access", created_at: iso(1200), expires_at: iso(-2400) }, { kind: "refresh", created_at: iso(3600 * 26), expires_at: iso(-3600 * 24 * 29) }] },
-  { id: "a2", name: "cursor", client_name: "cursor", client_version: "1.7.0", status: "approved", created_at: iso(600), decided_at: iso(590), posture: "first_use", attention: "silent", client_id: "c-cursor", connected: false, tokens: [{ kind: "refresh", created_at: iso(600), expires_at: iso(-3600 * 24 * 30) }] },
-  { id: "a3", name: "codex-cli", client_name: "codex-cli", client_version: "0.42.0", status: "pending", created_at: iso(12), decided_at: null, posture: "first_use", attention: "silent", client_id: "c-codex", connected: false, tokens: [] },
-  { id: "a4", name: "some-random-script", client_name: "some-random-script", client_version: null, status: "denied", created_at: iso(3600 * 50), decided_at: iso(3600 * 50), posture: "supervised", attention: "silent", client_id: null, connected: false, tokens: [] },
+  { id: "host:claude-code", name: "Claude Code", client_name: "claude-code", client_version: "2.1.14", status: "approved", created_at: iso(3600 * 30), decided_at: iso(3600 * 30), posture: "guided", attention: "badge", client_id: null, host: "claude-code", connected: true, tokens: [{ kind: "access", created_at: iso(1200), expires_at: iso(-2400) }, { kind: "refresh", created_at: iso(3600 * 26), expires_at: iso(-3600 * 24 * 29) }, { kind: "refresh", created_at: iso(3600 * 3), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-claude-user", client_name: "Claude Code", created_at: iso(3600 * 26), origin: null, signed_in: true }, { client_id: "c-claude-prism", client_name: "Claude Code", created_at: iso(3600 * 3), origin: null, signed_in: true }, { client_id: "c-claude-recoil", client_name: "claude-code", created_at: iso(900), origin: null, signed_in: false }] },
+  { id: "host:codex", name: "Codex", client_name: "codex", client_version: "0.42.0", status: "approved", created_at: iso(3600 * 20), decided_at: iso(3600 * 20), posture: "first_use", attention: "silent", client_id: null, host: "codex", connected: false, tokens: [{ kind: "refresh", created_at: iso(3600 * 20), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-codex", client_name: "Codex", created_at: iso(3600 * 20), origin: null, signed_in: true }] },
+  { id: "a2", name: "cursor", client_name: "cursor", client_version: "1.7.0", status: "approved", created_at: iso(600), decided_at: iso(590), posture: "first_use", attention: "silent", client_id: "c-cursor", connected: false, tokens: [{ kind: "refresh", created_at: iso(600), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-cursor", client_name: "cursor", created_at: iso(600), origin: null, signed_in: true }] },
+  { id: "a3", name: "Toad MCP Gateway", client_name: "Toad MCP Gateway", client_version: "0.1.0", status: "pending", created_at: iso(12), decided_at: null, posture: "first_use", attention: "silent", client_id: "c-toad", connected: false, tokens: [], clients: [{ client_id: "c-toad", client_name: "Toad MCP Gateway", created_at: iso(12), origin: null, signed_in: false }] },
+  { id: "a4", name: "some-random-script", client_name: "some-random-script", client_version: null, status: "denied", created_at: iso(3600 * 50), decided_at: iso(3600 * 50), posture: "supervised", attention: "silent", client_id: null, connected: false, tokens: [], clients: [] },
 ];
 let pending: PendingCall[] = [
-  { id: "p1", agent_id: "a1", agent_name: "Claude Code", server_id: "s1", server_name: "filesystem", tool: "write_file", arguments: { path: "/home/george/Projects/prism/README.md", content: "# Prism\n\nA local MCP gateway…" }, requested_at: iso(23), deadline: iso(-97), posture: "guided", reason: "policy" },
+  { id: "p1", agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", server_name: "filesystem", tool: "write_file", arguments: { path: "/home/george/Projects/prism/README.md", content: "# Prism\n\nA local MCP gateway…" }, requested_at: iso(23), deadline: iso(-97), posture: "guided", reason: "policy" },
 ];
 let rules: Rule[] = [
-  { id: "r1", agent_id: "a1", server_id: "s1", tool: "read_file", decision: "allow", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 5) },
+  { id: "r1", agent_id: "host:claude-code", server_id: "s1", tool: "read_file", decision: "allow", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 5) },
   { id: "r2", agent_id: "a2", server_id: "s2", tool: "create_issue", decision: "allow", attention: null, scope: "session", expires_at: null, created_at: iso(300) },
   { id: "r3", agent_id: null, server_id: "s3", tool: null, decision: "deny", attention: "notify", scope: "always", expires_at: null, created_at: iso(3600 * 30) },
-  { id: "r4", agent_id: "a1", server_id: "s2", tool: null, decision: "allow", attention: null, scope: "always", expires_at: iso(-60 * 24), created_at: iso(360) },
-  { id: "r5", agent_id: "a1", server_id: "s1", tool: "delete_*", decision: "ask", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 2) },
+  { id: "r4", agent_id: "host:claude-code", server_id: "s2", tool: null, decision: "allow", attention: null, scope: "always", expires_at: iso(-60 * 24), created_at: iso(360) },
+  { id: "r5", agent_id: "host:claude-code", server_id: "s1", tool: "delete_*", decision: "ask", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 2) },
 ];
 const HOOK_TOKEN = "k3Jx9v2mQd8sT1uWbC4eF6gH7iJ0lM_nO-pQrStUvWx";
 const nativeStatus = {
@@ -136,16 +135,16 @@ let audit: AuditEntry[] = [
   { id: "n6", at: iso(1800), agent_id: "host:codex", agent_name: "Codex", server_id: "codex", tool: "apply_patch", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("codex", "src/lib.rs, README.md") },
   { id: "n4", at: iso(300), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "WebFetch", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "https://code.claude.com") },
   { id: "n5", at: iso(320), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "mcp__prism__filesystem__read_file", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "mcp__prism__filesystem__read_file", { via_prism: true }) },
-  { id: "e1", at: iso(40), agent_id: "a1", agent_name: "Claude Code", server_id: "s1", tool: "read_file", verdict: "allowed", source: { kind: "rule", rule_id: "r1" }, duration_ms: 12, error: null, attention: "silent" },
+  { id: "e1", at: iso(40), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", tool: "read_file", verdict: "allowed", source: { kind: "rule", rule_id: "r1" }, duration_ms: 12, error: null, attention: "silent" },
   { id: "e2", at: iso(95), agent_id: "a2", agent_name: "Cursor", server_id: "s2", tool: "create_issue", verdict: "allowed", source: { kind: "human" }, duration_ms: 840, error: null, attention: "silent" },
-  { id: "e3", at: iso(200), agent_id: "a1", agent_name: "Claude Code", server_id: "s3", tool: "query", verdict: "denied", source: { kind: "rule", rule_id: "r3" }, duration_ms: 1, error: null, attention: "notify" },
+  { id: "e3", at: iso(200), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s3", tool: "query", verdict: "denied", source: { kind: "rule", rule_id: "r3" }, duration_ms: 1, error: null, attention: "notify" },
   { id: "e4", at: iso(500), agent_id: "a2", agent_name: "Cursor", server_id: "s1", tool: "delete_file", verdict: "timeout", source: { kind: "timeout" }, duration_ms: 120000, error: null, attention: "badge" },
   { id: "e0", at: iso(10), agent_id: "a3", agent_name: "codex-cli", server_id: "", tool: "filesystem__read_file", verdict: "denied", source: { kind: "unapproved" }, duration_ms: 0, error: "Prism has not approved 'codex-cli' yet. Open the Prism panel and approve it, then retry.", attention: "silent" },
-  { id: "e6", at: iso(70), agent_id: "a1", agent_name: "Claude Code", server_id: "s1", tool: "list_directory", verdict: "allowed", source: { kind: "posture", posture: "guided" }, duration_ms: 8, error: null, attention: "badge" },
-  { id: "e5", at: iso(900), agent_id: "a1", agent_name: "Claude Code", server_id: "s2", tool: "search_code", verdict: "error", source: { kind: "human" }, duration_ms: 3300, error: "backend exited with status 1", attention: "silent" },
+  { id: "e6", at: iso(70), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", tool: "list_directory", verdict: "allowed", source: { kind: "posture", posture: "guided" }, duration_ms: 8, error: null, attention: "badge" },
+  { id: "e5", at: iso(900), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s2", tool: "search_code", verdict: "error", source: { kind: "human" }, duration_ms: 3300, error: "backend exited with status 1", attention: "silent" },
 ];
 let signins: PendingSignIn[] = [
-  { id: "si1", agent_id: "a2", agent_name: "cursor", client_name: "cursor", requested_at: iso(8), needs_consent: true },
+  { id: "si1", agent_id: "host:claude-code", agent_name: "Claude Code", client_name: "claude-code", client_id: "c-claude-recoil", requested_at: iso(8), needs_consent: true, new_client: true },
 ];
 let settings: Settings = { on_timeout: "deny", do_not_disturb: false, rate_limit_per_minute: null, hold_timeout_secs: 120, auto_open_on_pending: true };
 const tools: Record<string, ToolInfo[]> = {
@@ -200,7 +199,7 @@ export const mock = {
   list_agents: () => delay(agents),
   create_manual_agent: (a: { name: string }) => {
     const id = crypto.randomUUID();
-    agents.push({ id, name: a.name.trim(), client_name: a.name.trim(), client_version: null, status: "approved", created_at: iso(0), decided_at: iso(0), posture: "first_use", attention: "silent", client_id: null, connected: false, tokens: [{ kind: "manual", created_at: iso(0), expires_at: null }] });
+    agents.push({ id, name: a.name.trim(), client_name: a.name.trim(), client_version: null, status: "approved", created_at: iso(0), decided_at: iso(0), posture: "first_use", attention: "silent", client_id: null, connected: false, tokens: [{ kind: "manual", created_at: iso(0), expires_at: null }], clients: [] });
     return delay({ agent_id: id, token: `prism_demo_${crypto.randomUUID()}` });
   },
   replace_manual_token: (a: { agentId: string }) => {

@@ -27,6 +27,42 @@ use crate::gateway::Gateway;
 pub const HOST_CLAUDE_CODE: &str = "claude-code";
 pub const HOST_CODEX: &str = "codex";
 pub const HOSTS: &[&str] = &[HOST_CLAUDE_CODE, HOST_CODEX];
+
+/// The harness a self-declared OAuth client name belongs to, if Prism knows it. Matching is
+/// anchored at the start and blind to case and punctuation, so "Claude Code", "claude-code" and
+/// "Claude Code 2.1" all land on the same entry.
+pub fn harness_for_client_name(name: &str) -> Option<&'static str> {
+    let key: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if key.starts_with("claudecode") {
+        Some(HOST_CLAUDE_CODE)
+    } else if key.starts_with("codex") {
+        Some(HOST_CODEX)
+    } else {
+        None
+    }
+}
+
+pub fn harness_display_name(host: &str) -> &str {
+    match host {
+        HOST_CLAUDE_CODE => "Claude Code",
+        HOST_CODEX => "Codex",
+        other => other,
+    }
+}
+
+/// The agent record id for a harness. One per harness on this machine; a harness reaching the
+/// gateway from another machine gets its own record keyed by where it came from, so remote
+/// copies are never folded into the local one.
+pub fn harness_agent_id(host: &str, origin: Option<&str>) -> String {
+    match origin {
+        Some(origin) if !origin.is_empty() => format!("host:{host}@{origin}"),
+        _ => format!("host:{host}"),
+    }
+}
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 const SUBJECT_MAX_CHARS: usize = 240;
 const EVENTS_PER_MINUTE: usize = 1000;

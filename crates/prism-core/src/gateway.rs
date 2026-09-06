@@ -107,6 +107,20 @@ pub struct AgentView {
     pub connected: bool,
     /// Live tokens this agent holds. Empty for agents that connect unauthenticated.
     pub tokens: Vec<TokenView>,
+    /// The OAuth clients that sign in as this agent: one per scope or install a harness
+    /// registered from. Empty for manual agents and harnesses seen only through hooks.
+    pub clients: Vec<ClientView>,
+}
+
+/// One registered OAuth client, as the panel lists it under its agent.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClientView {
+    pub client_id: String,
+    pub client_name: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub origin: Option<String>,
+    /// Holds a live token.
+    pub signed_in: bool,
 }
 
 /// One live MCP session and the agent it authenticated as.
@@ -462,19 +476,37 @@ impl Gateway {
             .agents
             .iter()
             .cloned()
-            .map(|agent| AgentView {
-                connected: connected.contains(&agent.id),
-                tokens: config
-                    .tokens
-                    .iter()
-                    .filter(|t| t.agent_id == agent.id && !t.is_expired(now))
-                    .map(|t| TokenView {
-                        kind: t.kind,
-                        created_at: t.created_at,
-                        expires_at: t.expires_at,
-                    })
-                    .collect(),
-                agent,
+            .map(|agent| {
+                let client_ids = config.agent_client_ids(&agent.id);
+                AgentView {
+                    connected: connected.contains(&agent.id),
+                    tokens: config
+                        .tokens
+                        .iter()
+                        .filter(|t| t.agent_id == agent.id && !t.is_expired(now))
+                        .map(|t| TokenView {
+                            kind: t.kind,
+                            created_at: t.created_at,
+                            expires_at: t.expires_at,
+                        })
+                        .collect(),
+                    clients: config
+                        .clients
+                        .iter()
+                        .filter(|c| client_ids.contains(&c.client_id))
+                        .map(|c| ClientView {
+                            client_id: c.client_id.clone(),
+                            client_name: c.client_name.clone(),
+                            created_at: c.created_at,
+                            origin: c.origin.clone(),
+                            signed_in: config.tokens.iter().any(|t| {
+                                t.client_id.as_deref() == Some(c.client_id.as_str())
+                                    && !t.is_expired(now)
+                            }),
+                        })
+                        .collect(),
+                    agent,
+                }
             })
             .collect()
     }
@@ -945,19 +977,12 @@ impl Gateway {
                 }
                 Some(_) => false,
                 None => {
-                    config.agents.push(AgentConfig {
-                        id: agent_id.clone(),
-                        name: host_display_name(host),
-                        client_name: host.to_string(),
-                        client_version: None,
-                        status: AgentStatus::Approved,
-                        created_at: now,
-                        decided_at: Some(now),
-                        posture: Posture::Trusted,
-                        attention: Attention::Silent,
-                        client_id: None,
-                        host: Some(host.to_string()),
-                    });
+                    config.agents.push(AgentConfig::harness(
+                        host,
+                        None,
+                        AgentStatus::Approved,
+                        now,
+                    ));
                     config.save(&self.config_path)?;
                     true
                 }
@@ -1704,11 +1729,7 @@ fn rule_summary(rule: &Rule) -> String {
 }
 
 fn host_display_name(host: &str) -> String {
-    match host {
-        crate::native::HOST_CLAUDE_CODE => "Claude Code".into(),
-        crate::native::HOST_CODEX => "Codex".into(),
-        other => other.into(),
-    }
+    crate::native::harness_display_name(host).to_string()
 }
 
 fn home_dir() -> Option<PathBuf> {

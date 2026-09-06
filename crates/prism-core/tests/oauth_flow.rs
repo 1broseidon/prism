@@ -351,8 +351,11 @@ async fn register_authorize_token_and_call() {
         .into_iter()
         .find(|a| a.agent.id == agent_id)
         .unwrap();
-    assert_eq!(agent.agent.name, "claude-code");
-    assert_eq!(agent.agent.client_id.as_deref(), Some(client_id.as_str()));
+    // A client that names a known harness is that harness, whatever scope it registered from.
+    assert_eq!(agent.agent.name, "Claude Code");
+    assert_eq!(agent.agent.id, "host:claude-code");
+    assert_eq!(agent.agent.host.as_deref(), Some("claude-code"));
+    assert!(agent.clients.iter().any(|c| c.client_id == client_id));
 
     gateway.decide_agent(&agent_id, true).await.unwrap();
     let redirect = tokio::time::timeout(Duration::from_secs(5), parked)
@@ -541,6 +544,100 @@ async fn register_authorize_token_and_call() {
         Some("access_denied")
     );
 
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn every_registration_of_a_harness_is_one_agent() {
+    let (gateway, port, _dir) = start().await;
+
+    // First Claude Code registration: a pending harness agent, approved once.
+    let (agent_id, _token) = signed_in_agent(&gateway, port, "Claude Code").await;
+    assert_eq!(agent_id, "host:claude-code");
+
+    // Second registration, as a project-scoped install would make: same agent, its own consent.
+    let reg = http(
+        port,
+        "POST",
+        "/register",
+        &[("Content-Type", "application/json")],
+        r#"{"client_name":"claude-code","redirect_uris":["http://localhost:4444/cb"]}"#,
+    )
+    .await;
+    let reg: serde_json::Value = serde_json::from_str(&reg.body).unwrap();
+    let second = reg["client_id"].as_str().unwrap().to_string();
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    let path = format!(
+        "/authorize?response_type=code&client_id={second}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256",
+        urlencoding("http://localhost:4444/cb")
+    );
+    let parked = tokio::spawn(async move { http(port, "GET", &path, &[], "").await });
+    let signin = wait_for_signin(&gateway).await;
+    assert_eq!(signin.agent_id, "host:claude-code");
+    assert!(
+        signin.needs_consent,
+        "an approved harness still consents per client"
+    );
+    assert!(signin.new_client, "this client never held a token");
+    assert_eq!(signin.client_id, second);
+    gateway.decide_signin(&signin.id, true).unwrap();
+    let redirect = tokio::time::timeout(Duration::from_secs(5), parked)
+        .await
+        .unwrap()
+        .unwrap();
+    let code = query_param(&redirect.headers["location"], "code").unwrap();
+    let tokens = http(
+        port,
+        "POST",
+        "/token",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("code_verifier", verifier),
+            ("client_id", &second),
+        ]),
+    )
+    .await;
+    assert_eq!(tokens.status, 200, "{}", tokens.body);
+
+    // One agent, two clients, both signed in. Another product is still its own agent.
+    let (_other, _) = signed_in_agent(&gateway, port, "Cursor").await;
+    let agents = gateway.agents().await;
+    let harness: Vec<_> = agents
+        .iter()
+        .filter(|a| a.agent.host.as_deref() == Some("claude-code"))
+        .collect();
+    assert_eq!(
+        harness.len(),
+        1,
+        "{:?}",
+        agents.iter().map(|a| &a.agent.id).collect::<Vec<_>>()
+    );
+    assert_eq!(harness[0].clients.len(), 2);
+    assert!(harness[0].clients.iter().all(|c| c.signed_in));
+    assert!(agents
+        .iter()
+        .any(|a| a.agent.name == "Cursor" && a.agent.host.is_none()));
+
+    // Forgetting one client leaves the other and the agent's settings alone.
+    gateway
+        .forget_client("host:claude-code", &second)
+        .await
+        .unwrap();
+    let agents = gateway.agents().await;
+    let harness = agents
+        .iter()
+        .find(|a| a.agent.id == "host:claude-code")
+        .unwrap();
+    assert_eq!(harness.clients.len(), 1);
+    assert!(harness.agent.is_approved());
+    assert!(gateway
+        .forget_client("host:claude-code", &second)
+        .await
+        .is_err());
     gateway.shutdown().await;
 }
 

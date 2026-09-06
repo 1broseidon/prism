@@ -1,11 +1,14 @@
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { ManualTokenDetails } from "../ManualTokenDetails";
+import { hostStatus } from "../hosts";
 import { ATTENTIONS, POSTURES, findRule, setAccess } from "../policy";
-import { agents, errorMessage, pop, push, rules, servers, status } from "../state";
+import { agents, errorMessage, native, pop, push, rules, servers, status } from "../state";
 import { relative, remaining } from "../time";
 import type { AgentConfig, Attention, Posture, Rule, RuleDecision, ManualToken } from "../types";
 import { Button, Chip, ConfirmButton, Label, Screen, Segmented, describeError } from "../ui";
+import { coverageChip } from "./Agents";
+import { HarnessSections } from "./Host";
 
 async function refresh() {
   agents.value = await api.listAgents();
@@ -17,7 +20,7 @@ function statusChip(agent: AgentConfig) {
     case "approved":
       return <Chip tone="ok">approved</Chip>;
     case "denied":
-      return <Chip tone="danger">denied</Chip>;
+      return <Chip tone="danger">{agent.host ? "refused" : "denied"}</Chip>;
     default:
       return <Chip tone="accent">pending</Chip>;
   }
@@ -27,7 +30,8 @@ function decisionChip(d: RuleDecision) {
   return <Chip tone={d === "allow" ? "ok" : d === "deny" ? "danger" : "warn"}>{d}</Chip>;
 }
 
-/** One agent: its status, its posture, how loudly it speaks, and what it may touch. */
+/** One agent: its status, where it connects from, its posture, how loudly it speaks, and what it may touch.
+ *  A harness such as Claude Code is one agent however many installs or project scopes registered it. */
 export function AgentScreen({ agentId }: { agentId: string }) {
   const [issued, setIssued] = useState<ManualToken | null>(null);
   const [tokenBusy, setTokenBusy] = useState(false);
@@ -59,6 +63,9 @@ export function AgentScreen({ agentId }: { agentId: string }) {
 
   const setPolicy = (patch: { posture?: Posture; attention?: Attention }) => void act(() => api.setAgentPolicy(agent.id, patch));
 
+  const harness = !!agent.host;
+  const manual = !harness && agent.clients.length === 0;
+  const hs = hostStatus(native.value, agent.host ?? "");
   const mine = rules.value.filter((r) => r.agent_id === agent.id);
   const grants: Rule[] = mine.filter((r) => r.tool !== null || r.expires_at !== null);
   const postureHint = POSTURES.find((p) => p.value === agent.posture)?.hint;
@@ -70,8 +77,8 @@ export function AgentScreen({ agentId }: { agentId: string }) {
 
   const footer =
     agent.status === "approved" ? (
-      <ConfirmButton variant="danger" confirm="Revoke?" onConfirm={() => void act(() => api.decideAgent(agent.id, false))}>
-        Revoke access
+      <ConfirmButton variant="danger" confirm={harness ? "Refuse?" : "Revoke?"} onConfirm={() => void act(() => api.decideAgent(agent.id, false))}>
+        {harness ? "Refuse" : "Revoke access"}
       </ConfirmButton>
     ) : agent.status === "pending" ? (
       <>
@@ -84,20 +91,22 @@ export function AgentScreen({ agentId }: { agentId: string }) {
       </>
     ) : (
       <>
-        <ConfirmButton
-          variant="danger"
-          confirm="Forget?"
-          onConfirm={() =>
-            void act(async () => {
-              await api.removeAgent(agent.id);
-              pop();
-            })
-          }
-        >
-          Forget
-        </ConfirmButton>
+        {harness ? null : (
+          <ConfirmButton
+            variant="danger"
+            confirm="Forget?"
+            onConfirm={() =>
+              void act(async () => {
+                await api.removeAgent(agent.id);
+                pop();
+              })
+            }
+          >
+            Forget
+          </ConfirmButton>
+        )}
         <Button variant="primary" onClick={() => void act(() => api.decideAgent(agent.id, true))}>
-          Approve
+          {harness ? "Restore" : "Approve"}
         </Button>
       </>
     );
@@ -106,42 +115,70 @@ export function AgentScreen({ agentId }: { agentId: string }) {
     <div class="screen pushed">
       <Screen footer={footer}>
         <div class="agent-head">
-          <span class={`dot ${agent.connected ? "ok" : ""}`} />
+          <span class={`dot ${agent.connected ? "ok" : ""}`} title={agent.connected ? "Session open" : "No open session"} />
           {statusChip(agent)}
-          {!agent.client_id ? <Chip tone="accent">manual token</Chip> : null}
+          {harness ? coverageChip(agent) : null}
+          {manual ? <Chip tone="accent">manual token</Chip> : null}
           <span class="grow" />
-          <span class="sub mono">
-            {agent.client_version ? `v${agent.client_version} · ` : ""}
-            {when}
-          </span>
+          {harness && hs?.last_event_at ? (
+            <button type="button" class="link" onClick={() => push({ kind: "activity", agentId })}>
+              {hs.actions_7d} this week · {relative(hs.last_event_at)} ›
+            </button>
+          ) : (
+            <span class="sub mono">
+              {agent.client_version ? `v${agent.client_version} · ` : ""}
+              {when}
+            </span>
+          )}
         </div>
 
         <section class="section">
-          <Label right={signedIn ? <span>{agent.tokens.length}</span> : undefined}>Sign-in</Label>
-          {agent.client_id ? (
+          <Label right={agent.clients.length > 0 ? <span>{agent.clients.length}</span> : undefined}>{manual ? "Sign-in" : "Connections"}</Label>
+          {agent.clients.length > 0 ? (
             <div class="list">
-              <div class="setting">
-                <div>
-                  <div class="setting-title">{signedIn ? "Signed in" : "Not signed in"}</div>
-                  {signedIn ? (
-                    <div class="hint">
-                      {[
-                        access.length > 0 ? `access ${remaining(access[access.length - 1].expires_at!)} left` : "access expired",
-                        refreshes.length > 0 ? `refresh ${remaining(refreshes[refreshes.length - 1].expires_at!)} left` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </div>
-                  ) : null}
+              {agent.clients.map((client) => (
+                <div class="item" key={client.client_id}>
+                  <div class="title">
+                    <span class="truncate">{client.client_name}</span>
+                    {client.signed_in ? <Chip tone="ok">signed in</Chip> : <Chip>signed out</Chip>}
+                  </div>
+                  <div class="side">
+                    <ConfirmButton variant="quiet" class="danger" confirm="Forget?" onConfirm={() => void act(() => api.forgetClient(agent.id, client.client_id))}>
+                      Forget
+                    </ConfirmButton>
+                  </div>
+                  <div class="sub truncate">
+                    {client.origin ? `from ${client.origin} · ` : ""}
+                    registered {relative(client.created_at)}
+                  </div>
                 </div>
-                {signedIn ? (
-                  <ConfirmButton variant="quiet" class="danger" confirm="Sign out?" onConfirm={() => void act(() => api.revokeAgentTokens(agent.id))}>
-                    Sign out
-                  </ConfirmButton>
-                ) : null}
-              </div>
+              ))}
             </div>
-          ) : (
+          ) : harness ? (
+            <p class="hint">No MCP client yet. Point it at Prism from Connect an agent.</p>
+          ) : null}
+          {harness ? (
+            <p class="hint">Every install or project scope that registers Prism lands here after one sign-in consent.</p>
+          ) : null}
+          {agent.clients.length > 0 && signedIn ? (
+            <div class="setting">
+              <div>
+                <div class="setting-title">Signed in</div>
+                <div class="hint">
+                  {[
+                    access.length > 0 ? `access ${remaining(access[access.length - 1].expires_at!)} left` : "access expired",
+                    refreshes.length > 0 ? `refresh ${remaining(refreshes[refreshes.length - 1].expires_at!)} left` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
+              </div>
+              <ConfirmButton variant="quiet" class="danger" confirm="Sign out?" onConfirm={() => void act(() => api.revokeAgentTokens(agent.id))}>
+                Sign out everywhere
+              </ConfirmButton>
+            </div>
+          ) : null}
+          {manual ? (
             <>
               {signedIn ? null : <p class="hint">Needs a token.</p>}
               {agent.status === "approved" ? <div class="actions update-actions">
@@ -149,8 +186,10 @@ export function AgentScreen({ agentId }: { agentId: string }) {
                 {signedIn ? <ConfirmButton variant="quiet" class="danger" confirm="Revoke?" onConfirm={() => void act(() => api.revokeAgentTokens(agent.id))}>Revoke token</ConfirmButton> : null}
               </div> : <p class="hint">Approve first.</p>}
             </>
-          )}
+          ) : null}
         </section>
+
+        {harness ? <HarnessSections agentId={agent.id} host={agent.host!} /> : null}
 
         <section class="section">
           <Label>Posture</Label>

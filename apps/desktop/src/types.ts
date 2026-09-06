@@ -92,6 +92,18 @@ export interface AgentConfig {
   connected: boolean;
   /** Live tokens, newest last. Empty for agents that never signed in. */
   tokens: TokenView[];
+  /** The OAuth clients that sign in as this agent: one per scope or install a harness registered from. */
+  clients: ClientView[];
+}
+
+/** One registered OAuth client under its agent. */
+export interface ClientView {
+  client_id: string;
+  client_name: string;
+  created_at: string;
+  /** Where it registered from; null is this machine. */
+  origin: string | null;
+  signed_in: boolean;
 }
 
 /** An OAuth sign-in parked until you answer. Only shown for agents that were already approved. */
@@ -100,8 +112,11 @@ export interface PendingSignIn {
   agent_id: string;
   agent_name: string;
   client_name: string;
+  client_id: string;
   requested_at: string;
   needs_consent: boolean;
+  /** This client never held a token: the harness is connecting from a new scope or install. */
+  new_client: boolean;
 }
 
 export interface PendingCall {

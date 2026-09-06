@@ -139,6 +139,14 @@ pub struct OAuthClient {
     pub client_name: String,
     pub redirect_uris: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// The agent this client signs in as. Several clients can share one agent: every copy of a
+    /// harness on this machine, whatever scope it registered from, is one agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Where the registration came from. `None` is this machine. Set once the gateway accepts
+    /// remote clients, so a harness on another host is a separate agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +187,34 @@ impl AgentStatus {
 impl AgentConfig {
     pub fn is_approved(&self) -> bool {
         self.status == AgentStatus::Approved
+    }
+
+    /// The record for a harness such as Claude Code: one per harness per origin, shared by its
+    /// hooks and every MCP client it registers.
+    pub fn harness(
+        host: &str,
+        origin: Option<&str>,
+        status: AgentStatus,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let display = crate::native::harness_display_name(host);
+        let name = match origin {
+            Some(origin) if !origin.is_empty() => format!("{display} on {origin}"),
+            _ => display.to_string(),
+        };
+        AgentConfig {
+            id: crate::native::harness_agent_id(host, origin),
+            name,
+            client_name: host.to_string(),
+            client_version: None,
+            status,
+            created_at: now,
+            decided_at: (status != AgentStatus::Pending).then_some(now),
+            posture: Posture::default(),
+            attention: Attention::default(),
+            client_id: None,
+            host: Some(host.to_string()),
+        }
     }
 }
 
@@ -338,6 +374,7 @@ impl PrismConfig {
                 agent.client_name = agent.name.clone();
             }
         }
+        config.merge_harness_agents();
         Ok(config)
     }
 
@@ -365,19 +402,97 @@ impl PrismConfig {
 }
 
 impl PrismConfig {
-    /// The agent bound to an OAuth client, or a new pending agent named after the client.
-    /// A client id is bound to exactly one agent, so a re-registered client shows up as a new
-    /// agent and asks for approval again rather than borrowing an old grant by name.
+    /// The agent an OAuth client signs in as, if it is bound to one.
+    pub fn client_agent_id(&self, client_id: &str) -> Option<String> {
+        if let Some(bound) = self
+            .clients
+            .iter()
+            .find(|c| c.client_id == client_id)
+            .and_then(|c| c.agent_id.clone())
+        {
+            return Some(bound);
+        }
+        self.agents
+            .iter()
+            .find(|a| a.client_id.as_deref() == Some(client_id))
+            .map(|a| a.id.clone())
+    }
+
+    /// Every OAuth client bound to an agent. Empty for manual agents and hook-only harnesses.
+    pub fn agent_client_ids(&self, agent_id: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .clients
+            .iter()
+            .filter(|c| c.agent_id.as_deref() == Some(agent_id))
+            .map(|c| c.client_id.clone())
+            .collect();
+        if let Some(legacy) = self
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .and_then(|a| a.client_id.clone())
+        {
+            if !ids.contains(&legacy) {
+                ids.push(legacy);
+            }
+        }
+        ids
+    }
+
+    /// Bind a client to an agent record.
+    fn bind_client(&mut self, client_id: &str, agent_id: &str) {
+        if let Some(client) = self.clients.iter_mut().find(|c| c.client_id == client_id) {
+            client.agent_id = Some(agent_id.to_string());
+        }
+    }
+
+    /// The agent bound to an OAuth client, or the agent it should be bound to. A client that
+    /// names a known harness joins that harness's record on this machine, so three Claude Code
+    /// registrations (user scope, two projects) are one agent with one posture and one rule
+    /// set; each new client still gets its own sign-in consent. Anything else is a new pending
+    /// agent named after the client, since a public client id proves nothing by itself.
     pub fn find_or_request_agent_for_client(
         &mut self,
         client: &OAuthClient,
     ) -> (AgentConfig, bool) {
-        if let Some(agent) = self
-            .agents
-            .iter()
-            .find(|a| a.client_id.as_deref() == Some(client.client_id.as_str()))
-        {
-            return (agent.clone(), false);
+        if let Some(id) = self.client_agent_id(&client.client_id) {
+            if let Some(agent) = self.agents.iter().find(|a| a.id == id) {
+                return (agent.clone(), false);
+            }
+        }
+        if let Some(host) = crate::native::harness_for_client_name(&client.client_name) {
+            let id = crate::native::harness_agent_id(host, client.origin.as_deref());
+            let first_client = !self
+                .clients
+                .iter()
+                .any(|c| c.agent_id.as_deref() == Some(id.as_str()));
+            let created = match self.agents.iter_mut().find(|a| a.id == id) {
+                Some(agent) => {
+                    // A record the hooks made carries the observe-only default. Its first MCP
+                    // client is where posture starts to matter, so start it where new agents start.
+                    if first_client && agent.posture == Posture::Trusted {
+                        agent.posture = Posture::default();
+                    }
+                    false
+                }
+                None => {
+                    self.agents.push(AgentConfig::harness(
+                        host,
+                        client.origin.as_deref(),
+                        AgentStatus::Pending,
+                        Utc::now(),
+                    ));
+                    true
+                }
+            };
+            self.bind_client(&client.client_id, &id);
+            let agent = self
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .cloned()
+                .expect("harness agent exists");
+            return (agent, created);
         }
         let base = client.client_name.trim();
         let base = if base.is_empty() { "unknown" } else { base };
@@ -405,7 +520,93 @@ impl PrismConfig {
             host: None,
         };
         self.agents.push(agent.clone());
+        self.bind_client(&client.client_id, &agent.id);
         (agent, true)
+    }
+
+    /// Fold agents that earlier versions made per client registration into their harness's
+    /// record, and stamp the binding on every client. Runs at load; returns whether anything moved.
+    pub fn merge_harness_agents(&mut self) -> bool {
+        let mut changed = false;
+        // Harness records written before the host field existed carry only the id.
+        for agent in &mut self.agents {
+            if agent.host.is_none() {
+                if let Some(rest) = agent.id.strip_prefix("host:") {
+                    let host = rest.split('@').next().unwrap_or(rest);
+                    if !host.is_empty() {
+                        agent.host = Some(host.to_string());
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for agent in &self.agents {
+            if let Some(client_id) = &agent.client_id {
+                if let Some(client) = self.clients.iter().find(|c| &c.client_id == client_id) {
+                    if client.agent_id.is_none() {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        let legacy: Vec<AgentConfig> = self
+            .agents
+            .iter()
+            .filter(|a| a.host.is_none())
+            .filter(|a| a.client_id.is_some())
+            .filter(|a| crate::native::harness_for_client_name(&a.client_name).is_some())
+            .cloned()
+            .collect();
+        for agent in legacy {
+            let host =
+                crate::native::harness_for_client_name(&agent.client_name).expect("filtered above");
+            let target_id = crate::native::harness_agent_id(host, None);
+            let client_id = agent.client_id.clone().expect("filtered above");
+            match self.agents.iter_mut().find(|a| a.id == target_id) {
+                Some(target) => {
+                    // The hooks' record never governed a call; the MCP agent's settings did.
+                    if target.posture == Posture::Trusted && target.client_id.is_none() {
+                        target.posture = agent.posture;
+                        target.attention = agent.attention;
+                    }
+                    if target.client_version.is_none() {
+                        target.client_version = agent.client_version.clone();
+                    }
+                }
+                None => {
+                    let mut moved =
+                        AgentConfig::harness(host, None, agent.status, agent.created_at);
+                    moved.decided_at = agent.decided_at;
+                    moved.posture = agent.posture;
+                    moved.attention = agent.attention;
+                    moved.client_version = agent.client_version.clone();
+                    self.agents.push(moved);
+                }
+            }
+            for token in &mut self.tokens {
+                if token.agent_id == agent.id {
+                    token.agent_id = target_id.clone();
+                }
+            }
+            for rule in &mut self.rules {
+                if rule.agent_id.as_deref() == Some(agent.id.as_str()) {
+                    rule.agent_id = Some(target_id.clone());
+                }
+            }
+            self.bind_client(&client_id, &target_id);
+            self.agents.retain(|a| a.id != agent.id);
+            changed = true;
+        }
+        // Every client carries its binding from here on; the agent's own client_id is legacy.
+        let bindings: Vec<(String, String)> = self
+            .agents
+            .iter()
+            .filter_map(|a| a.client_id.clone().map(|c| (c, a.id.clone())))
+            .collect();
+        for (client_id, agent_id) in bindings {
+            self.bind_client(&client_id, &agent_id);
+        }
+        changed
     }
 }
 
@@ -557,6 +758,147 @@ mod tests {
 #[cfg(test)]
 mod agent_tests {
     use super::*;
+
+    fn agent(id: &str, name: &str, client_id: Option<&str>, host: Option<&str>) -> AgentConfig {
+        AgentConfig {
+            id: id.into(),
+            name: name.into(),
+            client_name: name.into(),
+            client_version: None,
+            status: AgentStatus::Approved,
+            created_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            posture: Posture::Guided,
+            attention: Attention::Badge,
+            client_id: client_id.map(str::to_string),
+            host: host.map(str::to_string),
+        }
+    }
+
+    fn client(id: &str, name: &str) -> OAuthClient {
+        OAuthClient {
+            client_id: id.into(),
+            client_name: name.into(),
+            redirect_uris: vec![],
+            created_at: Utc::now(),
+            agent_id: None,
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn per_client_harness_agents_fold_into_the_harness_record_on_load() {
+        let mut config = PrismConfig::default();
+        // Written by a version before the host field existed: only the id says what it is.
+        let mut hooked = agent("host:codex", "Codex", None, None);
+        hooked.posture = Posture::Trusted;
+        hooked.attention = Attention::Silent;
+        config.agents.push(hooked);
+        config
+            .agents
+            .push(agent("old-codex", "Codex", Some("c1"), None));
+        config
+            .agents
+            .push(agent("old-claude", "Claude Code (2)", Some("c2"), None));
+        config.agents.push(agent("toad", "Toad", Some("c3"), None));
+        config.clients.push(client("c1", "Codex"));
+        config.clients.push(client("c2", "Claude Code"));
+        config.clients.push(client("c3", "Toad"));
+        config.tokens.push(TokenRecord {
+            hash: "h".into(),
+            kind: TokenKind::Refresh,
+            agent_id: "old-codex".into(),
+            client_id: Some("c1".into()),
+            created_at: Utc::now(),
+            expires_at: None,
+        });
+        config.rules.push(Rule {
+            id: "r".into(),
+            agent_id: Some("old-claude".into()),
+            server_id: Some("s".into()),
+            tool: None,
+            decision: RuleDecision::Allow,
+            attention: None,
+            scope: RuleScope::Always,
+            expires_at: None,
+            condition: None,
+            created_at: Utc::now(),
+        });
+
+        assert!(config.merge_harness_agents());
+
+        let ids: Vec<&str> = config.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["host:codex", "toad", "host:claude-code"]);
+        let codex = config.agents.iter().find(|a| a.id == "host:codex").unwrap();
+        assert_eq!(codex.host.as_deref(), Some("codex"), "derived from the id");
+        assert_eq!(
+            codex.posture,
+            Posture::Guided,
+            "the MCP agent's posture governed calls"
+        );
+        assert_eq!(codex.attention, Attention::Badge);
+        let claude = config
+            .agents
+            .iter()
+            .find(|a| a.id == "host:claude-code")
+            .unwrap();
+        assert_eq!(claude.name, "Claude Code");
+        assert_eq!(claude.host.as_deref(), Some("claude-code"));
+        assert_eq!(claude.posture, Posture::Guided);
+        assert_eq!(config.tokens[0].agent_id, "host:codex");
+        assert_eq!(
+            config.rules[0].agent_id.as_deref(),
+            Some("host:claude-code")
+        );
+        assert_eq!(config.client_agent_id("c1").as_deref(), Some("host:codex"));
+        assert_eq!(
+            config.client_agent_id("c2").as_deref(),
+            Some("host:claude-code")
+        );
+        assert_eq!(config.client_agent_id("c3").as_deref(), Some("toad"));
+        assert_eq!(config.agent_client_ids("host:codex"), ["c1"]);
+        assert!(
+            !config.merge_harness_agents(),
+            "a second pass moves nothing"
+        );
+    }
+
+    #[test]
+    fn a_new_harness_client_joins_the_existing_record_and_asks_once_for_posture() {
+        let mut config = PrismConfig::default();
+        let mut hooked = agent("host:claude-code", "Claude Code", None, Some("claude-code"));
+        hooked.posture = Posture::Trusted;
+        config.agents.push(hooked);
+        config.clients.push(client("c1", "Claude Code"));
+        config.clients.push(client("c2", "claude-code"));
+        config.clients.push(client("c9", "Cursor"));
+
+        let (first, created) = config.find_or_request_agent_for_client(&config.clients[0].clone());
+        assert!(!created);
+        assert_eq!(first.id, "host:claude-code");
+        assert_eq!(
+            first.posture,
+            Posture::FirstUse,
+            "hook default gives way to the MCP default"
+        );
+        let (second, created) = config.find_or_request_agent_for_client(&config.clients[1].clone());
+        assert!(!created);
+        assert_eq!(second.id, first.id);
+        assert_eq!(config.agent_client_ids("host:claude-code"), ["c1", "c2"]);
+
+        let (other, created) = config.find_or_request_agent_for_client(&config.clients[2].clone());
+        assert!(created);
+        assert_eq!(other.name, "Cursor");
+        assert!(other.host.is_none());
+        assert_eq!(other.status, AgentStatus::Pending);
+
+        let fresh = client("c3", "Codex CLI");
+        config.clients.push(fresh.clone());
+        let (codex, created) = config.find_or_request_agent_for_client(&fresh);
+        assert!(created);
+        assert_eq!(codex.id, "host:codex");
+        assert_eq!(codex.status, AgentStatus::Pending);
+    }
 
     #[test]
     fn legacy_agent_without_status_loads_as_approved() {

@@ -92,12 +92,12 @@ function SignInCard({ signin, first }: { signin: PendingSignIn; first: boolean }
         <span class="when">{relative(signin.requested_at)}</span>
       </div>
       <div class="ask">
-        <b>{signin.agent_name}</b> wants to sign in again
+        <b>{signin.agent_name}</b> {signin.new_client ? "wants to connect from a new place" : "wants to sign in again"}
       </div>
       <div class="via">
         client <code>{signin.client_name}</code> · a browser is waiting
       </div>
-      <p class="note">If you didn't start this, refuse.</p>
+      <p class="note">{signin.new_client ? "A new install or project scope. If you didn't start this, refuse." : "If you didn't start this, refuse."}</p>
       <div class="actions">
         <Button variant="primary" hint={first ? "A" : undefined} autoFocus={first} onClick={() => void decideSignin(signin, true)}>
           Allow

@@ -31,6 +31,7 @@ export function placeholderHost(h: (typeof HOSTS)[number]): AgentConfig {
     host: h.host,
     connected: false,
     tokens: [],
+    clients: [],
   };
 }
 

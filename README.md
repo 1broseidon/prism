@@ -104,6 +104,14 @@ The client registers itself, opens a browser, and the browser waits. Prism flips
 
 Later sign-ins for an approved agent also ask, as a **wants to sign in again** card. A public client id proves nothing, so if nothing on your side asked to sign in, refuse it. Refusing leaves the agent's existing approval and tokens alone.
 
+**One entry per harness.** Prism is meant to be set up once per machine, for both MCP and hook observation. Claude Code and Codex register a fresh OAuth client for every scope you add Prism in (user settings, each project), and each of those used to show up as its own agent. Now a client that names a known harness joins that harness's single entry: one posture, one attention level, one rule set, and the hook status, with every registration listed under **Connections**. The first registration asks for approval; each further one asks once, as a **wants to connect from a new place** card, since nothing but its name says it is the same product. **Forget** on a connection drops that registration alone. Add Prism at user scope and you get one registration and one consent:
+
+```sh
+claude mcp add --transport http --scope user prism http://127.0.0.1:9086/mcp
+```
+
+Project-scoped entries still work; they just add connections to the same agent. A harness reaching the gateway from another machine, once remote access exists, will be its own entry named after where it came from, never folded into the local one.
+
 **Clients without OAuth support** get a manual token: **Connect an agent → Manual token**, name the agent, and copy the token or the generated settings into the client. It must send `Authorization: Bearer <token>`. There is one manual token per agent, shown only once, with no expiry. **Replace token** rotates it without touching permissions; **Revoke token** or **Revoke access** kill it immediately, including on open sessions.
 
 Identity is the token, never the name a client announces about itself. Every session is bound to the identity that opened it, so one agent's token cannot ride another agent's session.

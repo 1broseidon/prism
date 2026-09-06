@@ -98,6 +98,11 @@ export function revokeAgentTokens(agentId: string) {
   return invoke<void>("revoke_agent_tokens", { agentId });
 }
 
+/** Forget one client registration and its tokens; the agent and its other clients stay. */
+export function forgetClient(agentId: string, clientId: string) {
+  return invoke<void>("forget_client", { agentId, clientId });
+}
+
 export function listPending() {
   return invoke<PendingCall[]>("list_pending");
 }

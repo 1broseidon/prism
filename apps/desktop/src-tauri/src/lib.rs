@@ -675,6 +675,19 @@ async fn revoke_agent_tokens(state: State<'_, AppState>, agent_id: String) -> Re
 }
 
 #[tauri::command]
+async fn forget_client(
+    state: State<'_, AppState>,
+    agent_id: String,
+    client_id: String,
+) -> Result<(), String> {
+    state
+        .gateway
+        .forget_client(&agent_id, &client_id)
+        .await
+        .map_err(map_err)
+}
+
+#[tauri::command]
 async fn list_pending(state: State<'_, AppState>) -> Result<Vec<PendingCall>, String> {
     Ok(state.gateway.pending().await)
 }
@@ -1536,6 +1549,7 @@ pub fn run() {
             decide_agent,
             remove_agent,
             revoke_agent_tokens,
+            forget_client,
             list_signins,
             decide_signin,
             list_pending,

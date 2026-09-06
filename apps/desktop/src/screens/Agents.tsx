@@ -14,14 +14,30 @@ async function refresh() {
 function statusChip(agent: AgentConfig) {
   switch (agent.status) {
     case "approved":
-      return <Chip tone="ok">approved</Chip>;
+      return null;
     case "denied":
-      return <Chip tone="danger">denied</Chip>;
+      return <Chip tone="danger">refused</Chip>;
     default:
       return <Chip tone="accent">pending</Chip>;
   }
 }
 
+/** Coverage in one word. Enforced arrives with phase 2; nothing claims it yet. */
+export function coverageChip(agent: AgentConfig) {
+  const st = native.value;
+  const hs = hostStatus(st, agent.host ?? "");
+  const setup = hostSetup(st, agent.host ?? "");
+  if (agent.status === "denied") return null;
+  if (st?.observe_native && hs?.last_event_at) return <Chip tone="ok">observed</Chip>;
+  if (setup?.hook_installed) return <Chip tone="ok">hooked</Chip>;
+  return <Chip>not hooked</Chip>;
+}
+
+function plural(n: number, word: string) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** One row per agent. A harness is one row however many places it registered from. */
 function AgentRow({ agent }: { agent: AgentConfig }) {
   const act = async (fn: () => Promise<void>) => {
     try {
@@ -31,14 +47,32 @@ function AgentRow({ agent }: { agent: AgentConfig }) {
       errorMessage.value = describeError(err);
     }
   };
-  const when = agent.decided_at ? `${agent.status} ${relative(agent.decided_at)}` : `asked ${relative(agent.created_at)}`;
+  const harness = !!agent.host;
+  const manual = !harness && agent.clients.length === 0;
+  const hs = hostStatus(native.value, agent.host ?? "");
+  const parts: string[] = [];
+  if (harness) {
+    parts.push(agent.clients.length > 0 ? plural(agent.clients.length, "connection") : "no MCP connection");
+    if (hs?.last_event_at) parts.push(`${hs.actions_7d} actions this week`);
+  } else if (manual) {
+    parts.push(agent.tokens.some((t) => t.kind === "manual") ? "manual token" : "token needed");
+  }
+  if (!harness && agent.client_version) parts.push(`v${agent.client_version}`);
+  if (agent.status === "approved") parts.push(postureLabel(agent.posture).toLowerCase());
+  else parts.push(agent.decided_at ? `${agent.status} ${relative(agent.decided_at)}` : `asked ${relative(agent.created_at)}`);
 
   return (
     <div class="item">
       <button type="button" class="title row-btn" onClick={() => push({ kind: "agent", agentId: agent.id })}>
-        <span class={`dot ${agent.connected ? "ok" : ""}`} title={agent.connected ? "Session open" : "No open session"} />
+        {harness ? (
+          <span class="host-mark" aria-hidden="true" />
+        ) : (
+          <span class={`dot ${agent.connected ? "ok" : ""}`} title={agent.connected ? "Session open" : "No open session"} />
+        )}
         <span class="truncate">{agent.name}</span>
+        {harness && agent.connected ? <span class="dot ok" title="Session open" /> : null}
         {statusChip(agent)}
+        {harness ? coverageChip(agent) : null}
         <span class="chev" aria-hidden="true">
           ›
         </span>
@@ -53,69 +87,24 @@ function AgentRow({ agent }: { agent: AgentConfig }) {
           </Button>
         </div>
       ) : null}
-      <div class="sub truncate">
-        {!agent.client_id ? agent.tokens.some((t) => t.kind === "manual") ? "Manual token · " : "Token needed · " : ""}
-        {agent.client_version ? `v${agent.client_version} · ` : ""}
-        {agent.status === "approved" ? `${postureLabel(agent.posture).toLowerCase()} · ` : ""}
-        {when}
-      </div>
-    </div>
-  );
-}
-
-/** Coverage in one word. Enforced arrives with phase 2; nothing claims it yet. */
-export function coverageChip(agent: AgentConfig) {
-  const st = native.value;
-  const hs = hostStatus(st, agent.host ?? "");
-  const setup = hostSetup(st, agent.host ?? "");
-  if (agent.status === "denied") return <Chip tone="danger">refused</Chip>;
-  if (st?.observe_native && hs?.last_event_at) return <Chip tone="ok">observed</Chip>;
-  if (setup?.hook_installed) return <Chip tone="ok">hooked</Chip>;
-  return <Chip>not hooked up</Chip>;
-}
-
-function HostRow({ agent }: { agent: AgentConfig }) {
-  const st = native.value;
-  const hs = hostStatus(st, agent.host ?? "");
-  const setup = hostSetup(st, agent.host ?? "");
-  const sub =
-    agent.status === "denied"
-      ? "Refused"
-      : hs?.last_event_at
-        ? `${hs.actions_7d} this week · ${relative(hs.last_event_at)}`
-        : setup?.hook_installed
-          ? "Hooked · nothing yet"
-          : "Not hooked up";
-  return (
-    <div class="item">
-      <button type="button" class="title row-btn" onClick={() => push({ kind: "host", agentId: agent.id })}>
-        <span class="host-mark" aria-hidden="true" />
-        <span class="truncate">{agent.name}</span>
-        {coverageChip(agent)}
-        <span class="chev" aria-hidden="true">
-          ›
-        </span>
-      </button>
-      <div class="sub truncate">{sub}</div>
+      <div class="sub truncate">{parts.join(" · ")}</div>
     </div>
   );
 }
 
 export function AgentsScreen() {
   const all = agents.value;
-  const list = all.filter((a) => !a.host);
-  const hosts = HOSTS.map((h) => all.find((a) => a.id === h.id) ?? placeholderHost(h));
+  // Known harnesses first, in a fixed order, present or not; then any harness seen from
+  // elsewhere; then everything else that connected over MCP.
+  const known = HOSTS.map((h) => all.find((a) => a.id === h.id) ?? placeholderHost(h));
+  const otherHosts = all.filter((a) => a.host && !HOSTS.some((h) => h.id === a.id));
+  const rest = all.filter((a) => !a.host);
+  const list = [...known, ...otherHosts, ...rest];
 
   return (
     <div class="screen">
       <Screen footer={<Button onClick={() => push({ kind: "connect-agent" })}>Connect an agent</Button>}>
-        <Label right={<span>{hosts.length}</span>}>Agent hosts</Label>
-        <div class="list">
-          {hosts.map((agent) => (
-            <HostRow key={agent.id} agent={agent} />
-          ))}
-        </div>
-        <Label right={<span>{list.length}</span>}>MCP agents</Label>
+        <Label right={<span>{list.length}</span>}>Agents</Label>
         {list.length === 0 ? (
           <Empty title="No agents yet." />
         ) : (
