@@ -41,7 +41,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
-            libdbus-1-dev libssl-dev libxdo-dev pkg-config build-essential file
+            libdbus-1-dev libssl-dev libxdo-dev pkg-config build-essential file xdg-utils
       - name: Frontend deps
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
