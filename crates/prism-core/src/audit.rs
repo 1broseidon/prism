@@ -433,7 +433,7 @@ impl HistoryCache {
                     .iter()
                     .flat_map(|segment| segment.iter().rev().cloned())
                     .collect();
-                entries.sort_by(|a, b| b.at.cmp(&a.at));
+                entries.sort_by_key(|entry| std::cmp::Reverse(entry.at));
                 Arc::new(entries)
             })
             .clone();
