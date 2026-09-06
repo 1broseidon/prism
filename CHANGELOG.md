@@ -5,6 +5,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 ## [Unreleased]
 
 ### Added
+- Remote MCP servers. **Servers → Add server → URL** connects to a Streamable HTTP server with no auth, an API key header, or OAuth 2.1. OAuth discovers the server's settings from its 401 challenge, registers Prism as a public client with dynamic client registration, signs in through your browser with PKCE, and takes the code back on a one-off loopback listener; tokens refresh on their own. Keys, the registered client and tokens live in the OS keyring under an opaque reference, never in `prism.json`. A signed-out OAuth server shows *needs sign-in*, and its row offers **Sign in** and **Sign out**. URLs must be https, except plain http to this machine.
 - Native actions, observed. Claude Code and Codex can report every shell command, file edit and fetch to Prism through their hooks; **Agents → Claude Code** writes an HTTP hook into `~/.claude/settings.json` and **Agents → Codex** writes a `curl` hook into `~/.codex/hooks.json`, which Codex asks you to trust in `/hooks` before it runs. Each action becomes a redacted one-line audit entry (a Codex patch is recorded by the paths it touches, never its content), and a short watch list marks the risky ones: a recursive delete outside the project, a forced push, curl piped into a shell, sudo, a read of keys or a `.env` file, a write under `~/.ssh` or outside the project. The Now summary counts those as needed attention. Nothing is held or changed in this phase.
 
 ### Changed

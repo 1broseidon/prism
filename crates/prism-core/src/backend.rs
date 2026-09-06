@@ -20,9 +20,15 @@ use crate::events::{EventSender, GatewayEvent};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendStatus {
     Starting,
-    Running { tool_count: usize },
-    Failed { error: String },
+    Running {
+        tool_count: usize,
+    },
+    Failed {
+        error: String,
+    },
     Stopped,
+    /// A remote OAuth server with no usable tokens. Sign in from the panel.
+    SignInRequired,
 }
 
 type McpClient = RunningService<RoleClient, ()>;
@@ -81,10 +87,16 @@ impl BackendManager {
                 });
             }
             Err(err) => {
-                let message = err.to_string();
-                error!(server = %config.name, %message, "backend failed to start");
-                let status = BackendStatus::Failed {
-                    error: message.clone(),
+                let status = match err {
+                    Error::SignInRequired => {
+                        info!(server = %config.name, "backend needs a sign-in");
+                        BackendStatus::SignInRequired
+                    }
+                    err => {
+                        let message = err.to_string();
+                        error!(server = %config.name, %message, "backend failed to start");
+                        BackendStatus::Failed { error: message }
+                    }
                 };
                 let mut map = self.backends.write().await;
                 map.insert(
@@ -131,6 +143,20 @@ impl BackendManager {
     pub async fn remove(&self, server_id: &str) {
         self.stop(server_id).await;
         self.backends.write().await.remove(server_id);
+    }
+
+    /// Record a failure that happened outside `start`, such as a sign-in that did not finish.
+    pub async fn mark_failed(&self, server_id: &str, error: String) {
+        let mut map = self.backends.write().await;
+        if let Some(backend) = map.get_mut(server_id) {
+            backend.client = None;
+            backend.tools.clear();
+            backend.status = BackendStatus::Failed { error };
+            let _ = self.events.send(GatewayEvent::ServerStatus {
+                server_id: server_id.to_string(),
+                status: backend.status.clone(),
+            });
+        }
     }
 
     pub async fn restart(&self, server_id: &str) -> Result<()> {
@@ -295,28 +321,32 @@ async fn connect(
     store: Arc<dyn crate::credentials::CredentialStore>,
 ) -> Result<(McpClient, Vec<Tool>)> {
     let protected = config.clone();
+    let blocking_store = store.clone();
     let launch = tokio::task::spawn_blocking(move || {
-        crate::credentials::resolve(store.as_ref(), &protected)
+        crate::credentials::resolve(blocking_store.as_ref(), &protected)
     })
     .await
     .map_err(|_| Error::Backend("could not retrieve server credentials".into()))??;
-    let mut command = server_command(config, &launch, std::env::vars_os());
-    command.kill_on_drop(true);
-    // Set this on the transport builder: its defaults override Command stdio settings.
-    // Servers can print credentials to stderr. Do not forward it to application logs.
-    let (transport, _) = TokioChildProcess::builder(command)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|err| {
-            Error::Backend(format!(
-                "could not spawn server ({:?}); check its executable",
-                err.kind()
-            ))
-        })?;
-    let client = ()
-        .serve(transport)
-        .await
-        .map_err(|_| Error::Backend("server handshake failed; check its launch settings".into()))?;
+    let client = if config.is_remote() {
+        crate::remote::connect(config, &launch, store).await?
+    } else {
+        let mut command = server_command(config, &launch, std::env::vars_os());
+        command.kill_on_drop(true);
+        // Set this on the transport builder: its defaults override Command stdio settings.
+        // Servers can print credentials to stderr. Do not forward it to application logs.
+        let (transport, _) = TokioChildProcess::builder(command)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|err| {
+                Error::Backend(format!(
+                    "could not spawn server ({:?}); check its executable",
+                    err.kind()
+                ))
+            })?;
+        ().serve(transport).await.map_err(|_| {
+            Error::Backend("server handshake failed; check its launch settings".into())
+        })?
+    };
     let listed = client.list_tools(Default::default()).await.map_err(|_| {
         Error::Backend("initial tool listing failed; check server configuration".into())
     })?;
@@ -416,6 +446,9 @@ pub struct ServerView {
     pub credentials_stored: bool,
     pub enabled: bool,
     pub status: BackendStatus,
+    /// Endpoint of a remote server; `None` for a stdio one.
+    pub url: Option<String>,
+    pub auth: crate::config::HttpAuth,
 }
 
 impl ServerView {
@@ -429,6 +462,8 @@ impl ServerView {
             credentials_stored: config.credential_ref.is_some(),
             enabled: config.enabled,
             status,
+            url: config.url,
+            auth: config.auth,
         }
     }
 }
@@ -448,6 +483,10 @@ mod tests {
             env: Default::default(),
             enabled: true,
             credential_ref: None,
+            url: None,
+            auth: crate::config::HttpAuth::None,
+            headers: Default::default(),
+            oauth_ref: None,
         };
         let launch = crate::credentials::LaunchSettings {
             args: vec![
@@ -458,6 +497,7 @@ mod tests {
                 ("HOME".into(), "/explicit/home".into()),
                 ("CUSTOM_SERVER_TOKEN".into(), "explicit-secret".into()),
             ]),
+            headers: Default::default(),
         };
         let parent = vec![
             ("PATH".into(), std::env::var_os("PATH").unwrap()),
@@ -554,6 +594,10 @@ for line in sys.stdin:
                 env: Default::default(),
                 enabled: true,
                 credential_ref: None,
+                url: None,
+                auth: crate::config::HttpAuth::None,
+                headers: Default::default(),
+                oauth_ref: None,
             })
             .await
             .unwrap();
@@ -639,6 +683,10 @@ for line in sys.stdin:
             )]),
             enabled: true,
             credential_ref: None,
+            url: None,
+            auth: crate::config::HttpAuth::None,
+            headers: Default::default(),
+            oauth_ref: None,
         };
         protect_server(store.as_ref(), &mut server).unwrap();
         let (events, _) = crate::events::channel();

@@ -19,6 +19,9 @@ pub enum Error {
     Backend(String),
     #[error("gateway error: {0}")]
     Gateway(String),
+    /// A remote server uses OAuth and holds no usable tokens; the operator must sign in.
+    #[error("sign-in required")]
+    SignInRequired,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

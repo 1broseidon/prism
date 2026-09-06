@@ -516,9 +516,19 @@ async fn list_servers(state: State<'_, AppState>) -> Result<Vec<ServerView>, Str
 #[derive(serde::Deserialize)]
 struct AddServerArgs {
     name: String,
+    #[serde(default)]
     command: String,
+    #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
     env: std::collections::BTreeMap<String, String>,
+    /// Remote server endpoint. When set, `command` is ignored.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    auth: prism_core::HttpAuth,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
 }
 
 #[tauri::command]
@@ -531,6 +541,10 @@ async fn add_server(state: State<'_, AppState>, args: AddServerArgs) -> Result<S
         env: args.env,
         enabled: true,
         credential_ref: None,
+        url: args.url,
+        auth: args.auth,
+        headers: args.headers,
+        oauth_ref: None,
     };
     let added = state.gateway.add_server(server).await.map_err(map_err)?;
     state
@@ -547,6 +561,34 @@ async fn remove_server(state: State<'_, AppState>, server_id: String) -> Result<
     state
         .gateway
         .remove_server(&server_id)
+        .await
+        .map_err(map_err)
+}
+
+/// Start a browser sign-in for an OAuth server and open it. Returns the URL for the panel.
+#[tauri::command]
+async fn sign_in_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<String, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = state
+        .gateway
+        .sign_in_server(&server_id)
+        .await
+        .map_err(map_err)?;
+    if let Err(err) = app.opener().open_url(&url, None::<&str>) {
+        warn!(%err, "could not open the browser for a server sign-in");
+    }
+    Ok(url)
+}
+
+#[tauri::command]
+async fn sign_out_server(state: State<'_, AppState>, server_id: String) -> Result<(), String> {
+    state
+        .gateway
+        .sign_out_server(&server_id)
         .await
         .map_err(map_err)
 }
@@ -1368,6 +1410,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
         .manage(UpdateState::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -1485,6 +1528,8 @@ pub fn run() {
             add_server,
             remove_server,
             restart_server,
+            sign_in_server,
+            sign_out_server,
             list_agents,
             create_manual_agent,
             replace_manual_token,

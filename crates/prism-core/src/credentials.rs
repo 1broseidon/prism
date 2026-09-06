@@ -55,6 +55,13 @@ impl CredentialStore for NativeStore {
 pub(crate) struct LaunchSettings {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    /// Request headers of a remote server. Absent in records written before remote servers existed.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+fn has_plaintext(config: &ServerConfig) -> bool {
+    !config.args.is_empty() || !config.env.is_empty() || !config.headers.is_empty()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,21 +80,8 @@ fn manifest(store: &dyn CredentialStore, id: &str) -> Result<Manifest> {
     Ok(manifest)
 }
 
-pub(crate) fn resolve(
-    store: &dyn CredentialStore,
-    config: &ServerConfig,
-) -> Result<LaunchSettings> {
-    let Some(id) = &config.credential_ref else {
-        return Ok(LaunchSettings {
-            args: config.args.clone(),
-            env: config.env.clone(),
-        });
-    };
-    if !config.args.is_empty() || !config.env.is_empty() {
-        return Err(Error::Invalid(
-            "server contains both credential references and plaintext launch values".into(),
-        ));
-    }
+/// Read a chunked, digest-checked record written by [`put_blob`].
+pub(crate) fn get_blob(store: &dyn CredentialStore, id: &str) -> Result<Vec<u8>> {
     let manifest = manifest(store, id)?;
     let mut bytes = Vec::new();
     for chunk in 0..manifest.chunks {
@@ -100,7 +94,74 @@ pub(crate) fn resolve(
     if Sha256::digest(&bytes).as_slice() != manifest.digest {
         return Err(unavailable());
     }
-    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+    Ok(bytes)
+}
+
+/// Write a record under `id` (a UUID) in chunks with a manifest, verifying it reads back.
+/// A partial write is rolled back. An existing record under the same id is replaced;
+/// leftover chunks from a longer previous record are removed.
+pub(crate) fn put_blob(store: &dyn CredentialStore, id: &str, bytes: &[u8]) -> Result<()> {
+    uuid::Uuid::parse_str(id)
+        .map_err(|_| Error::Invalid("invalid server credential reference".into()))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(Error::Invalid("credential record exceeds 1 MiB".into()));
+    }
+    let previous_chunks = manifest(store, id).map(|m| m.chunks).unwrap_or(0);
+    let chunks = bytes.len().div_ceil(CHUNK_BYTES).max(1);
+    let result = (|| {
+        for index in 0..chunks {
+            let chunk = &bytes[(index * CHUNK_BYTES).min(bytes.len())
+                ..((index + 1) * CHUNK_BYTES).min(bytes.len())];
+            store.set(&format!("{id}/{index}"), chunk)?;
+        }
+        store.set(
+            id,
+            &serde_json::to_vec(&Manifest {
+                chunks,
+                digest: Sha256::digest(bytes).to_vec(),
+            })?,
+        )?;
+        if get_blob(store, id)? != bytes {
+            return Err(unavailable());
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            for index in chunks..previous_chunks {
+                let _ = store.delete(&format!("{id}/{index}"));
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if previous_chunks == 0 {
+                for index in 0..chunks {
+                    let _ = store.delete(&format!("{id}/{index}"));
+                }
+                let _ = store.delete(id);
+            }
+            Err(err)
+        }
+    }
+}
+
+pub(crate) fn resolve(
+    store: &dyn CredentialStore,
+    config: &ServerConfig,
+) -> Result<LaunchSettings> {
+    let Some(id) = &config.credential_ref else {
+        return Ok(LaunchSettings {
+            args: config.args.clone(),
+            env: config.env.clone(),
+            headers: config.headers.clone(),
+        });
+    };
+    if has_plaintext(config) {
+        return Err(Error::Invalid(
+            "server contains both credential references and plaintext launch values".into(),
+        ));
+    }
+    serde_json::from_slice(&get_blob(store, id)?).map_err(|_| unavailable())
 }
 
 /// Verify every write before removing any plaintext from the in-memory config.
@@ -108,7 +169,7 @@ pub(crate) fn protect_server(store: &dyn CredentialStore, server: &mut ServerCon
     if let Some(id) = &server.credential_ref {
         uuid::Uuid::parse_str(id)
             .map_err(|_| Error::Invalid("invalid server credential reference".into()))?;
-        if !server.args.is_empty() || !server.env.is_empty() {
+        if has_plaintext(server) {
             return Err(Error::Invalid(
                 "server contains both credential references and plaintext launch values".into(),
             ));
@@ -117,47 +178,32 @@ pub(crate) fn protect_server(store: &dyn CredentialStore, server: &mut ServerCon
         // that server failed, while leaving the panel available to remove/re-add it.
         return Ok(());
     }
-    if server.args.is_empty() && server.env.is_empty() {
+    if !has_plaintext(server) {
         return Ok(());
     }
     let settings = LaunchSettings {
         args: server.args.clone(),
         env: server.env.clone(),
+        headers: server.headers.clone(),
     };
     let bytes = serde_json::to_vec(&settings)?;
-    if bytes.len() > MAX_BYTES {
-        return Err(Error::Invalid("server launch settings exceed 1 MiB".into()));
-    }
     let id = uuid::Uuid::new_v4().to_string();
-    let chunks = bytes.len().div_ceil(CHUNK_BYTES);
-    let result = (|| {
-        for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
-            store.set(&format!("{id}/{index}"), chunk)?;
+    put_blob(store, &id, &bytes)?;
+    let mut secured = server.clone();
+    secured.credential_ref = Some(id.clone());
+    secured.args.clear();
+    secured.env.clear();
+    secured.headers.clear();
+    match resolve(store, &secured) {
+        Ok(read_back) if read_back == settings => {
+            *server = secured;
+            Ok(())
         }
-        store.set(
-            &id,
-            &serde_json::to_vec(&Manifest {
-                chunks,
-                digest: Sha256::digest(&bytes).to_vec(),
-            })?,
-        )?;
-        let mut secured = server.clone();
-        secured.credential_ref = Some(id.clone());
-        secured.args.clear();
-        secured.env.clear();
-        if resolve(store, &secured)? != settings {
-            return Err(unavailable());
+        _ => {
+            let _ = delete(store, &id);
+            Err(unavailable())
         }
-        *server = secured;
-        Ok(())
-    })();
-    if result.is_err() {
-        for index in 0..chunks {
-            let _ = store.delete(&format!("{id}/{index}"));
-        }
-        let _ = store.delete(&id);
     }
-    result
 }
 
 pub(crate) fn delete(store: &dyn CredentialStore, id: &str) -> Result<()> {
@@ -166,6 +212,19 @@ pub(crate) fn delete(store: &dyn CredentialStore, id: &str) -> Result<()> {
         store.delete(&format!("{id}/{chunk}"))?;
     }
     store.delete(id)
+}
+
+/// Remove a record if present; a record that never existed is not an error.
+pub(crate) fn delete_if_present(store: &dyn CredentialStore, id: &str) -> Result<()> {
+    match manifest(store, id) {
+        Ok(manifest) => {
+            for chunk in 0..manifest.chunks {
+                store.delete(&format!("{id}/{chunk}"))?;
+            }
+            store.delete(id)
+        }
+        Err(_) => store.delete(id),
+    }
 }
 
 pub(crate) fn migrate(
@@ -232,6 +291,10 @@ pub(crate) mod tests {
             env: BTreeMap::from([("CUSTOM_VALUE".into(), "env-secret".repeat(1000))]),
             enabled: false,
             credential_ref: None,
+            url: None,
+            auth: crate::config::HttpAuth::None,
+            headers: Default::default(),
+            oauth_ref: None,
         }
     }
 

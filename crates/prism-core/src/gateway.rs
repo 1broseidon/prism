@@ -29,8 +29,8 @@ use crate::approval::{
 use crate::audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict};
 use crate::backend::{BackendManager, BackendStatus, ServerView};
 use crate::config::{
-    AgentConfig, AgentStatus, Attention, PanelAnchor, Posture, PrismConfig, Rule, RuleDecision,
-    RuleScope, ServerConfig, TimeoutBehavior,
+    AgentConfig, AgentStatus, Attention, HttpAuth, PanelAnchor, Posture, PrismConfig, Rule,
+    RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
 };
 use crate::error::{Error, Result};
 use crate::events::{channel, EventReceiver, EventSender, GatewayEvent};
@@ -296,8 +296,41 @@ impl Gateway {
         if server.name.trim().is_empty() {
             return Err(Error::Invalid("server name is required".into()));
         }
-        if server.command.trim().is_empty() {
-            return Err(Error::Invalid("server command is required".into()));
+        if server.oauth_ref.is_some() {
+            return Err(Error::Invalid(
+                "new servers must not carry an OAuth credential reference".into(),
+            ));
+        }
+        match server.url.as_deref() {
+            Some(url) => {
+                server.url = Some(crate::remote::validate_url(url)?);
+                if !server.command.trim().is_empty()
+                    || !server.args.is_empty()
+                    || !server.env.is_empty()
+                {
+                    return Err(Error::Invalid(
+                        "a remote server has a URL, not a command".into(),
+                    ));
+                }
+                server.command.clear();
+                match server.auth {
+                    HttpAuth::Header if server.headers.is_empty() => {
+                        return Err(Error::Invalid("header auth needs a header".into()));
+                    }
+                    HttpAuth::Oauth => server.oauth_ref = Some(uuid::Uuid::new_v4().to_string()),
+                    _ => {}
+                }
+            }
+            None => {
+                if server.command.trim().is_empty() {
+                    return Err(Error::Invalid("server command is required".into()));
+                }
+                if !server.headers.is_empty() || server.auth != HttpAuth::None {
+                    return Err(Error::Invalid(
+                        "headers and auth apply to remote servers only".into(),
+                    ));
+                }
+            }
         }
         {
             let mut config = self.config.write().await;
@@ -326,36 +359,95 @@ impl Gateway {
     }
 
     pub async fn remove_server(&self, server_id: &str) -> Result<()> {
-        let credential_ref = {
+        let removed = {
             let mut config = self.config.write().await;
             let server = config
                 .servers
                 .iter()
                 .find(|s| s.id == server_id)
-                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
-            let credential_ref = server.credential_ref.clone();
+                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?
+                .clone();
             let mut updated = config.clone();
             updated.servers.retain(|s| s.id != server_id);
             updated.save(&self.config_path)?;
             *config = updated;
-            credential_ref
+            server
         };
         self.backends.remove(server_id).await;
-        if let Some(id) = credential_ref {
-            let store = self.credentials.clone();
-            tokio::task::spawn_blocking(move || crate::credentials::delete(store.as_ref(), &id))
-                .await
-                .map_err(|_| {
-                    Error::Gateway(
-                        "server removed, but credential cleanup could not complete".into(),
-                    )
-                })??;
-        }
+        let store = self.credentials.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(id) = &removed.credential_ref {
+                crate::credentials::delete(store.as_ref(), id)?;
+            }
+            crate::remote::forget_tokens(store.as_ref(), &removed)
+        })
+        .await
+        .map_err(|_| {
+            Error::Gateway("server removed, but credential cleanup could not complete".into())
+        })??;
         Ok(())
     }
 
     pub async fn restart_server(&self, server_id: &str) -> Result<()> {
         self.backends.restart(server_id).await
+    }
+
+    async fn server_config(&self, server_id: &str) -> Result<ServerConfig> {
+        self.config
+            .read()
+            .await
+            .servers
+            .iter()
+            .find(|s| s.id == server_id)
+            .cloned()
+            .ok_or_else(|| Error::NotFound(format!("server {server_id}")))
+    }
+
+    /// Start a browser sign-in for an OAuth server and return the URL to open. The server
+    /// reconnects on its own once the browser comes back; a failure lands in its status.
+    pub async fn sign_in_server(self: &Arc<Self>, server_id: &str) -> Result<String> {
+        let config = self.server_config(server_id).await?;
+        if config.auth != HttpAuth::Oauth {
+            return Err(Error::Invalid("this server does not use OAuth".into()));
+        }
+        let sign_in = crate::remote::begin_sign_in(&config, self.credentials.clone()).await?;
+        let url = sign_in.url;
+        let gateway = self.clone();
+        tokio::spawn(async move {
+            let outcome = sign_in
+                .done
+                .await
+                .unwrap_or_else(|_| Err(Error::Gateway("sign-in was cancelled".into())));
+            match outcome {
+                Ok(()) => {
+                    gateway.backends.stop(&config.id).await;
+                    gateway.backends.start(config).await;
+                }
+                Err(err) => {
+                    gateway
+                        .backends
+                        .mark_failed(&config.id, err.to_string())
+                        .await
+                }
+            }
+        });
+        Ok(url)
+    }
+
+    /// Forget an OAuth server's tokens and registration. It shows as needing a sign-in.
+    pub async fn sign_out_server(&self, server_id: &str) -> Result<()> {
+        let config = self.server_config(server_id).await?;
+        if config.auth != HttpAuth::Oauth {
+            return Err(Error::Invalid("this server does not use OAuth".into()));
+        }
+        self.backends.stop(server_id).await;
+        let store = self.credentials.clone();
+        let forget = config.clone();
+        tokio::task::spawn_blocking(move || crate::remote::forget_tokens(store.as_ref(), &forget))
+            .await
+            .map_err(|_| Error::Gateway("could not reach the credential store".into()))??;
+        self.backends.start(config).await;
+        Ok(())
     }
 
     pub async fn agents(&self) -> Vec<AgentView> {

@@ -1,5 +1,6 @@
 /** Fixture backend for `pnpm dev` in a plain browser, where Tauri's invoke is absent. Never used inside the app. */
 import type {
+  HttpAuth,
   ActivitySummary,
   AgentActivity,
   DayActivity,
@@ -20,9 +21,11 @@ import type {
 const iso = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
 
 const servers: ServerView[] = [
-  { id: "s1", name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/george/Projects"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 11 } },
-  { id: "s2", name: "github", command: "docker", args: ["run", "-i", "--rm", "ghcr.io/github/github-mcp-server"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 42 } },
-  { id: "s3", name: "postgres", command: "uvx", args: ["mcp-server-postgres", "postgres://localhost/app"], env: {}, credentials_stored: true, enabled: true, status: { kind: "failed", error: "connection refused (127.0.0.1:5432)" } },
+  { id: "s1", name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/george/Projects"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 11 }, url: null, auth: "none" },
+  { id: "s2", name: "github", command: "docker", args: ["run", "-i", "--rm", "ghcr.io/github/github-mcp-server"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 42 }, url: null, auth: "none" },
+  { id: "s3", name: "postgres", command: "uvx", args: ["mcp-server-postgres", "postgres://localhost/app"], env: {}, credentials_stored: true, enabled: true, status: { kind: "failed", error: "connection refused (127.0.0.1:5432)" }, url: null, auth: "none" },
+  { id: "s4", name: "linear", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "sign_in_required" }, url: "https://mcp.linear.app/mcp", auth: "oauth" },
+  { id: "s5", name: "cloudflare docs", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "running", tool_count: 2 }, url: "https://docs.mcp.cloudflare.com/mcp", auth: "none" },
 ];
 const agents: AgentConfig[] = [
   { id: "host:claude-code", name: "Claude Code", client_name: "claude-code", client_version: null, status: "approved", created_at: iso(3600 * 30), decided_at: iso(3600 * 30), posture: "trusted", attention: "silent", client_id: null, host: "claude-code", connected: false, tokens: [] },
@@ -168,11 +171,30 @@ export const mock = {
   get_status: (): Promise<GatewayStatus> =>
     delay({ listen_port: 9086, listening: true, servers_running: servers.filter((s) => s.status.kind === "running").length, servers_total: servers.length, agent_count: agents.length, pending_count: pending.length, pending_agents: agents.filter((a) => a.status === "pending").length, pending_signins: signins.length, auto_open_on_pending: settings.auto_open_on_pending, do_not_disturb: settings.do_not_disturb }),
   list_servers: () => delay(servers),
-  add_server: (a: { args: { name: string; command: string; args: string[]; env: Record<string, string> } }) => {
-    const s: ServerView = { id: `s${Date.now()}`, ...a.args, args: [], env: {}, credentials_stored: a.args.args.length > 0 || Object.keys(a.args.env).length > 0, enabled: true, status: { kind: "starting" } };
+  add_server: (a: { args: { name: string; command?: string; args?: string[]; env?: Record<string, string>; url?: string; auth?: HttpAuth; headers?: Record<string, string> } }) => {
+    const remote = !!a.args.url;
+    const auth = a.args.auth ?? "none";
+    const s: ServerView = {
+      id: `s${Date.now()}`,
+      name: a.args.name,
+      command: remote ? "" : (a.args.command ?? ""),
+      args: [],
+      env: {},
+      credentials_stored: (a.args.args?.length ?? 0) > 0 || Object.keys(a.args.env ?? {}).length > 0 || Object.keys(a.args.headers ?? {}).length > 0,
+      enabled: true,
+      status: remote && auth === "oauth" ? { kind: "sign_in_required" } : { kind: "starting" },
+      url: a.args.url ?? null,
+      auth,
+    };
     servers.push(s);
     return delay(s);
   },
+  sign_in_server: (a: { serverId: string }) => {
+    const s = servers.find((x) => x.id === a.serverId)!;
+    window.setTimeout(() => { s.status = { kind: "running", tool_count: 9 }; }, 1500);
+    return delay("https://mcp.example.com/authorize?client_id=prism");
+  },
+  sign_out_server: (a: { serverId: string }) => { servers.find((x) => x.id === a.serverId)!.status = { kind: "sign_in_required" }; return delay(undefined); },
   remove_server: (a: { serverId: string }) => { servers.splice(servers.findIndex((s) => s.id === a.serverId), 1); return delay(undefined); },
   restart_server: () => delay(undefined),
   list_agents: () => delay(agents),

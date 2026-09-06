@@ -2,7 +2,11 @@ export type BackendStatus =
   | { kind: "starting" }
   | { kind: "running"; tool_count: number }
   | { kind: "failed"; error: string }
-  | { kind: "stopped" };
+  | { kind: "stopped" }
+  | { kind: "sign_in_required" };
+
+/** How a remote server is authenticated. Secrets live in the keyring, never in prism.json. */
+export type HttpAuth = "none" | "header" | "oauth";
 
 export interface GatewayStatus {
   listen_port: number;
@@ -63,6 +67,9 @@ export interface ServerView {
   credentials_stored: boolean;
   enabled: boolean;
   status: BackendStatus;
+  /** Endpoint of a remote server; null for a stdio one. */
+  url: string | null;
+  auth: HttpAuth;
 }
 
 export type AgentStatus = "pending" | "approved" | "denied";

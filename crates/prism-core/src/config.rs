@@ -6,21 +6,61 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-/// A user-configured stdio MCP server that Prism will spawn.
+/// A user-configured MCP server: a stdio command Prism spawns, or a remote Streamable HTTP URL.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerConfig {
     pub id: String,
     pub name: String,
+    /// Executable for a stdio server. Empty for a remote one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// OS credential-store reference for argument and environment values.
+    /// OS credential-store reference for argument, environment and header values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Streamable HTTP endpoint of a remote server. When set, `command` is unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// How a remote server is authenticated.
+    #[serde(default, skip_serializing_if = "HttpAuth::is_none")]
+    pub auth: HttpAuth,
+    /// Extra request headers for a remote server, such as an API key. Plaintext only
+    /// until protected; then they live in the credential store like `env`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Credential-store reference for the OAuth client registration and tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_ref: Option<String>,
+}
+
+impl ServerConfig {
+    pub fn is_remote(&self) -> bool {
+        self.url.is_some()
+    }
+}
+
+/// Authentication for a remote server. Secrets never sit in `prism.json`: a header value is
+/// kept in the credential store, and OAuth tokens under `oauth_ref`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpAuth {
+    #[default]
+    None,
+    /// A fixed header on every request, typically `Authorization: Bearer <key>`.
+    Header,
+    /// OAuth 2.1 with dynamic client registration and PKCE; Prism signs in through the browser.
+    Oauth,
+}
+
+impl HttpAuth {
+    pub fn is_none(&self) -> bool {
+        matches!(self, HttpAuth::None)
+    }
 }
 
 /// Whether an agent may see and call tools. New agents start pending until a human decides.
@@ -405,6 +445,10 @@ mod tests {
                 args: Vec::new(),
                 env: BTreeMap::new(),
                 credential_ref: Some(uuid::Uuid::new_v4().to_string()),
+                url: None,
+                auth: HttpAuth::None,
+                headers: Default::default(),
+                oauth_ref: None,
                 enabled: true,
             }],
             agents: vec![AgentConfig {

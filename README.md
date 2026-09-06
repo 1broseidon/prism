@@ -12,7 +12,7 @@
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-lightgrey?labelColor=1c1917"></a>
 </p>
 
-- **One endpoint.** Every agent connects to `http://127.0.0.1:9086/mcp`. Prism spawns your real MCP servers over stdio and exposes their tools as `{server}__{tool}`.
+- **One endpoint.** Every agent connects to `http://127.0.0.1:9086/mcp`. Prism runs your MCP servers over stdio or connects to them over HTTP, and exposes their tools as `{server}__{tool}`.
 - **Held calls.** A call that needs you shows up as a card with a two-minute countdown. Allow once, allow for 30 minutes, always allow this tool, or allow everything on that server. Denial is a first-class answer with a clear refusal to the agent.
 - **Approval is consent.** Prism is its own OAuth 2.1 authorization server. A new agent registers, a browser parks on the consent step, and the approve card in the panel is that consent. Clients without OAuth get a manual bearer token.
 - **Secrets stay in the keychain.** Server arguments and environment go into the OS credential store, never into a config file. The audit log is redacted and rotated.
@@ -72,9 +72,19 @@ The panel has four tabs. **Now** holds anything waiting for you plus the recent 
 
 ## Add a server
 
-**Servers → Add server.** Give it a name, the executable, its arguments, and any environment variables. Prism does not install servers; it launches whatever executable you name, wherever your package manager put it.
+**Servers → Add server.** A server is either a command Prism runs or a URL it connects to.
 
-Arguments and environment values go straight into the OS credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. Prism protects *all* of them rather than guessing which ones are secrets, since tokens have a way of ending up in URLs and positional arguments. `prism.json` keeps only the name, executable, enabled flag and an opaque credential reference. Copying `prism.json` to another machine does not copy credentials; add the servers again there.
+**Command.** Give it a name, the executable, its arguments, and any environment variables. Prism does not install servers; it launches whatever executable you name, wherever your package manager put it.
+
+**URL.** Give it a name and the server's Streamable HTTP endpoint, then say how it authenticates:
+
+- **None.** Public servers such as `https://docs.mcp.cloudflare.com/mcp`.
+- **API key.** A header sent on every request. The key goes in the `Authorization` header as `Bearer …` unless you name another header or give your own prefix. Use this for servers that hand out personal tokens rather than offering OAuth, such as GitHub's `https://api.githubcopilot.com/mcp/`.
+- **OAuth.** Prism signs in through your browser. It reads the server's sign-in settings from its 401 challenge, registers itself as a public client (dynamic client registration), runs the authorization code flow with PKCE, and takes the code back on a loopback listener that exists for that one sign-in. Servers that speak this include Linear, Sentry, Notion and Cloudflare. Servers without registration, such as GitHub, cannot be added this way; use an API key. **Sign out** on the row forgets the tokens; the server shows *needs sign-in* until you sign in again, which the row also offers.
+
+URLs must be https, except plain http to this machine. Headers and tokens follow the same rule as every other secret below.
+
+Arguments, headers, environment values and OAuth tokens go straight into the OS credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. Prism protects *all* of them rather than guessing which ones are secrets, since tokens have a way of ending up in URLs and positional arguments. `prism.json` keeps only the name, executable or URL, auth mode, enabled flag and an opaque credential reference. Copying `prism.json` to another machine does not copy credentials; add the servers again there.
 
 Servers receive a small environment allowlist (PATH, HOME, locale, temp and XDG directories, the platform's display and profile variables) plus what you configured. Your shell's other tokens are not inherited. Server stderr is discarded so a chatty server cannot echo a credential into a log.
 

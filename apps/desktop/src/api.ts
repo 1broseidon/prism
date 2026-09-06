@@ -19,6 +19,7 @@ import type {
   Attention,
   GatewayStatus,
   HookInstallResult,
+  HttpAuth,
   NativeStatus,
   NewRule,
   PendingCall,
@@ -40,17 +41,32 @@ export function listServers() {
   return invoke<ServerView[]>("list_servers");
 }
 
-export function addServer(args: {
+export interface AddServerArgs {
   name: string;
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-}) {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** Remote server endpoint. When set, command is ignored. */
+  url?: string;
+  auth?: HttpAuth;
+  headers?: Record<string, string>;
+}
+
+export function addServer(args: AddServerArgs) {
   return invoke<ServerView>("add_server", { args });
 }
 
 export function removeServer(serverId: string) {
   return invoke<void>("remove_server", { serverId });
+}
+
+/** Starts a browser sign-in for an OAuth server. The desktop opens the URL; it is also returned. */
+export function signInServer(serverId: string) {
+  return invoke<string>("sign_in_server", { serverId });
+}
+
+export function signOutServer(serverId: string) {
+  return invoke<void>("sign_out_server", { serverId });
 }
 
 export function restartServer(serverId: string) {

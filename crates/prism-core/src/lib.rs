@@ -13,6 +13,7 @@ mod http_security;
 pub mod native;
 mod oauth;
 mod policy;
+mod remote;
 mod shell_path;
 mod storage;
 
@@ -23,8 +24,8 @@ pub use approval::{
 pub use audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict, NativeDetail};
 pub use backend::{BackendStatus, ServerView};
 pub use config::{
-    AgentConfig, AgentStatus, Attention, PanelAnchor, Posture, PrismConfig, Rule, RuleDecision,
-    RuleScope, ServerConfig, TimeoutBehavior,
+    AgentConfig, AgentStatus, Attention, HttpAuth, PanelAnchor, Posture, PrismConfig, Rule,
+    RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
 };
 pub use config::{OAuthClient, TokenKind, TokenRecord};
 pub use error::{Error, Result};
