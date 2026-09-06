@@ -398,6 +398,13 @@ fn with_query(uri: &str, params: &[(&str, &str)]) -> String {
     out
 }
 
+/// `issuer` is `http://127.0.0.1:PORT` with no trailing slash. Accepts that origin
+/// (with or without a slash) and the `/mcp` endpoint, which is what clients dial.
+fn resource_matches(issuer: &str, resource: &str) -> bool {
+    let got = resource.trim_end_matches('/');
+    got == issuer || got == format!("{issuer}/mcp")
+}
+
 fn error_redirect(
     redirect_uri: &str,
     error: &str,
@@ -419,8 +426,19 @@ impl Gateway {
         format!("http://127.0.0.1:{}", self.listen_port)
     }
 
+    /// RFC 8707 resource indicator: the origin, with a trailing slash.
+    ///
+    /// Claude Code's MCP SDK checks `checkResourceAllowed({ requested: serverUrl,
+    /// configured: metadata.resource })` — the URL the client dialed must be a
+    /// path under the advertised resource. Advertising `/mcp` fails when the
+    /// client treats the server as `http://127.0.0.1:PORT/` (the origin). The
+    /// origin accepts both that and `…/mcp`.
     fn resource(&self) -> String {
-        format!("{}/mcp", self.issuer())
+        format!("{}/", self.issuer())
+    }
+
+    fn accepts_resource(&self, resource: &str) -> bool {
+        resource_matches(&self.issuer(), resource)
     }
 
     pub fn protected_resource_metadata(&self) -> serde_json::Value {
@@ -631,8 +649,11 @@ impl Gateway {
             return fail("invalid_request", "code_challenge_method must be S256");
         }
         if let Some(resource) = params.resource.as_deref() {
-            if resource.trim_end_matches('/') != self.resource() {
-                return fail("invalid_target", "resource must be this gateway's /mcp URL");
+            if !self.accepts_resource(resource) {
+                return fail(
+                    "invalid_target",
+                    "resource must be this gateway's origin or /mcp URL",
+                );
             }
         }
 
@@ -1556,5 +1577,17 @@ mod tests {
         assert_eq!(hash_token("abc").len(), 64);
         assert_eq!(hash_token("abc"), hash_token("abc"));
         assert_ne!(hash_token("abc"), hash_token("abd"));
+    }
+
+    #[test]
+    fn resource_matches_origin_or_mcp() {
+        let issuer = "http://127.0.0.1:9086";
+        assert!(resource_matches(issuer, "http://127.0.0.1:9086"));
+        assert!(resource_matches(issuer, "http://127.0.0.1:9086/"));
+        assert!(resource_matches(issuer, "http://127.0.0.1:9086/mcp"));
+        assert!(resource_matches(issuer, "http://127.0.0.1:9086/mcp/"));
+        assert!(!resource_matches(issuer, "http://127.0.0.1:9086/hooks"));
+        assert!(!resource_matches(issuer, "http://127.0.0.1:1/"));
+        assert!(!resource_matches(issuer, "http://localhost:9086/"));
     }
 }

@@ -178,6 +178,64 @@ async fn start() -> (std::sync::Arc<Gateway>, u16, tempfile::TempDir) {
 }
 
 #[tokio::test]
+async fn authorize_accepts_origin_resource_and_rejects_a_foreign_one() {
+    let (gateway, port, _dir) = start().await;
+    let reg = http(
+        port,
+        "POST",
+        "/register",
+        &[("Content-Type", "application/json")],
+        r#"{"client_name":"claude-code","redirect_uris":["http://localhost:4444/cb"]}"#,
+    )
+    .await;
+    let client_id = serde_json::from_str::<serde_json::Value>(&reg.body).unwrap()["client_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(
+        b"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    ));
+    let authorize = |resource: String| {
+        let client_id = client_id.clone();
+        let challenge = challenge.clone();
+        async move {
+            http(
+                port,
+                "GET",
+                &format!(
+                    "/authorize?response_type=code&client_id={client_id}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&resource={}",
+                    urlencoding("http://localhost:4444/cb"),
+                    urlencoding(&resource)
+                ),
+                &[],
+                "",
+            )
+            .await
+        }
+    };
+
+    let foreign = authorize(format!("http://127.0.0.1:{port}/hooks")).await;
+    assert_eq!(foreign.status, 303, "{}", foreign.body);
+    let location = &foreign.headers["location"];
+    assert!(location.contains("invalid_target"), "{location}");
+
+    let parked = tokio::spawn(authorize(format!("http://127.0.0.1:{port}/")));
+    let signin = wait_for_signin(&gateway).await;
+    gateway.decide_signin(&signin.id, false).unwrap();
+    let denied = tokio::time::timeout(Duration::from_secs(5), parked)
+        .await
+        .expect("authorize returned")
+        .unwrap();
+    assert_eq!(denied.status, 303, "{}", denied.body);
+    assert!(
+        denied.headers["location"].contains("access_denied"),
+        "{}",
+        denied.headers["location"]
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn loopback_host_and_browser_origin_checks_preserve_native_clients() {
     let (gateway, port, _dir) = start().await;
     for (method, path) in [
@@ -292,6 +350,30 @@ async fn register_authorize_token_and_call() {
         www.contains("resource_metadata=\"http://127.0.0.1:"),
         "{www}"
     );
+
+    // Claude Code's SDK requires the advertised resource to be a prefix of the
+    // URL it dialed. The origin covers both `http://127.0.0.1:PORT/` and `/mcp`.
+    let prm = http(
+        port,
+        "GET",
+        "/.well-known/oauth-protected-resource",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(prm.status, 200);
+    let prm: serde_json::Value = serde_json::from_str(&prm.body).unwrap();
+    assert_eq!(prm["resource"], format!("http://127.0.0.1:{port}/"));
+    let prm_path = http(
+        port,
+        "GET",
+        "/.well-known/oauth-protected-resource/mcp",
+        &[],
+        "",
+    )
+    .await;
+    let prm_path: serde_json::Value = serde_json::from_str(&prm_path.body).unwrap();
+    assert_eq!(prm_path["resource"], format!("http://127.0.0.1:{port}/"));
 
     // Dynamic registration is open.
     let reg = http(
