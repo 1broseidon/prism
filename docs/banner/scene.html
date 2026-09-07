@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Prism banner</title>
+<!-- The README banner, 1280x640, drawn on the panel's tokens (see apps/desktop/src/tokens.css). build.sh turns it into ../banner.svg and ../banner.png. -->
+<style>
+  @font-face { font-family: "Geist"; font-weight: 100 900; src: url("../../apps/desktop/src/fonts/Geist-Variable.woff2") format("woff2"); }
+  @font-face { font-family: "Geist Mono"; font-weight: 100 900; src: url("../../apps/desktop/src/fonts/GeistMono-Variable.woff2") format("woff2"); }
+</style>
+<style>
+    body { margin: 0; background: oklch(12.5% 0.012 60); color: oklch(96% 0.008 80); font-family: 'Geist', -apple-system, 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: oklch(78% 0.17 65); } a:hover { color: oklch(83% 0.16 68); }
+    @keyframes blink { 50% { opacity: .2; } }
+    @keyframes ring { 0% { opacity: .9; transform: scale(.55); } 100% { opacity: 0; transform: scale(1.5); } }
+    @keyframes travel { 0% { opacity: 0; offset-distance: 0%; } 6% { opacity: 1; } 48% { opacity: 1; offset-distance: 100%; } 54% { opacity: 0; offset-distance: 100%; } 100% { opacity: 0; offset-distance: 100%; } }
+    @keyframes drift { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+  </style>
+</head>
+<body>
+<div id="stage" data-svg="stage" style="position: relative; width: 1280px; height: 640px; overflow: hidden; color: oklch(96% 0.008 80); background: radial-gradient(900px 600px at 78% 18%, oklch(30% 0.05 62 / 0.55), transparent 65%), radial-gradient(700px 500px at 20% 90%, oklch(24% 0.03 220 / 0.5), transparent 60%), linear-gradient(180deg, oklch(16% 0.016 62), oklch(12.5% 0.012 60));">
+  <div data-svg="skip" style="position: absolute; inset: 0; background: linear-gradient(112deg, transparent 38%, oklch(78% 0.17 65 / 0.06) 46%, oklch(85% 0.1 200 / 0.05) 50%, transparent 58%);"></div>
+  <div style="position: absolute; top: 0; left: 0; right: 0; height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px 0 16px; font-size: 12.5px; font-weight: 500; color: oklch(74% 0.01 75); background: oklch(14% 0.012 60 / 0.75);">
+    <div style="display: flex; align-items: center; gap: 18px;"><b style="color: oklch(96% 0.008 80); font-weight: 600;">Terminal</b><span>File</span><span>Edit</span><span>View</span><span>Window</span></div>
+    <div style="display: flex; align-items: center; gap: 14px; font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12px;">
+      <svg viewBox="0 0 26 12" width="26" height="12" style="display: block;" aria-label="Battery"><rect x="0.75" y="0.75" width="21.5" height="10.5" rx="3" fill="none" stroke="oklch(74% 0.01 75)" stroke-width="1.5"></rect><rect x="3" y="3" width="15" height="6" rx="1.5" fill="oklch(74% 0.01 75)"></rect><rect x="23.5" y="3.5" width="2" height="5" rx="1" fill="oklch(74% 0.01 75)"></rect></svg>
+      <span style="position: relative; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; background: oklch(96% 0.008 80 / 0.14);">
+        <span data-svg="ring" style="position: absolute; inset: -6px; border-radius: 50%; border: 1.5px solid oklch(78% 0.17 65); animation: ring 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;"></span>
+        <svg viewBox="0 0 64 64" width="16" height="16" style="display: block; flex-shrink: 0;" aria-label="Prism"><polygon points="8,50 30,12 38,50" fill="oklch(78% 0.17 65)"></polygon><polygon points="42,50 30,12 52,18 56,50" fill="oklch(78% 0.17 65)"></polygon></svg>
+      </span>
+      <span>Tue 10:42</span>
+    </div>
+  </div>
+  <div style="position: absolute; left: 72px; top: 72px; display: flex; align-items: center; gap: 12px;"><svg viewBox="0 0 64 64" width="30" height="30" style="display: block; flex-shrink: 0;" aria-label="Prism"><polygon points="8,50 30,12 38,50" fill="oklch(96% 0.008 80)"></polygon><polygon points="42,50 30,12 52,18 56,50" fill="oklch(96% 0.008 80)"></polygon></svg><div style="font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1;">Prism</div></div>
+  <div style="position: absolute; left: 72px; top: 226px; font-size: 64px; font-weight: 600; letter-spacing: -0.04em; line-height: 1.05;">Your agents ask.<br>You decide.</div>
+  <div style="position: absolute; left: 72px; top: 386px; max-width: 44ch; font-size: 18px; color: oklch(74% 0.01 75); line-height: 1.45;">Every action your agents take, on the record. The ones that matter wait for you.</div>
+  <div data-svg="shadow" style="position: absolute; top: 40px; right: 64px; width: 400px; display: flex; flex-direction: column; background: oklch(17% 0.01 60); border-radius: 20px; box-shadow: 0 0 0 1px oklch(96% 0.008 80 / 0.14), 0 8px 24px -8px oklch(0% 0 0 / 0.55), 0 2px 6px oklch(0% 0 0 / 0.35);">
+    <div style="height: 60px; display: flex; align-items: center; gap: 12px; padding: 0 16px 0 22px; flex-shrink: 0;">
+      <svg viewBox="0 0 64 64" width="22" height="22" style="display: block; flex-shrink: 0;" aria-label="Prism"><polygon points="8,50 30,12 38,50" fill="oklch(96% 0.008 80)"></polygon><polygon points="42,50 30,12 52,18 56,50" fill="oklch(96% 0.008 80)"></polygon></svg>
+      <div style="font-size: 18px; font-weight: 600; letter-spacing: -0.03em;">Prism</div>
+      <div style="display: inline-flex; align-items: center; gap: 7px; color: oklch(56% 0.012 70); font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px;"><span style="width: 7px; height: 7px; border-radius: 50%; background: oklch(74% 0.15 150);"></span>2 agents</div>
+      <div style="flex: 1;"></div>
+      <div style="width: 32px; height: 32px; border-radius: 9px; background: oklch(22% 0.012 60); display: grid; place-items: center; color: oklch(74% 0.01 75); font-size: 16px;">×</div>
+    </div>
+    <div style="padding: 0 16px 16px; display: flex; flex-direction: column; gap: 16px;">
+      <div style=" width: 368px; padding: 18px 20px 20px; border-radius: 16px; background: oklch(22% 0.012 60); display: flex; flex-direction: column; box-sizing: border-box;">
+  <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
+    <div style="padding-top: 7px; font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: oklch(78% 0.17 65);">Waiting for you</div>
+    <div style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 26px; font-weight: 300; letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums;">01:58</div>
+  </div>
+  <div style="margin-top: 14px; font-size: 21px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.2; text-wrap: balance;">Claude Code wants to call <span style="color: oklch(78% 0.17 65); font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 18px; font-weight: 500; letter-spacing: -0.01em;">merge_pull_request</span></div>
+  <div style="margin-top: 6px; color: oklch(74% 0.01 75); font-size: 13.5px;">on <code style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12.5px;">github</code></div>
+  <div style="margin-top: 12px; padding: 10px 12px; border-radius: 9px; background: oklch(27% 0.013 60); font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12px; line-height: 1.5; color: oklch(74% 0.01 75); white-space: pre; overflow: hidden;">{
+  <span style="color: oklch(56% 0.012 70);">"owner"</span>: <span style="color: oklch(96% 0.008 80);">"acme"</span>,
+  <span style="color: oklch(56% 0.012 70);">"repo"</span>: <span style="color: oklch(96% 0.008 80);">"api"</span>,
+  <span style="color: oklch(56% 0.012 70);">"pullNumber"</span>: <span style="color: oklch(96% 0.008 80);">142</span>,
+  <span style="color: oklch(56% 0.012 70);">"merge_method"</span>: <span style="color: oklch(96% 0.008 80);">"squash"</span>
+}</div>
+  <div style="display: grid; grid-template-columns: 1.6fr 1fr; gap: 10px; margin-top: 16px;">
+    <div style="height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 14.5px; font-weight: 600; letter-spacing: -0.015em; background: oklch(78% 0.17 65); color: oklch(17% 0.03 60);">Allow once <kbd style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 10.5px; font-weight: 500; padding: 3px 6px; border-radius: 5px; background: oklch(17% 0.03 60 / 0.12); color: oklch(17% 0.03 60);">A</kbd></div>
+    <div style="height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 14.5px; font-weight: 600; letter-spacing: -0.015em; background: transparent; color: oklch(96% 0.008 80); box-shadow: inset 0 0 0 1px oklch(96% 0.008 80 / 0.28);">Deny <kbd style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 10.5px; font-weight: 500; padding: 3px 6px; border-radius: 5px; background: oklch(27% 0.013 60); color: oklch(74% 0.01 75);">D</kbd></div>
+  </div>
+  <div style="display: flex; gap: 16px; margin-top: 14px; padding: 0 2px; font-size: 12.5px; color: oklch(74% 0.01 75);">
+    <span style="text-decoration: underline; text-decoration-color: oklch(96% 0.008 80 / 0.28); text-underline-offset: 3px;">Always allow this tool</span>
+    <span style="text-decoration: underline; text-decoration-color: oklch(96% 0.008 80 / 0.28); text-underline-offset: 3px;">Allow for 30 min</span>
+  </div>
+</div>
+      <div style="display: flex; flex-direction: column;">
+        <div style="display: flex; justify-content: space-between; align-items: baseline; padding: 0 4px 6px; font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: oklch(56% 0.012 70);"><span>Recent</span><span>Today</span></div>
+        <div style="display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 10px; height: 34px; padding: 0 4px; box-shadow: 0 -1px 0 oklch(96% 0.008 80 / 0.14); font-size: 12.5px;">
+        <time style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11.5px; color: oklch(56% 0.012 70); font-variant-numeric: tabular-nums;">10:42</time>
+        <span style="display: flex; align-items: center; gap: 8px; min-width: 0;"><span style="width: 7px; height: 7px; border-radius: 50%; background: oklch(56% 0.012 70); flex: none;"></span><b style="font-weight: 500;">Claude Code</b><code style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11.5px; color: oklch(74% 0.01 75);">Bash</code></span>
+        <span style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px; color: oklch(56% 0.012 70);">seen</span>
+      </div>
+        <div style="display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 10px; height: 34px; padding: 0 4px; box-shadow: 0 -1px 0 oklch(96% 0.008 80 / 0.14); font-size: 12.5px;">
+        <time style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11.5px; color: oklch(56% 0.012 70); font-variant-numeric: tabular-nums;">10:41</time>
+        <span style="display: flex; align-items: center; gap: 8px; min-width: 0;"><span style="width: 7px; height: 7px; border-radius: 50%; background: oklch(74% 0.15 150); flex: none;"></span><b style="font-weight: 500;">Cursor</b><code style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11.5px; color: oklch(74% 0.01 75);">list_issues</code></span>
+        <span style="font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px; color: oklch(56% 0.012 70);">rule</span>
+      </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

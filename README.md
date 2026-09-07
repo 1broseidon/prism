@@ -3,7 +3,7 @@
 **A local MCP gateway that lives in your system tray.** Point Claude Code, Cursor, Codex or any MCP client at one endpoint. Prism runs your MCP servers, aggregates their tools, and holds any call your rules mark as *ask* until you allow or deny it from the panel. Policies and audit history stay on this machine; requests to remote MCP servers go to the URLs you configure.
 
 <p align="center">
-  <img src="docs/intro.gif" alt="An agent asks for a tool, the tray turns amber, the panel opens and you allow or deny the call" width="960">
+  <img src="docs/banner.svg" alt="Your agents ask. You decide. The Prism tray icon glows amber and its panel holds a call: Claude Code wants to call merge_pull_request on GitHub, with Allow once and Deny buttons above a record of recent agent actions.">
 </p>
 
 <p align="center">
@@ -210,7 +210,8 @@ cargo test -p prism-core native_store_round_trip -- --ignored   # real keychain 
 
 - `crates/prism-core` is the headless gateway: policy, backends, approvals, OAuth, audit, storage.
 - `apps/desktop` is the Tauri v2 tray app. Preact and Vite on the panel side, a thin Rust host on the other. `src/tokens.css` is the design system; every colour in `src/styles.css` goes through it.
-- `docs/intro.html` is the animated walkthrough at the top of this page, self-contained.
+- `docs/banner/` is the README header as a page on the panel's tokens. `build.sh` measures it in headless Chromium and writes `docs/banner.svg` (text as outlines, the tray ring pulses) and `docs/banner.png`.
+- `docs/intro.html` is the animated walkthrough, self-contained, kept for the website.
 
 ## Releasing
 
