@@ -3,17 +3,19 @@ import * as api from "./api";
 import { loadAll, loadUpdateStatus, subscribeEvents } from "./events";
 import { AddServerScreen } from "./screens/AddServer";
 import { AgentScreen } from "./screens/Agent";
+import { AgentConnectionsScreen, AgentGrantsScreen, AgentHarnessScreen, AgentServersScreen } from "./screens/AgentSub";
 import { AgentToolsScreen } from "./screens/AgentTools";
 import { ActivityScreen } from "./screens/Activity";
 import { AgentsScreen } from "./screens/Agents";
 import { ConnectAgentScreen } from "./screens/ConnectAgent";
 import { HarnessSetupScreen } from "./screens/HarnessSetup";
+import { InspectCallScreen } from "./screens/InspectCall";
 import { hostName } from "./hosts";
 import { NowScreen } from "./screens/Now";
 import { RulesScreen } from "./screens/Rules";
 import { ServersScreen } from "./screens/Servers";
-import { SettingsScreen } from "./screens/Settings";
-import { agents, errorMessage, pending, pop, push, servers, stack, status, tab, update } from "./state";
+import { ObserveScreen, SettingsScreen, UpdatesScreen } from "./screens/Settings";
+import { agents, errorMessage, pending, pop, push, resetNavigation, servers, signins, stack, status, tab, update } from "./state";
 import type { Screen } from "./state";
 import { Button, Notice } from "./ui";
 
@@ -23,6 +25,10 @@ const TABS = [
   { id: "agents", label: "Agents" },
   { id: "rules", label: "Rules" },
 ] as const;
+
+function agentName(agentId: string): string {
+  return agents.value.find((a) => a.id === agentId)?.name ?? hostName(agentId);
+}
 
 function titleOf(screen: Screen): string {
   switch (screen.kind) {
@@ -36,6 +42,20 @@ function titleOf(screen: Screen): string {
       return "Settings";
     case "agent":
       return agents.value.find((a) => a.id === screen.agentId)?.name ?? "Agent";
+    case "agent-connections":
+      return `${agentName(screen.agentId)} · Connections`;
+    case "agent-harness":
+      return `${agentName(screen.agentId)} · Setup`;
+    case "agent-servers":
+      return `${agentName(screen.agentId)} · Servers`;
+    case "agent-grants":
+      return `${agentName(screen.agentId)} · Grants`;
+    case "inspect-call":
+      return pending.value.find((p) => p.id === screen.callId)?.tool ?? "Request";
+    case "settings-observe":
+      return "Observation";
+    case "settings-updates":
+      return "Updates";
     case "agent-server":
       return servers.value.find((s) => s.id === screen.serverId)?.name ?? "Server";
     case "host":
@@ -83,7 +103,7 @@ export function App() {
   }, []);
 
   const st = status.value;
-  const waiting = pending.value.length + (st?.pending_agents ?? 0) + (st?.pending_signins ?? 0);
+  const waiting = pending.value.length + agents.value.filter((agent) => agent.status === "pending").length + signins.value.length;
   const top = stack.value[stack.value.length - 1];
 
   return (
@@ -95,6 +115,16 @@ export function App() {
               ←
             </Button>
             <h1 class="screen-title truncate">{titleOf(top)}</h1>
+            {waiting > 0 ? (
+              <button
+                type="button"
+                class="waiting"
+                aria-label={`${waiting} requests waiting, open the queue`}
+                onClick={resetNavigation}
+              >
+                {waiting} waiting
+              </button>
+            ) : null}
           </>
         ) : (
           <>
@@ -154,14 +184,21 @@ export function App() {
           }}
         />
       ) : null}
-      <main class="body" key={top ? `${JSON.stringify(top)}:${stack.value.length}` : tab.value}>
+      <main class="body">
         {top?.kind === "add-server" ? <AddServerScreen /> : null}
         {top?.kind === "connect-agent" ? <ConnectAgentScreen /> : null}
         {top?.kind === "harness-setup" ? <HarnessSetupScreen host={top.host} /> : null}
         {top?.kind === "settings" ? <SettingsScreen /> : null}
         {top?.kind === "agent" ? <AgentScreen agentId={top.agentId} /> : null}
         {top?.kind === "host" ? <AgentScreen agentId={top.agentId} /> : null}
+        {top?.kind === "agent-connections" ? <AgentConnectionsScreen agentId={top.agentId} /> : null}
+        {top?.kind === "agent-harness" ? <AgentHarnessScreen agentId={top.agentId} /> : null}
+        {top?.kind === "agent-servers" ? <AgentServersScreen agentId={top.agentId} /> : null}
+        {top?.kind === "agent-grants" ? <AgentGrantsScreen agentId={top.agentId} /> : null}
+        {top?.kind === "settings-observe" ? <ObserveScreen /> : null}
+        {top?.kind === "settings-updates" ? <UpdatesScreen /> : null}
         {top?.kind === "activity" ? <ActivityScreen filter={top} /> : null}
+        {top?.kind === "inspect-call" ? <InspectCallScreen callId={top.callId} /> : null}
         {top?.kind === "agent-server" ? <AgentToolsScreen agentId={top.agentId} serverId={top.serverId} /> : null}
         {!top && tab.value === "now" ? <NowScreen /> : null}
         {!top && tab.value === "servers" ? <ServersScreen /> : null}

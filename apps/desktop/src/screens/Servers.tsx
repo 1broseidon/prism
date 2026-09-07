@@ -1,7 +1,7 @@
 import * as api from "../api";
 import { errorMessage, push, servers, status } from "../state";
 import type { BackendStatus, ServerView } from "../types";
-import { Button, Chip, ConfirmButton, Empty, Label, Screen, describeError } from "../ui";
+import { Button, Chip, ConfirmButton, Empty, Label, Pager, Screen, describeError, usePage } from "../ui";
 
 function statusChip(s: BackendStatus) {
   switch (s.kind) {
@@ -68,6 +68,7 @@ function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promis
 
 export function ServersScreen() {
   const list = servers.value;
+  const { rows, offset, setOffset, total } = usePage(list, 5);
 
   const act = async (fn: () => Promise<unknown>) => {
     try {
@@ -80,13 +81,20 @@ export function ServersScreen() {
 
   return (
     <div class="screen">
-      <Screen footer={<Button onClick={() => push({ kind: "add-server" })}>Add server</Button>}>
+      <Screen
+        footer={
+          <>
+            {total > 5 ? <Pager offset={offset} size={5} total={total} onOffset={setOffset} /> : undefined}
+            <Button onClick={() => push({ kind: "add-server" })}>Add server</Button>
+          </>
+        }
+      >
         <Label right={<span>{list.length}</span>}>MCP servers</Label>
         {list.length === 0 ? (
           <Empty title="No servers yet." />
         ) : (
           <div class="list">
-            {list.map((server) => (
+            {rows.map((server) => (
               <ServerRow key={server.id} server={server} act={act} />
             ))}
           </div>

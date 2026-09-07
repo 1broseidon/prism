@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
+import { panelTransition } from "./lifecycle";
 import {
   activity,
   activityError,
@@ -8,6 +9,7 @@ import {
   errorMessage,
   native,
   pending,
+  resetNavigation,
   rules,
   servers,
   signins,
@@ -87,8 +89,24 @@ export async function loadUpdateStatus(): Promise<void> {
   }
 }
 
+let panelVisible: boolean | null = null;
+
+export function onPanel(visible: boolean, reason: string): void {
+  const transition = panelTransition(panelVisible, visible);
+  panelVisible = visible;
+  if (transition !== "refresh") resetNavigation();
+  if (visible && !(transition === "refresh" && reason === "attention")) void loadAll();
+}
+
 export async function subscribeEvents(): Promise<() => void> {
-  if (!("__TAURI_INTERNALS__" in window)) return () => {};
+  if (!("__TAURI_INTERNALS__" in window)) {
+    const onVisibilityChange = () => onPanel(!document.hidden, "browser");
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }
+  const unlistenPanel = await listen<{ visible: boolean; reason: string }>("prism://panel", (event) => {
+    onPanel(event.payload.visible, event.payload.reason);
+  });
   const unlistenUpdate = await listen<UpdateEvent>("prism://update", (event) => {
     const p = event.payload;
     switch (p.state) {
@@ -155,6 +173,7 @@ export async function subscribeEvents(): Promise<() => void> {
     }
   });
   return () => {
+    unlistenPanel();
     unlisten();
     unlistenUpdate();
   };

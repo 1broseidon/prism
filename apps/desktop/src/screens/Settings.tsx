@@ -1,9 +1,10 @@
 import type * as preact from "preact";
+import { signal } from "@preact/signals";
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
-import { errorMessage, status, update, updateProgress } from "../state";
+import { errorMessage, push, status, update, updateProgress } from "../state";
 import type { Settings, UpdateStatus } from "../types";
-import { Button, Chip, Label, Screen, Segmented, Switch, describeError } from "../ui";
+import { Button, Chip, HubRow, Label, Screen, Segmented, Switch, describeError } from "../ui";
 import { native } from "../state";
 import { loadNativeStatus } from "../events";
 
@@ -51,7 +52,7 @@ function Notes({ text }: { text: string }) {
     }
   }
   flush();
-  return <div class="update-notes">{blocks}</div>;
+  return <div class="update-summary">{blocks}</div>;
 }
 
 function mb(bytes: number): string {
@@ -104,7 +105,7 @@ function UpdatesSection() {
           <div class="update-title">Prism {available.version} is ready</div>
           {available.notes ? <Notes text={available.notes} /> : null}
           <a class="update-link" href={releaseUrl(available.version)} target="_blank" rel="noreferrer">
-            Full release notes
+            Full release notes ↗
           </a>
           {progress?.state === "downloading" ? (
             <div class="update-progress" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total ?? undefined} aria-valuenow={progress.downloaded}>
@@ -198,6 +199,9 @@ function NativeSection() {
   );
 }
 
+/** The installed version, learned once from the updater for the Updates row. */
+const currentVersion = signal<string | null>(null);
+
 export function SettingsScreen() {
   const [settings, setSettings] = useState<Settings | null>(null);
 
@@ -205,6 +209,7 @@ export function SettingsScreen() {
     api.getSettings().then(setSettings).catch((err) => {
       errorMessage.value = describeError(err);
     });
+    if (!currentVersion.value) api.getUpdateStatus().then((st) => { currentVersion.value = st.current; }).catch(() => undefined);
   }, []);
 
   if (!settings) return <div class="screen pushed" />;
@@ -234,7 +239,7 @@ export function SettingsScreen() {
             <div class="setting">
               <div>
                 <div class="setting-title">Do not disturb</div>
-                <div class="hint">Held calls use the rule below. New agents still ask.</div>
+                <div class="hint">Held calls follow the rule below.</div>
               </div>
               <Switch label="Do not disturb" checked={settings.do_not_disturb} onChange={(v) => void save({ do_not_disturb: v })} />
             </div>
@@ -289,7 +294,7 @@ export function SettingsScreen() {
             <label class="setting">
               <div>
                 <div class="setting-title">Rate tripwire</div>
-                <div class="hint">Above this, allowed calls ask. Empty: off.</div>
+                <div class="hint">Allowed calls ask above this.</div>
               </div>
               <span class="num">
                 <input
@@ -309,7 +314,40 @@ export function SettingsScreen() {
             </label>
           </div>
         </section>
+        <section class="section hub">
+          <HubRow
+            label="Observation"
+            value={!(native.value?.observe_native ?? true) ? "off" : native.value?.last_event_at ? "observed" : "none yet"}
+            onClick={() => push({ kind: "settings-observe" })}
+          />
+          <HubRow
+            label="Updates"
+            value={update.value ? `${update.value.version} ready` : `v${currentVersion.value ?? "…"}`}
+            tone={update.value ? "accent" : undefined}
+            onClick={() => push({ kind: "settings-updates" })}
+          />
+        </section>
+      </Screen>
+    </div>
+  );
+}
+
+/** Native observation on its own screen: the switch, the export, the retention note. */
+export function ObserveScreen() {
+  return (
+    <div class="screen pushed">
+      <Screen>
         <NativeSection />
+      </Screen>
+    </div>
+  );
+}
+
+/** Updates on their own screen: version, a short summary of what is new, and the install. */
+export function UpdatesScreen() {
+  return (
+    <div class="screen pushed">
+      <Screen>
         <UpdatesSection />
       </Screen>
     </div>

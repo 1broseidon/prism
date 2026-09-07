@@ -1,19 +1,12 @@
-import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
-import { ManualTokenDetails } from "../ManualTokenDetails";
-import { hostStatus } from "../hosts";
-import { ATTENTIONS, POSTURES, findRule, setAccess } from "../policy";
-import { agents, errorMessage, native, pop, push, rules, servers, status } from "../state";
-import { relative, remaining } from "../time";
-import type { AgentConfig, Attention, Posture, Rule, RuleDecision, ManualToken } from "../types";
-import { Button, Chip, ConfirmButton, Label, Screen, Segmented, describeError } from "../ui";
+import { hostSetup, hostStatus } from "../hosts";
+import { ATTENTIONS, POSTURES } from "../policy";
+import { native, pop, push, rules, servers } from "../state";
+import { relative } from "../time";
+import type { AgentConfig, Attention, Posture } from "../types";
+import { Button, Chip, ConfirmButton, HubRow, Label, Screen, Segmented } from "../ui";
 import { coverageChip } from "./Agents";
-import { HarnessSections } from "./Host";
-
-async function refresh() {
-  agents.value = await api.listAgents();
-  status.value = await api.getStatus();
-}
+import { act, grantsOf, useAgent } from "./AgentSub";
 
 function statusChip(agent: AgentConfig) {
   switch (agent.status) {
@@ -26,54 +19,27 @@ function statusChip(agent: AgentConfig) {
   }
 }
 
-function decisionChip(d: RuleDecision) {
-  return <Chip tone={d === "allow" ? "ok" : d === "deny" ? "danger" : "warn"}>{d}</Chip>;
-}
-
-/** One agent: its status, where it connects from, its posture, how loudly it speaks, and what it may touch.
+/** One agent as a hub: its status, its posture and voice, then rows into what it connects with and may touch.
  *  A harness such as Claude Code is one agent however many installs or project scopes registered it. */
 export function AgentScreen({ agentId }: { agentId: string }) {
-  const [issued, setIssued] = useState<ManualToken | null>(null);
-  const [tokenBusy, setTokenBusy] = useState(false);
-  const agent = agents.value.find((a) => a.id === agentId);
-  const loaded = status.value !== null;
-  // Only leave once the first load has happened and the agent really is gone (forgotten elsewhere).
-  useEffect(() => {
-    if (loaded && !agent) pop();
-  }, [loaded, agent]);
+  const agent = useAgent(agentId);
   if (!agent) return <div class="screen pushed" />;
-
-  const act = async (fn: () => Promise<unknown>) => {
-    try {
-      await fn();
-      await refresh();
-    } catch (err) {
-      errorMessage.value = describeError(err);
-    }
-  };
-
-  const replaceToken = async () => {
-    if (tokenBusy) return;
-    setTokenBusy(true);
-    try { setIssued(await api.replaceManualToken(agent.id)); await refresh(); }
-    catch (err) { errorMessage.value = describeError(err); }
-    finally { setTokenBusy(false); }
-  };
-  if (issued) return <ManualTokenDetails issued={issued} onDone={() => setIssued(null)} />;
 
   const setPolicy = (patch: { posture?: Posture; attention?: Attention }) => void act(() => api.setAgentPolicy(agent.id, patch));
 
   const harness = !!agent.host;
   const manual = !harness && agent.clients.length === 0;
   const hs = hostStatus(native.value, agent.host ?? "");
+  const setup = hostSetup(native.value, agent.host ?? "");
   const mine = rules.value.filter((r) => r.agent_id === agent.id);
-  const grants: Rule[] = mine.filter((r) => r.tool !== null || r.expires_at !== null);
+  const grants = grantsOf(agent.id);
+  const set = new Set(mine.filter((r) => r.tool === null && r.expires_at === null).map((r) => r.server_id)).size;
+  const flagged = (hs?.by_reason ?? []).reduce((n, r) => n + r.count, 0);
   const postureHint = POSTURES.find((p) => p.value === agent.posture)?.hint;
   const attentionHint = ATTENTIONS.find((a) => a.value === agent.attention)?.hint;
   const when = agent.decided_at ? `${agent.status} ${relative(agent.decided_at)}` : `asked ${relative(agent.created_at)}`;
-  const access = agent.tokens.filter((t) => t.kind === "access");
-  const refreshes = agent.tokens.filter((t) => t.kind === "refresh");
   const signedIn = agent.tokens.length > 0;
+  const setupText = !native.value?.observe_native || setup?.hooks_disabled ? "observation off" : setup?.events_received ? "observed" : setup?.hook_installed ? "configured" : "not configured";
 
   const footer =
     agent.status === "approved" ? (
@@ -133,65 +99,6 @@ export function AgentScreen({ agentId }: { agentId: string }) {
         </div>
 
         <section class="section">
-          <Label right={agent.clients.length > 0 ? <span>{agent.clients.length}</span> : undefined}>{manual ? "Sign-in" : "Connections"}</Label>
-          {agent.clients.length > 0 ? (
-            <div class="list">
-              {agent.clients.map((client) => (
-                <div class="item" key={client.client_id}>
-                  <div class="title">
-                    <span class="truncate">{client.client_name}</span>
-                    {client.signed_in ? <Chip tone="ok">signed in</Chip> : <Chip>signed out</Chip>}
-                  </div>
-                  <div class="side">
-                    <ConfirmButton variant="quiet" class="danger" confirm="Forget?" onConfirm={() => void act(() => api.forgetClient(agent.id, client.client_id))}>
-                      Forget
-                    </ConfirmButton>
-                  </div>
-                  <div class="sub truncate">
-                    {client.origin ? `from ${client.origin} · ` : ""}
-                    registered {relative(client.created_at)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : harness ? (
-            <p class="hint">No MCP client yet. Point it at Prism from Connect an agent.</p>
-          ) : null}
-          {harness ? (
-            <p class="hint">Every install or project scope that registers Prism lands here after one sign-in consent.</p>
-          ) : null}
-          {agent.clients.length > 0 && signedIn ? (
-            <div class="setting">
-              <div>
-                <div class="setting-title">Signed in</div>
-                <div class="hint">
-                  {[
-                    access.length > 0 ? `access ${remaining(access[access.length - 1].expires_at!)} left` : "access expired",
-                    refreshes.length > 0 ? `refresh ${remaining(refreshes[refreshes.length - 1].expires_at!)} left` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </div>
-              </div>
-              <ConfirmButton variant="quiet" class="danger" confirm="Sign out?" onConfirm={() => void act(() => api.revokeAgentTokens(agent.id))}>
-                Sign out everywhere
-              </ConfirmButton>
-            </div>
-          ) : null}
-          {manual ? (
-            <>
-              {signedIn ? null : <p class="hint">Needs a token.</p>}
-              {agent.status === "approved" ? <div class="actions update-actions">
-                <Button busy={tokenBusy} onClick={() => void replaceToken()}>{signedIn ? "Replace token" : "Create token"}</Button>
-                {signedIn ? <ConfirmButton variant="quiet" class="danger" confirm="Revoke?" onConfirm={() => void act(() => api.revokeAgentTokens(agent.id))}>Revoke token</ConfirmButton> : null}
-              </div> : <p class="hint">Approve first.</p>}
-            </>
-          ) : null}
-        </section>
-
-        {harness ? <HarnessSections agentId={agent.id} host={agent.host!} /> : null}
-
-        <section class="section">
           <Label>Posture</Label>
           <Segmented label="Posture" value={agent.posture} options={POSTURES} onChange={(posture) => setPolicy({ posture })} />
           <p class="hint">{postureHint}</p>
@@ -203,79 +110,26 @@ export function AgentScreen({ agentId }: { agentId: string }) {
           <p class="hint">{attentionHint}</p>
         </section>
 
-        <section class="section">
-          <Label right={<span>{servers.value.length}</span>}>Servers</Label>
-          {servers.value.length === 0 ? (
-            <p class="hint">No servers yet.</p>
-          ) : (
-            <div class="list">
-              {servers.value.map((server) => {
-                const rule = findRule(rules.value, agent.id, server.id, null);
-                const overrides = mine.filter((r) => r.server_id === server.id && r.tool !== null).length;
-                return (
-                  <div class="item" key={server.id}>
-                    <button
-                      type="button"
-                      class="title row-btn"
-                      onClick={() => push({ kind: "agent-server", agentId: agent.id, serverId: server.id })}
-                    >
-                      <span class="truncate">{server.name}</span>
-                      <span class="chev" aria-hidden="true">
-                        ›
-                      </span>
-                    </button>
-                    <div class="side">
-                      <Segmented
-                        small
-                        label={`Access to ${server.name}`}
-                        value={rule?.decision ?? null}
-                        options={[
-                          { value: "allow", label: "All" },
-                          { value: "ask", label: "Ask" },
-                          { value: "deny", label: "None" },
-                        ]}
-                        onChange={(next) => void act(() => setAccess(agent.id, server.id, null, rule?.decision === next ? null : next))}
-                      />
-                    </div>
-                    <div class="sub">
-                      {rule ? "set here" : "follows posture"}
-                      {overrides > 0 ? ` · ${overrides} tool override${overrides === 1 ? "" : "s"}` : ""}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        <section class="section">
-          <Label right={<span>{grants.length}</span>}>Grants</Label>
-          {grants.length === 0 ? (
-            <p class="hint">None.</p>
-          ) : (
-            <div class="list">
-              {grants.map((rule) => (
-                <div class="item" key={rule.id}>
-                  <div class="title">
-                    {decisionChip(rule.decision)}
-                    <span class="truncate mono small">
-                      {servers.value.find((s) => s.id === rule.server_id)?.name ?? "any server"}
-                      {rule.tool ? ` / ${rule.tool}` : ""}
-                    </span>
-                  </div>
-                  <div class="side">
-                    <ConfirmButton variant="quiet" class="danger" confirm="Remove?" onConfirm={() => void act(async () => { await api.deleteRule(rule.id); rules.value = await api.listRules(); })}>
-                      Remove
-                    </ConfirmButton>
-                  </div>
-                  <div class="sub">
-                    {rule.expires_at ? `${remaining(rule.expires_at)} left` : rule.scope === "session" ? "this session" : "always"}
-                    {rule.attention ? ` · ${rule.attention}` : ""}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+        <section class="section hub">
+          <HubRow
+            label={manual ? "Sign-in" : "Connections"}
+            value={manual ? (signedIn ? "token" : "needs a token") : `${agent.clients.length}${agent.clients.length > 0 ? (signedIn ? " · signed in" : " · signed out") : ""}`}
+            onClick={() => push({ kind: "agent-connections", agentId: agent.id })}
+          />
+          {harness ? (
+            <HubRow
+              label="Setup"
+              value={`${setupText}${flagged > 0 ? ` · ${flagged} flagged` : ""}`}
+              tone={flagged > 0 ? "accent" : undefined}
+              onClick={() => push({ kind: "agent-harness", agentId: agent.id })}
+            />
+          ) : null}
+          <HubRow
+            label="Servers"
+            value={`${servers.value.length}${set > 0 ? ` · ${set} set here` : ""}`}
+            onClick={() => push({ kind: "agent-servers", agentId: agent.id })}
+          />
+          <HubRow label="Grants" value={String(grants.length)} onClick={() => push({ kind: "agent-grants", agentId: agent.id })} />
         </section>
       </Screen>
     </div>

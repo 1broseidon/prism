@@ -4,7 +4,7 @@ import { HOSTS, hostSetup, hostStatus, placeholderHost } from "../hosts";
 import { postureLabel } from "../policy";
 import { relative } from "../time";
 import type { AgentConfig } from "../types";
-import { Button, Chip, Empty, Label, Screen, describeError } from "../ui";
+import { Button, Chip, Empty, Label, Pager, Screen, describeError, usePage } from "../ui";
 
 async function refresh() {
   agents.value = await api.listAgents();
@@ -100,16 +100,24 @@ export function AgentsScreen() {
   const otherHosts = all.filter((a) => a.host && !HOSTS.some((h) => h.id === a.id));
   const rest = all.filter((a) => !a.host);
   const list = [...known, ...otherHosts, ...rest];
+  const { rows, offset, setOffset, total } = usePage(list, 5);
 
   return (
     <div class="screen">
-      <Screen footer={<Button onClick={() => push({ kind: "connect-agent" })}>Connect an agent</Button>}>
+      <Screen
+        footer={
+          <>
+            {total > 5 ? <Pager offset={offset} size={5} total={total} onOffset={setOffset} /> : undefined}
+            <Button onClick={() => push({ kind: "connect-agent" })}>Connect an agent</Button>
+          </>
+        }
+      >
         <Label right={<span>{list.length}</span>}>Agents</Label>
         {list.length === 0 ? (
           <Empty title="No agents yet." />
         ) : (
           <div class="list">
-            {list.map((agent) => (
+            {rows.map((agent) => (
               <AgentRow key={agent.id} agent={agent} />
             ))}
           </div>

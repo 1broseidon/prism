@@ -4,7 +4,7 @@ import { errorMessage } from "./state";
 import type { ManualToken } from "./types";
 import { Button, CodeBlock, Label, Screen, describeError } from "./ui";
 
-/** The token stays in the provisioning screen's memory until Done or navigation. */
+/** The caller keeps this one-time token in volatile resumable state until Done. */
 export function ManualTokenDetails({ issued, onDone }: { issued: ManualToken; onDone: () => void }) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {

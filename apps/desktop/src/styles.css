@@ -199,28 +199,23 @@ kbd {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 var(--space-4) var(--space-5);
-  /* Screens are laid out to fit. Where one runs long it still scrolls, without a bar; only a
-     list that is meant to be long (the action log) shows one. */
-  scrollbar-width: none;
-}
-
-.screen-body::-webkit-scrollbar {
-  display: none;
-}
-
-.screen-body.log {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line-strong) transparent;
 }
 
-.screen-body.log::-webkit-scrollbar {
+.screen-body::-webkit-scrollbar {
   display: block;
   width: 6px;
 }
 
-.screen-body.log::-webkit-scrollbar-thumb {
+.screen-body::-webkit-scrollbar-thumb {
   background: var(--color-line-strong);
   border-radius: 3px;
+}
+
+/* `.log` marks a screen that is a long list by nature. Scrollbar styling now lives on
+   `.screen-body` itself; this selector stays as the marker other rules key off. */
+.screen-body.log {
 }
 
 .screen-footer {
@@ -228,6 +223,10 @@ kbd {
   display: flex;
   gap: 10px;
   padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.screen-footer:has(.pager) {
+  justify-content: space-between;
 }
 
 .screen-footer .btn {
@@ -783,6 +782,111 @@ button.status:hover {
   animation: rise var(--dur-med) var(--ease-out);
 }
 
+.waiting {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.waiting:hover {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+
+/* A parked setup or token, offered back on Now. Memory only: discard clears it, resume restores the screen. */
+.resume-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 44px;
+  margin-bottom: var(--space-3);
+  padding: 6px 6px 6px 14px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+}
+.resume-what {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.resume-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+.resume-row .btn.quiet {
+  height: 32px;
+  color: var(--color-accent-text);
+  font-weight: 500;
+}
+.resume-row .btn.quiet:hover {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+.resume-row .btn.quiet.resume {
+  background: var(--color-paper);
+  font-weight: 600;
+}
+
+.queue-strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--color-ink-3);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.queue-strip > div {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.code.full {
+  max-height: none;
+}
+
+.hold .code:not(.empty-args) {
+  padding-top: 36px;
+}
+
+.hold .code {
+  max-height: 118px;
+  margin-top: var(--space-3);
+}
+
+.code-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: var(--space-1);
+}
+
+.code-wrap .code-actions .copy {
+  position: static;
+}
+
 @keyframes rise {
   from {
     opacity: 0;
@@ -906,6 +1010,67 @@ button.status:hover {
 .hold .actions.secondary {
   display: flex;
   margin-top: 14px;
+}
+
+.screen-footer:has(.approval-footer) {
+  padding-top: 8px;
+}
+
+.approval-footer {
+  display: grid;
+  width: 100%;
+  gap: 5px;
+}
+
+.approval-primary {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 10px;
+}
+
+.screen-footer .approval-primary .btn {
+  height: var(--btn-h);
+  border-radius: var(--radius-md);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+}
+
+.approval-primary .btn.danger {
+  background: transparent;
+  color: var(--color-ink);
+  box-shadow: inset 0 0 0 1px var(--color-line-strong);
+}
+
+.approval-primary .btn.danger:hover {
+  background: var(--color-well);
+}
+
+.approval-primary .btn.danger kbd {
+  background: var(--color-well);
+  color: var(--color-ink-2);
+}
+
+.approval-caption {
+  color: var(--color-ink-3);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+}
+
+.approval-secondary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.screen-footer .approval-secondary .btn {
+  min-width: 0;
+  height: 34px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* Code: arguments, form values. A well cut into the surface, ink on tone, not a dark slab. */
@@ -1092,7 +1257,7 @@ button.status:hover {
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  padding: 12px 0;
+  padding: 10px 0;
   border-bottom: 1px solid var(--color-line);
 }
 
@@ -1115,6 +1280,64 @@ button.status:hover {
   letter-spacing: var(--tracking-tight);
 }
 
+/* Hub rows: a summary that leads to a bounded subscreen. The whole row is the button. */
+.hub {
+  display: flex;
+  flex-direction: column;
+}
+.section.hub {
+  margin-top: var(--space-3);
+}
+.hub-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 42px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-bottom: 1px solid var(--color-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: var(--tracking-tight);
+  text-align: left;
+  cursor: pointer;
+}
+.hub-row:last-child {
+  border-bottom: 0;
+}
+.hub-row:hover .hub-label,
+.hub-row:focus-visible .hub-label {
+  color: var(--color-accent-text);
+}
+.hub-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.hub-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-ink-3);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hub-value.accent {
+  color: var(--color-accent-text);
+}
+.hub-row .chev {
+  margin-top: -2px;
+}
+.lede {
+  margin: 0 var(--space-2) var(--space-3);
+  color: var(--color-ink-2);
+  font-size: var(--text-sm);
+}
 .setting .num {
   display: inline-flex;
   align-items: center;
@@ -1253,16 +1476,18 @@ textarea.input {
   letter-spacing: var(--tracking-tight);
 }
 
-.update-notes {
+.update-summary {
   margin-top: 6px;
-  max-height: 160px;
-  overflow: auto;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
   color: var(--color-ink-3);
   font-size: var(--text-sm);
   text-wrap: pretty;
 }
 
-.update-notes .notes-heading {
+.update-summary .notes-heading {
   margin-top: 8px;
   color: var(--color-ink-2);
   font-size: var(--text-xs);
@@ -1271,24 +1496,24 @@ textarea.input {
   text-transform: uppercase;
 }
 
-.update-notes .notes-heading:first-child {
+.update-summary .notes-heading:first-child {
   margin-top: 0;
 }
 
-.update-notes p {
+.update-summary p {
   margin: 4px 0 0;
 }
 
-.update-notes ul {
+.update-summary ul {
   margin: 4px 0 0;
   padding-left: 16px;
 }
 
-.update-notes li + li {
+.update-summary li + li {
   margin-top: 3px;
 }
 
-.update-notes code {
+.update-summary code {
   color: var(--color-ink-2);
   font-size: var(--text-xs);
 }
@@ -1686,3 +1911,51 @@ textarea.input {
 
 .history-controls { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); }
 .history-controls select { font: inherit; font-size: var(--text-sm); color: var(--color-ink); background: var(--color-surface); border: 0; border-radius: var(--radius-xs); padding: var(--space-1) var(--space-2); }
+
+/* Pager: shared paging control that sits at the left of a screen-footer. */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pager .range {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Footer with a pager: the pager keeps to the left, the actions pack to the right at their own width. */
+.screen-footer:has(.pager) {
+  justify-content: flex-start;
+  align-items: center;
+}
+.screen-footer .pager {
+  flex: 0 0 auto;
+  margin-right: auto;
+  gap: 6px;
+}
+.screen-footer .pager .btn {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  font-size: var(--text-xl);
+  font-weight: 400;
+}
+.screen-footer:has(.pager) > .btn {
+  flex: 0 1 auto;
+  padding: 0 var(--space-4);
+}
+.screen-footer > .btn.quiet {
+  height: var(--btn-h);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.pager .range {
+  font-size: var(--text-sm);
+  color: var(--color-ink-2);
+}
+.pager .range .muted {
+  color: var(--color-ink-3);
+}

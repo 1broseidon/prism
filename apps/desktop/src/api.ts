@@ -215,3 +215,17 @@ export function removeHarnessSetup(host: string) { return invoke<HarnessChanges>
 export function listAuditPage(filter: ActivityFilter, offset = 0, limit = 100) {
   return invoke<AuditPage>("list_audit_page", {query: {...filter, offset, limit}});
 }
+
+/** Writes exactly the rows the filtered log holds to Downloads and returns the path. */
+export function exportAudit(filter: ActivityFilter) {
+  return invoke<ExportReport>("export_audit", {query: {...filter}});
+}
+
+/** Opens an export Prism wrote. The host re-checks the path before opening it. */
+export function openExport(path: string) {
+  return invoke<void>("open_export", { path });
+}
+
+export function openAuditLog() {
+  return invoke<void>("open_audit_log");
+}

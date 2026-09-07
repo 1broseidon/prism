@@ -1,16 +1,21 @@
 import { useState } from "preact/hooks";
 import * as api from "../api";
-import { errorMessage, pop, servers, status } from "../state";
-import type { HttpAuth } from "../types";
+import {
+  addServerDraft,
+  clearAddServerDraft,
+  completeScreen,
+  errorMessage,
+  servers,
+  status,
+  updateAddServerDraft,
+} from "../state";
 import { Button, Screen, Segmented, describeError } from "../ui";
-
-type Kind = "command" | "url";
 
 /** Adding a server: a command Prism runs, or a URL it connects to. Submitting starts it. */
 export function AddServerScreen() {
   const [busy, setBusy] = useState(false);
-  const [kind, setKind] = useState<Kind>("command");
-  const [auth, setAuth] = useState<HttpAuth>("none");
+  const draft = addServerDraft.value;
+  const { kind, auth } = draft;
 
   const onSubmit = async (event: Event) => {
     event.preventDefault();
@@ -40,8 +45,9 @@ export function AddServerScreen() {
       }
       servers.value = await api.listServers();
       status.value = await api.getStatus();
-      pop();
       if (kind === "url" && auth === "oauth") await api.signInServer(added.id);
+      clearAddServerDraft();
+      completeScreen({ kind: "add-server" });
     } catch (err) {
       errorMessage.value = describeError(err);
     } finally {
@@ -67,18 +73,18 @@ export function AddServerScreen() {
             { value: "command", label: "Command" },
             { value: "url", label: "URL" },
           ]}
-          onChange={setKind}
+          onChange={(next) => updateAddServerDraft({ kind: next })}
         />
         <div class="fields">
           <label class="field">
             <span>Name</span>
-            <input class="input" name="name" required autoFocus placeholder={kind === "url" ? "linear" : "filesystem"} />
+            <input class="input" name="name" required autoFocus value={draft.name} onInput={(event) => updateAddServerDraft({ name: event.currentTarget.value })} placeholder={kind === "url" ? "linear" : "filesystem"} />
           </label>
           {kind === "url" ? (
             <>
               <label class="field">
                 <span>URL</span>
-                <input class="input mono" name="url" type="url" required placeholder="https://mcp.example.com/mcp" />
+                <input class="input mono" name="url" type="url" required value={draft.url} onInput={(event) => updateAddServerDraft({ url: event.currentTarget.value })} placeholder="https://mcp.example.com/mcp" />
                 <small>https, or http on this machine.</small>
               </label>
               <div class="field">
@@ -92,7 +98,7 @@ export function AddServerScreen() {
                     { value: "header", label: "API key" },
                     { value: "oauth", label: "OAuth" },
                   ]}
-                  onChange={setAuth}
+                  onChange={(next) => updateAddServerDraft({ auth: next })}
                 />
                 {auth === "oauth" ? <small>Signs in through your browser. Tokens stay in your keyring.</small> : null}
               </div>
@@ -100,11 +106,11 @@ export function AddServerScreen() {
                 <>
                   <label class="field">
                     <span>Header</span>
-                    <input class="input mono" name="header" placeholder="Authorization" />
+                    <input class="input mono" name="header" value={draft.header} onInput={(event) => updateAddServerDraft({ header: event.currentTarget.value })} placeholder="Authorization" />
                   </label>
                   <label class="field">
                     <span>Key</span>
-                    <input class="input mono" name="key" type="password" required autoComplete="off" placeholder="ghp_…" />
+                    <input class="input mono" name="key" type="password" required autoComplete="off" value={draft.key} onInput={(event) => updateAddServerDraft({ key: event.currentTarget.value })} placeholder="ghp_…" />
                     <small>Sent as Bearer unless you give a prefix. Stored in your keyring.</small>
                   </label>
                 </>
@@ -114,16 +120,16 @@ export function AddServerScreen() {
             <>
               <label class="field">
                 <span>Command</span>
-                <input class="input mono" name="command" required placeholder="npx" />
+                <input class="input mono" name="command" required value={draft.command} onInput={(event) => updateAddServerDraft({ command: event.currentTarget.value })} placeholder="npx" />
               </label>
               <label class="field">
                 <span>Arguments</span>
-                <input class="input mono" name="args" placeholder="-y @modelcontextprotocol/server-filesystem ~/Projects" />
+                <input class="input mono" name="args" value={draft.args} onInput={(event) => updateAddServerDraft({ args: event.currentTarget.value })} placeholder="-y @modelcontextprotocol/server-filesystem ~/Projects" />
                 <small>Space-separated.</small>
               </label>
               <label class="field">
                 <span>Environment</span>
-                <textarea class="input mono" name="env" placeholder={"API_KEY=…\nONE_PER_LINE=true"} />
+                <textarea class="input mono" name="env" value={draft.env} onInput={(event) => updateAddServerDraft({ env: event.currentTarget.value })} placeholder={"API_KEY=…\nONE_PER_LINE=true"} />
                 <small>KEY=value per line. Stored in your keyring.</small>
               </label>
             </>

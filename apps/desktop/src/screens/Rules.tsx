@@ -2,7 +2,10 @@ import * as api from "../api";
 import { agents, errorMessage, rules, servers } from "../state";
 import { relative, remaining } from "../time";
 import type { Rule } from "../types";
-import { Chip, ConfirmButton, Empty, Label, Screen, describeError } from "../ui";
+import { Chip, ConfirmButton, Empty, Label, Pager, Screen, describeError, usePage } from "../ui";
+
+/** Rows per page: five chip-and-line rows fit under the tabs beside the pager. */
+const PAGE = 5;
 
 function nameOf(list: { id: string; name: string }[], id: string | null): string {
   if (!id) return "any";
@@ -20,6 +23,7 @@ function decisionTone(rule: Rule): "ok" | "danger" | "warn" {
 
 export function RulesScreen() {
   const list = rules.value;
+  const { rows, offset, setOffset, total } = usePage(list, PAGE);
   const remove = async (id: string) => {
     try {
       await api.deleteRule(id);
@@ -31,13 +35,13 @@ export function RulesScreen() {
 
   return (
     <div class="screen">
-      <Screen>
+      <Screen footer={total > PAGE ? <Pager offset={offset} size={PAGE} total={total} onOffset={setOffset} /> : undefined}>
       <Label right={<span>{list.length}</span>}>Rules</Label>
       {list.length === 0 ? (
         <Empty title="No rules yet." />
       ) : (
         <div class="list">
-          {list.map((rule) => (
+          {rows.map((rule) => (
             <div class="item" key={rule.id}>
               <div class="title">
                 <Chip tone={decisionTone(rule)}>{rule.decision}</Chip>

@@ -3,30 +3,44 @@ import * as api from "../api";
 import { ManualTokenDetails } from "../ManualTokenDetails";
 import { HOSTS, hostSetup } from "../hosts";
 import { loadNativeStatus } from "../events";
-import { native, agents, errorMessage, pop, push, status } from "../state";
-import type { ConnectSnippet, ManualToken } from "../types";
+import {
+  agents,
+  clearConnectAgentDraft,
+  completeScreen,
+  connectAgentDraft,
+  discardManualToken,
+  errorMessage,
+  manualTokens,
+  native,
+  push,
+  rememberManualToken,
+  status,
+  updateConnectAgentDraft,
+} from "../state";
 import { Button, Chip, CodeBlock, Label, Screen, Segmented, describeError } from "../ui";
 
 export function ConnectAgentScreen() {
-  const [custom, setCustom] = useState(false);
-  const [snippet, setSnippet] = useState<ConnectSnippet | null>(null);
-  const [mode, setMode] = useState<"oauth" | "manual">("oauth");
   const [busy, setBusy] = useState(false);
-  const [issued, setIssued] = useState<ManualToken | null>(null);
+  const draft = connectAgentDraft.value;
+  const { custom, mode, snippet } = draft;
+  const issued = draft.issuedAgentId ? manualTokens.value[draft.issuedAgentId] ?? null : null;
 
   useEffect(() => {
     loadNativeStatus();
-    api.getConnectSnippet().then(setSnippet).catch((err) => { errorMessage.value = describeError(err); });
+    if (!connectAgentDraft.value.snippet) {
+      api.getConnectSnippet().then((value) => updateConnectAgentDraft({ snippet: value })).catch((err) => { errorMessage.value = describeError(err); });
+    }
   }, []);
 
   const create = async (event: Event) => {
     event.preventDefault();
     if (busy) return;
-    const name = String(new FormData(event.currentTarget as HTMLFormElement).get("name") ?? "");
+    const name = draft.name;
     setBusy(true);
     try {
       const token = await api.createManualAgent(name);
-      setIssued(token);
+      rememberManualToken(token);
+      updateConnectAgentDraft({ issuedAgentId: token.agent_id });
       agents.value = await api.listAgents();
       status.value = await api.getStatus();
     } catch (err) { errorMessage.value = describeError(err); }
@@ -35,8 +49,9 @@ export function ConnectAgentScreen() {
 
   if (issued) return <ManualTokenDetails issued={issued} onDone={() => {
     const agentId = issued.agent_id;
-    setIssued(null);
-    pop();
+    completeScreen({ kind: "connect-agent" });
+    discardManualToken(agentId);
+    clearConnectAgentDraft();
     push({ kind: "agent", agentId });
   }} />;
 
@@ -50,7 +65,7 @@ export function ConnectAgentScreen() {
           {configured?.mcp_configured && configured.hook_installed ? <Chip>configured</Chip> : null}<span class="chev">›</span>
         </button>;
       })}
-      <button type="button" class="item harness-choice" onClick={() => setCustom(true)}>
+      <button type="button" class="item harness-choice" onClick={() => updateConnectAgentDraft({ custom: true })}>
         <span class="host-mark" aria-hidden="true" /><span><strong>Other</strong><small>Connect any MCP client</small></span><span class="chev">›</span>
       </button>
     </div>
@@ -60,7 +75,7 @@ export function ConnectAgentScreen() {
   return (
     <div class="screen pushed">
       <Screen footer={mode === "manual" ? <Button variant="primary" type="submit" form="manual-client" busy={busy} disabled={busy}>Create token</Button> : undefined}>
-        <Segmented label="Connection method" value={mode} options={[{ value: "oauth", label: "OAuth sign-in" }, { value: "manual", label: "Manual token" }]} onChange={setMode} />
+        <Segmented label="Connection method" value={mode} options={[{ value: "oauth", label: "OAuth sign-in" }, { value: "manual", label: "Manual token" }]} onChange={(next) => updateConnectAgentDraft({ mode: next })} />
         {mode === "oauth" ? <>
           <p class="lede">Add to your client. Approve it here when it signs in.</p>
           {snippet ? <>
@@ -68,7 +83,7 @@ export function ConnectAgentScreen() {
             <section class="section"><Label>mcp.json</Label><CodeBlock text={snippet.mcp_json} copyable /></section>
           </> : null}
         </> : <form id="manual-client" onSubmit={create}>
-          <label class="field"><span>Client name</span><input class="input" required maxLength={80} name="name" placeholder="My script" /></label>
+          <label class="field"><span>Client name</span><input class="input" required maxLength={80} name="name" value={draft.name} onInput={(event) => updateConnectAgentDraft({ name: event.currentTarget.value })} placeholder="My script" /></label>
           <p class="hint">Creating the token approves the client.</p>
         </form>}
       </Screen>

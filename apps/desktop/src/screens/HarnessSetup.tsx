@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { hostSetup, hostStatus } from "../hosts";
-import { agents, errorMessage, native } from "../state";
+import { agents, errorMessage, harnessSetupDraft, native, updateHarnessSetupDraft } from "../state";
 import { relative } from "../time";
 import { Button, Chip, CodeBlock, ConfirmButton, Label, Screen, describeError } from "../ui";
 
@@ -12,9 +12,8 @@ export function HarnessSetupScreen({ host }: { host: string }) {
   const seen = hostStatus(native.value, host);
   const agent = agents.value.find(a => a.id === `host:${host}`);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const [details, setDetails] = useState(false);
-  const [snippet, setSnippet] = useState("");
+  const draft = harnessSetupDraft(host);
+  const { message, details, snippet } = draft;
   const refresh = async () => { native.value = await api.getNativeStatus(); agents.value = await api.listAgents(); };
   useEffect(() => {
     void refresh().catch(e => { errorMessage.value = describeError(e); });
@@ -25,19 +24,20 @@ export function HarnessSetupScreen({ host }: { host: string }) {
   const change = async (remove = false) => {
     if (busy) return;
     setBusy(true);
-    setMessage("");
+    updateHarnessSetupDraft(host, { message: "" });
     try {
       const result = await (remove ? api.removeHarnessSetup(host) : api.setupHarness(host));
       await refresh();
-      setMessage(remove ? "Removed. Restart the client to disconnect." : result.paths.length ? "Saved. Restart the client to load setup." : "Settings are current.");
+      updateHarnessSetupDraft(host, { message: remove ? "Removed. Restart the client to disconnect." : result.paths.length ? "Saved. Restart the client to load setup." : "Settings are current." });
     } catch (e) { errorMessage.value = describeError(e); }
     finally { setBusy(false); }
   };
   const configured = setup?.mcp_configured && setup.hook_installed;
   const receiving = !!native.value?.observe_native && setup?.events_received;
   const showDetails = async () => {
-    setDetails(!details);
-    if (!details) try { setSnippet(await api.getHostHookSnippet(host)); } catch (e) { errorMessage.value = describeError(e); }
+    const nextDetails = !details;
+    updateHarnessSetupDraft(host, { details: nextDetails });
+    if (nextDetails && !snippet) try { updateHarnessSetupDraft(host, { snippet: await api.getHostHookSnippet(host) }); } catch (e) { errorMessage.value = describeError(e); }
   };
   return <div class="screen pushed"><Screen footer={
     <Button variant="primary" busy={busy} disabled={!setup || !!setup.problem} onClick={() => void change()}>{configured ? "Repair setup" : `Set up ${name}`}</Button>

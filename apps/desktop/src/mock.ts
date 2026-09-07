@@ -44,6 +44,9 @@ let rules: Rule[] = [
   { id: "r3", agent_id: null, server_id: "s3", tool: null, decision: "deny", attention: "notify", scope: "always", expires_at: null, created_at: iso(3600 * 30) },
   { id: "r4", agent_id: "host:claude-code", server_id: "s2", tool: null, decision: "allow", attention: null, scope: "always", expires_at: iso(-60 * 24), created_at: iso(360) },
   { id: "r5", agent_id: "host:claude-code", server_id: "s1", tool: "delete_*", decision: "ask", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 2) },
+  { id: "r6", agent_id: "host:codex", server_id: "s5", tool: null, decision: "allow", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 8) },
+  { id: "r7", agent_id: "a2", server_id: "s1", tool: "write_file", decision: "ask", attention: "notify", scope: "always", expires_at: null, created_at: iso(3600 * 12) },
+  { id: "r8", agent_id: null, server_id: "s4", tool: null, decision: "deny", attention: null, scope: "session", expires_at: null, created_at: iso(120) },
 ];
 const HOOK_TOKEN = "k3Jx9v2mQd8sT1uWbC4eF6gH7iJ0lM_nO-pQrStUvWx";
 const nativeStatus = {
@@ -273,6 +276,10 @@ export const mock = {
   remove_harness_setup: (a: { host: string }) => { const s = nativeStatus.setup.find((h) => h.host === a.host)!; s.setup_present = false; s.hook_installed = false; s.mcp_configured = false; s.events_received = false; return delay({paths: [s.settings_path, s.mcp_path], backups: [s.settings_path + ".bak"]}); },
   install_host_hook: (a: { host: string }) => { const s = nativeStatus.setup.find((h) => h.host === a.host)!; s.hook_installed = true; return delay({ path: s.settings_path, backup: s.settings_path + ".bak" }); },
   export_native_report: () => delay({path:"/home/george/Downloads/prism-native.jsonl", metadata_path:"/home/george/Downloads/prism-native.metadata.json", total:mockQuery({nativeOnly:true,attention:true,days:30}).entries.length}),
+  export_audit: (a: {query: import("./state").ActivityFilter}) =>
+    delay({path:"/home/george/Downloads/prism-actions.jsonl", metadata_path:"/home/george/Downloads/prism-actions.metadata.json", total:mockQuery(a.query).entries.length}),
+  open_export: (_a: {path: string}) => delay(undefined),
+  open_audit_log: () => delay(undefined),
   hide_panel: () => delay(undefined),
   get_update_status: () =>
     delay({

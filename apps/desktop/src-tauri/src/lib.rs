@@ -28,6 +28,14 @@ const PANEL_LABEL: &str = "panel";
 /// Window size in logical pixels: a 400x600 panel plus a 16px gutter on every side so the CSS shadow can fade
 /// out inside the transparent window instead of being clipped square at its edge. Mirrors tauri.conf.json.
 const PANEL_SIZE: (f64, f64) = (432.0, 632.0);
+/// Emitted whenever the panel is shown or hidden, so the webview can reset navigation before
+/// anything is visible.
+const PANEL_EVENT: &str = "prism://panel";
+#[derive(Serialize, Clone)]
+struct PanelEvent {
+    visible: bool,
+    reason: &'static str,
+}
 /// The panel's global shortcut unless `panel_shortcut` says otherwise.
 #[allow(non_snake_case)]
 fn DEFAULT_SHORTCUT() -> Shortcut {
@@ -412,7 +420,25 @@ fn remember_tray_rect(app: &AppHandle, rect: &tauri::Rect) {
     }
 }
 
-fn show_panel(app: &AppHandle) {
+fn show_panel(app: &AppHandle, reason: &'static str) {
+    // Attention can arrive while the operator is reading or typing in the panel. In that case
+    // the gateway event updates the waiting pill; remapping and focusing the window would steal
+    // focus and emit a false reopening lifecycle.
+    if panel_window(app)
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+    {
+        if UNSEEN.swap(0, Ordering::SeqCst) > 0 {
+            if let Some(state) = app.try_state::<AppState>() {
+                let gateway = state.gateway.clone();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    settle_tray_icon(&app, &gateway).await;
+                });
+            }
+        }
+        return;
+    }
     // Opening the panel is how the operator sees badged calls, so the badge clears here.
     if UNSEEN.swap(0, Ordering::SeqCst) > 0 {
         if let Some(state) = app.try_state::<AppState>() {
@@ -428,6 +454,13 @@ fn show_panel(app: &AppHandle) {
         SEEN_FOCUS.store(false, Ordering::SeqCst);
         LAST_SHOW_MS.store(now_ms(), Ordering::SeqCst);
         position_panel(app, &window);
+        let _ = app.emit(
+            PANEL_EVENT,
+            PanelEvent {
+                visible: true,
+                reason,
+            },
+        );
         let _ = window.show();
         let _ = window.set_focus();
         // Some window managers place a window themselves when it is mapped and ignore the
@@ -446,8 +479,20 @@ fn show_panel(app: &AppHandle) {
     }
 }
 
-fn hide_panel_window(app: &AppHandle) {
+/// The single hide path: every hide site routes through here so the webview always hears
+/// `prism://panel` before the window actually disappears.
+fn hide_panel_window(app: &AppHandle, reason: &'static str) {
     if let Some(window) = panel_window(app) {
+        if matches!(window.is_visible(), Ok(false)) {
+            return;
+        }
+        let _ = app.emit(
+            PANEL_EVENT,
+            PanelEvent {
+                visible: false,
+                reason,
+            },
+        );
         let _ = window.hide();
     }
 }
@@ -456,9 +501,9 @@ fn toggle_panel(app: &AppHandle) {
     if let Some(window) = panel_window(app) {
         match window.is_visible() {
             Ok(true) => {
-                let _ = window.hide();
+                hide_panel_window(app, "toggle");
             }
-            _ => show_panel(app),
+            _ => show_panel(app, "toggle"),
         }
     }
 }
@@ -795,7 +840,7 @@ async fn get_activity(
 
 #[tauri::command]
 fn hide_panel(app: AppHandle) -> Result<(), String> {
-    hide_panel_window(&app);
+    hide_panel_window(&app, "hide");
     Ok(())
 }
 
@@ -930,32 +975,26 @@ struct ExportReportDto {
     total: usize,
 }
 
-/// Export retained matches and their exact retention window beside the JSONL.
-#[tauri::command]
-async fn export_native_report(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<ExportReportDto, String> {
-    let report = state
-        .gateway
-        .audit_export(prism_core::AuditQuery {
-            days: 30,
-            native_only: true,
-            attention: Some(true),
-            ..Default::default()
-        })
-        .await
-        .map_err(map_err)?;
-    let dir = app
-        .path()
+/// Where every export lands. Downloads, or the home directory when the platform has none.
+fn export_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
         .download_dir()
         .or_else(|_| app.path().home_dir())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
+
+/// Write an export and its exact retention window beside the JSONL, under `<stem_prefix><stamp>`.
+async fn write_audit_export(
+    app: &AppHandle,
+    report: prism_core::AuditExport,
+    stem_prefix: &str,
+) -> Result<ExportReportDto, String> {
+    let dir = export_dir(app)?;
+    let stem = format!(
+        "{stem_prefix}{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
+    );
     tauri::async_runtime::spawn_blocking(move || {
-        let stem = format!(
-            "prism-native-{}",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
-        );
         let path = dir.join(format!("{stem}.jsonl"));
         let metadata_path = dir.join(format!("{stem}.metadata.json"));
         let metadata = serde_json::to_vec_pretty(
@@ -974,6 +1013,68 @@ async fn export_native_report(
     })
     .await
     .map_err(|_| "Could not export report")?
+}
+
+/// Export retained matches and their exact retention window beside the JSONL.
+#[tauri::command]
+async fn export_native_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ExportReportDto, String> {
+    let report = state
+        .gateway
+        .audit_export(prism_core::AuditQuery {
+            days: 30,
+            native_only: true,
+            attention: Some(true),
+            ..Default::default()
+        })
+        .await
+        .map_err(map_err)?;
+    write_audit_export(&app, report, "prism-native-").await
+}
+
+/// Export exactly the rows a filtered Actions view holds. Nothing beyond what `audit.jsonl` keeps.
+#[tauri::command]
+async fn export_audit(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    query: prism_core::AuditQuery,
+) -> Result<ExportReportDto, String> {
+    let report = state.gateway.audit_export(query).await.map_err(map_err)?;
+    write_audit_export(&app, report, "prism-actions-").await
+}
+
+/// Open an export Prism wrote: a `.jsonl` that resolves inside the export directory, nothing else.
+/// The path comes back through the webview, so it is re-checked here rather than trusted.
+#[tauri::command]
+fn open_export(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = export_dir(&app)?
+        .canonicalize()
+        .map_err(|_| "Could not find the downloads folder".to_string())?;
+    let file = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|_| "That export is no longer there".to_string())?;
+    if !file.starts_with(&dir) || file.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return Err("Not an export Prism wrote".to_string());
+    }
+    app.opener()
+        .open_path(file.display().to_string(), None::<&str>)
+        .map_err(|_| "Could not open the export".to_string())
+}
+
+/// Open the retained log itself, the file every export is drawn from.
+#[tauri::command]
+fn open_audit_log(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let (_, audit_path) = config_paths(&app)?;
+    if !audit_path.exists() {
+        return Err("No log yet".to_string());
+    }
+    app.opener()
+        .open_path(audit_path.display().to_string(), None::<&str>)
+        .map_err(|_| "Could not open the log".to_string())
 }
 
 fn config_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
@@ -1053,7 +1154,7 @@ async fn handle_gateway_event(app: &AppHandle, gateway: &Gateway, event: &Gatewa
                 }
             }
             if entry.attention == Attention::Open {
-                show_panel(app);
+                show_panel(app, "app");
             }
         }
         GatewayEvent::CallDecided { .. }
@@ -1092,7 +1193,7 @@ async fn attention(app: &AppHandle, gateway: &Gateway, body: &str) {
         warn!(%err, "notification failed");
     }
     if gateway.status().await.auto_open_on_pending {
-        show_panel(app);
+        show_panel(app, "attention");
     }
 }
 
@@ -1264,7 +1365,7 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => {
                 remember_tray_hint(app);
-                show_panel(app);
+                show_panel(app, "tray");
             }
             "quit" => {
                 app.exit(0);
@@ -1365,7 +1466,7 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     note_cursor_hint(&handle);
-                    show_panel(&handle);
+                    show_panel(&handle, "app");
                 });
             }
 
@@ -1419,11 +1520,11 @@ pub fn run() {
                     if elapsed < 300 {
                         return;
                     }
-                    let _ = window.hide();
+                    hide_panel_window(window.app_handle(), "blur");
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    let _ = window.hide();
+                    hide_panel_window(window.app_handle(), "close");
                 }
                 _ => {}
             }
@@ -1470,6 +1571,9 @@ pub fn run() {
             remove_harness_setup,
             get_activity,
             export_native_report,
+            export_audit,
+            open_export,
+            open_audit_log,
         ]);
 
     let app = match builder.build(tauri::generate_context!()) {

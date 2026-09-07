@@ -72,6 +72,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           pnpm install --frozen-lockfile
+          pnpm test
           pnpm build
       - name: Rust host
         run: cargo check -p prism-desktop --locked

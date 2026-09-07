@@ -151,6 +151,47 @@ export function Screen({ children, footer, log }: { children: ComponentChildren;
   );
 }
 
+/** A bounded page of a collection. The start clamps when the collection shrinks and resets when `key` changes. */
+export function usePage<T>(items: T[], size: number, key?: string): { rows: T[]; offset: number; setOffset: (offset: number) => void; total: number } {
+  const [offset, setOffset] = useState(0);
+  useEffect(() => setOffset(0), [key]);
+  const total = items.length;
+  const start = Math.min(offset, Math.max(0, Math.floor((total - 1) / size) * size));
+  return { rows: items.slice(start, start + size), offset: start, setOffset, total };
+}
+
+/** Where a page sits in its collection and the two moves. Renders nothing while one page holds everything. */
+export function Pager({ offset, size, total, onOffset, disabled = false }: { offset: number; size: number; total: number; onOffset: (offset: number) => void; disabled?: boolean }) {
+  if (total <= size) return null;
+  const end = Math.min(offset + size, total);
+  return (
+    <div class="pager" role="navigation" aria-label="Pages">
+      <Button variant="icon" aria-label="Previous page" disabled={disabled || offset === 0} onClick={() => onOffset(Math.max(0, offset - size))}>
+        ‹
+      </Button>
+      <span class="range">
+        {offset + 1}–{end} <span class="muted">of {total}</span>
+      </span>
+      <Button variant="icon" aria-label="Next page" disabled={disabled || end >= total} onClick={() => onOffset(offset + size)}>
+        ›
+      </Button>
+    </div>
+  );
+}
+
+/** A summary row that leads to a bounded subscreen: label, a short value, a chevron. The whole row is the button. */
+export function HubRow({ label, value, tone, onClick }: { label: string; value?: ComponentChildren; tone?: "accent"; onClick: () => void }) {
+  return (
+    <button type="button" class="hub-row" onClick={onClick}>
+      <span class="hub-label truncate">{label}</span>
+      {value ? <span class={`hub-value ${tone ?? ""}`}>{value}</span> : null}
+      <span class="chev" aria-hidden="true">
+        ›
+      </span>
+    </button>
+  );
+}
+
 export function Notice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
   return (
     <div class="notice" role="alert">
