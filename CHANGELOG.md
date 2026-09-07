@@ -4,6 +4,8 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-06
+
 ### Added
 
 - Global Claude Code and Codex setup for MCP and native observation, with backups, repair/removal, and readiness based on configuration and observed events.
@@ -73,7 +75,8 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - Rotating, redacted audit log with 30-day retention.
 - Loopback-only HTTP with Host and Origin checks, request limits and a strict panel CSP.
 
-[Unreleased]: https://github.com/1broseidon/prism/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/1broseidon/prism/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/1broseidon/prism/releases/tag/v0.5.0
 [0.4.1]: https://github.com/1broseidon/prism/releases/tag/v0.4.1
 [0.4.0]: https://github.com/1broseidon/prism/releases/tag/v0.4.0
 [0.3.0]: https://github.com/1broseidon/prism/releases/tag/v0.3.0
