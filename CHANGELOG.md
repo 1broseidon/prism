@@ -4,6 +4,16 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-07
+
+### Changed
+- The panel is a quick-decision tray. Reopening always lands on Now, or on the approval queue when something waits. An unfinished setup or a one-time token is parked in memory and offered back on Now as **Resume** or **Discard**, never written to disk. A request that arrives while a detail screen is open no longer replaces it; the header shows **N waiting** and jumps to the queue.
+- One request at a time. Now shows the current agent, sign-in or tool call with *1 of 3 waiting* and Previous/Next. A and D decide only the visible request, key repeat and double clicks are ignored for 400 ms, and **Inspect** opens the full arguments with Allow and Deny pinned to the footer. The activity dashboard returns when the queue empties.
+- No hidden scrolling. Rules, Tools, Servers and Agents page through Previous/Next in the footer. Actions shows 20 rows a page that replace each other against one snapshot, with **Open log** and **Export**, which writes the filtered rows as JSONL beside a metadata file in Downloads and opens it with the default application. Agent detail is a hub with Connections, Setup, Servers and Grants; Settings pushes Observation and Updates, and release notes are a short summary with a link to the full notes.
+
+### Fixed
+- A history page answered after the filter changed no longer overwrites the newer view, and Inspect leaves a request that expired or was decided elsewhere.
+
 ## [0.5.0] - 2026-09-06
 
 ### Added
