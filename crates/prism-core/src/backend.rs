@@ -1,48 +1,100 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
-use rmcp::service::RunningService;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ProtocolVersion, SubscriptionFilter, Tool,
+};
+use rmcp::service::{NotificationContext, Peer, RunningService};
 use rmcp::transport::TokioChildProcess;
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tokio::sync::{Mutex, Notify, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
 use crate::config::ServerConfig;
 use crate::error::{Error, Result};
 use crate::events::{EventSender, GatewayEvent};
+
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Runtime status of one spawned MCP backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendStatus {
     Starting,
-    Running {
-        tool_count: usize,
-    },
-    Failed {
-        error: String,
-    },
+    Running { tool_count: usize },
+    Failed { error: String },
     Stopped,
-    /// A remote OAuth server with no usable tokens. Sign in from the panel.
     SignInRequired,
 }
 
-type McpClient = RunningService<RoleClient, ()>;
+/// Legacy notifications are coalesced before doing any network work.
+#[derive(Default, Clone)]
+pub(crate) struct Upstream {
+    changed: Arc<Notify>,
+}
+
+impl ClientHandler for Upstream {
+    async fn on_tool_list_changed(&self, context: NotificationContext<RoleClient>) {
+        if supports_updates(&context.peer) {
+            self.changed.notify_one();
+        }
+    }
+}
+
+pub(crate) type McpClient = RunningService<RoleClient, Upstream>;
 
 struct Backend {
     config: ServerConfig,
     status: BackendStatus,
-    client: Option<McpClient>,
+    client: Option<Arc<McpClient>>,
     tools: Vec<Tool>,
+    refresh: Arc<Mutex<()>>,
+    generation: uuid::Uuid,
+    stop: CancellationToken,
 }
 
-/// Spawns and talks to stdio MCP servers via rmcp's child-process transport.
+impl Drop for Backend {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        if let Some(client) = &self.client {
+            client.cancellation_token().cancel();
+        }
+    }
+}
+
+#[derive(Default)]
+struct Catalog {
+    entries: HashMap<String, Backend>,
+    // None means two configured server/tool pairs have the same public name.
+    routes: HashMap<String, Option<(String, usize)>>,
+}
+
+impl Catalog {
+    /// Called only when a catalog changes, never on the tool-call path.
+    fn reindex(&mut self) {
+        self.routes.clear();
+        for (id, backend) in &self.entries {
+            if !matches!(backend.status, BackendStatus::Running { .. }) {
+                continue;
+            }
+            for (index, tool) in backend.tools.iter().enumerate() {
+                let name = format!("{}__{}", backend.config.name, tool.name);
+                self.routes
+                    .entry(name)
+                    .and_modify(|route| *route = None)
+                    .or_insert_with(|| Some((id.clone(), index)));
+            }
+        }
+    }
+}
+
+/// Owns backend lifetimes and an atomically published tool catalog.
 pub struct BackendManager {
-    backends: RwLock<HashMap<String, Backend>>,
+    backends: Arc<RwLock<Catalog>>,
     events: EventSender,
     credentials: Arc<dyn crate::credentials::CredentialStore>,
 }
@@ -53,73 +105,119 @@ impl BackendManager {
         credentials: Arc<dyn crate::credentials::CredentialStore>,
     ) -> Self {
         Self {
-            backends: RwLock::new(HashMap::new()),
+            backends: Arc::new(RwLock::new(Catalog::default())),
             events,
             credentials,
         }
     }
 
     pub async fn start(&self, config: ServerConfig) {
+        let id = config.id.clone();
+        let generation = uuid::Uuid::new_v4();
+        let stop = CancellationToken::new();
+        let status = if config.enabled {
+            BackendStatus::Starting
+        } else {
+            BackendStatus::Stopped
+        };
+        {
+            let mut catalog = self.backends.write().await;
+            catalog.entries.insert(
+                id.clone(),
+                Backend {
+                    config: config.clone(),
+                    status: status.clone(),
+                    client: None,
+                    tools: Vec::new(),
+                    refresh: Default::default(),
+                    generation,
+                    stop: stop.clone(),
+                },
+            );
+            catalog.reindex();
+        }
+        self.status(&id, status);
         if !config.enabled {
-            self.insert_stopped(config).await;
             return;
         }
-        let id = config.id.clone();
-        self.set_starting(config.clone()).await;
-        match connect(&config, self.credentials.clone()).await {
+        let connected = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            result = connect(&config, self.credentials.clone()) => result,
+        };
+        let mut catalog = self.backends.write().await;
+        let Some(backend) = catalog
+            .entries
+            .get_mut(&id)
+            .filter(|backend| backend.generation == generation && !backend.stop.is_cancelled())
+        else {
+            return;
+        };
+        match connected {
             Ok((client, tools)) => {
-                let tool_count = tools.len();
-                info!(server = %config.name, tool_count, "backend running");
-                let status = BackendStatus::Running { tool_count };
-                let mut map = self.backends.write().await;
-                map.insert(
-                    id.clone(),
-                    Backend {
-                        config,
-                        status: status.clone(),
-                        client: Some(client),
-                        tools,
-                    },
-                );
-                let _ = self.events.send(GatewayEvent::ServerStatus {
-                    server_id: id,
-                    status,
-                });
+                let peer = client.peer().clone();
+                let changes = client.service().changed.clone();
+                let status = BackendStatus::Running {
+                    tool_count: tools.len(),
+                };
+                info!(server = %config.name, tool_count = tools.len(), "backend running");
+                backend.status = status.clone();
+                backend.client = Some(Arc::new(client));
+                backend.tools = tools;
+                catalog.reindex();
+                self.status(&id, status);
+                if supports_updates(&peer) {
+                    tokio::spawn(watch_tools(
+                        Arc::downgrade(&self.backends),
+                        self.events.clone(),
+                        id,
+                        generation,
+                        peer,
+                        changes,
+                        stop,
+                    ));
+                }
             }
             Err(err) => {
                 let status = match err {
-                    Error::SignInRequired => {
-                        info!(server = %config.name, "backend needs a sign-in");
-                        BackendStatus::SignInRequired
-                    }
-                    err => {
-                        let message = err.to_string();
-                        error!(server = %config.name, %message, "backend failed to start");
-                        BackendStatus::Failed { error: message }
-                    }
-                };
-                let mut map = self.backends.write().await;
-                map.insert(
-                    id.clone(),
-                    Backend {
-                        config,
-                        status: status.clone(),
-                        client: None,
-                        tools: Vec::new(),
+                    Error::SignInRequired => BackendStatus::SignInRequired,
+                    err => BackendStatus::Failed {
+                        error: err.to_string(),
                     },
-                );
-                let _ = self.events.send(GatewayEvent::ServerStatus {
-                    server_id: id,
-                    status,
-                });
+                };
+                backend.status = status.clone();
+                catalog.reindex();
+                self.status(&id, status);
             }
         }
     }
 
+    fn status(&self, server_id: &str, status: BackendStatus) {
+        let _ = self.events.send(GatewayEvent::ServerStatus {
+            server_id: server_id.to_string(),
+            status,
+        });
+    }
+
     pub async fn stop(&self, server_id: &str) {
-        let mut map = self.backends.write().await;
-        if let Some(backend) = map.get_mut(server_id) {
-            if let Some(mut client) = backend.client.take() {
+        let client = {
+            let mut catalog = self.backends.write().await;
+            let Some(backend) = catalog.entries.get_mut(server_id) else {
+                return;
+            };
+            backend.stop.cancel();
+            backend.generation = uuid::Uuid::new_v4();
+            let client = backend.client.take();
+            backend.tools.clear();
+            backend.status = BackendStatus::Stopped;
+            catalog.reindex();
+            self.status(server_id, BackendStatus::Stopped);
+            client
+        };
+        // A stalled peer must not hold the catalog lock for other servers.
+        if let Some(client) = client {
+            client.cancellation_token().cancel();
+            if let Ok(mut client) = Arc::try_unwrap(client) {
                 if client
                     .close_with_timeout(Duration::from_secs(3))
                     .await
@@ -131,61 +229,67 @@ impl BackendManager {
                     );
                 }
             }
-            backend.tools.clear();
-            backend.status = BackendStatus::Stopped;
-            let _ = self.events.send(GatewayEvent::ServerStatus {
-                server_id: server_id.to_string(),
-                status: BackendStatus::Stopped,
-            });
         }
     }
 
     pub async fn remove(&self, server_id: &str) {
         self.stop(server_id).await;
-        self.backends.write().await.remove(server_id);
+        let mut catalog = self.backends.write().await;
+        catalog.entries.remove(server_id);
+        catalog.reindex();
     }
 
-    /// Record a failure that happened outside `start`, such as a sign-in that did not finish.
     pub async fn mark_failed(&self, server_id: &str, error: String) {
-        let mut map = self.backends.write().await;
-        if let Some(backend) = map.get_mut(server_id) {
+        let mut catalog = self.backends.write().await;
+        if let Some(backend) = catalog.entries.get_mut(server_id) {
+            backend.stop.cancel();
+            if let Some(client) = &backend.client {
+                client.cancellation_token().cancel();
+            }
             backend.client = None;
             backend.tools.clear();
             backend.status = BackendStatus::Failed { error };
-            let _ = self.events.send(GatewayEvent::ServerStatus {
-                server_id: server_id.to_string(),
-                status: backend.status.clone(),
-            });
+            self.status(server_id, backend.status.clone());
+            catalog.reindex();
         }
     }
 
     pub async fn restart(&self, server_id: &str) -> Result<()> {
-        let config = {
-            let map = self.backends.read().await;
-            map.get(server_id)
-                .map(|b| b.config.clone())
-                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?
-        };
+        let config = self
+            .backends
+            .read()
+            .await
+            .entries
+            .get(server_id)
+            .map(|backend| backend.config.clone())
+            .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
         self.stop(server_id).await;
         self.start(config).await;
         Ok(())
     }
 
-    /// Cached tools across Running backends. `refresh` re-lists from the peer.
     pub async fn list_tools(&self, refresh: bool) -> Vec<(ServerConfig, Tool)> {
         if refresh {
             self.refresh_all().await;
         }
-        let map = self.backends.read().await;
-        let mut out = Vec::new();
-        for backend in map.values() {
-            if matches!(backend.status, BackendStatus::Running { .. }) {
-                for tool in &backend.tools {
-                    out.push((backend.config.clone(), tool.clone()));
-                }
-            }
-        }
-        out
+        let catalog = self.backends.read().await;
+        catalog
+            .routes
+            .values()
+            .filter_map(|route| {
+                let (id, index) = route.as_ref()?;
+                let backend = catalog.entries.get(id)?;
+                Some((backend.config.clone(), backend.tools[*index].clone()))
+            })
+            .collect()
+    }
+
+    /// Resolve the exact advertised name and its annotations in one lookup.
+    pub async fn resolve_tool(&self, name: &str) -> Option<(ServerConfig, Tool)> {
+        let catalog = self.backends.read().await;
+        let (id, index) = catalog.routes.get(name)?.as_ref()?;
+        let backend = catalog.entries.get(id)?;
+        Some((backend.config.clone(), backend.tools[*index].clone()))
     }
 
     pub async fn call_tool(
@@ -194,125 +298,234 @@ impl BackendManager {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<CallToolResult> {
-        let map = self.backends.read().await;
-        let backend = map
-            .get(server_id)
-            .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
-        let client = backend
-            .client
-            .as_ref()
-            .ok_or_else(|| Error::Backend(format!("server {server_id} is not running")))?;
-        let params = call_params(name, arguments);
-        client.call_tool(params).await.map_err(|_| {
-            Error::Backend(
-                "tool call failed; server error details omitted to protect credentials".into(),
-            )
-        })
+        let client = {
+            let catalog = self.backends.read().await;
+            let backend = catalog
+                .entries
+                .get(server_id)
+                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
+            backend
+                .client
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| Error::Backend(format!("server {server_id} is not running")))?
+        };
+        client
+            .call_tool(call_params(name, arguments))
+            .await
+            .map_err(|_| {
+                Error::Backend(
+                    "tool call failed; server error details omitted to protect credentials".into(),
+                )
+            })
     }
 
     pub async fn snapshot(&self) -> Vec<(ServerConfig, BackendStatus)> {
-        let map = self.backends.read().await;
-        map.values()
-            .map(|b| (b.config.clone(), b.status.clone()))
+        self.backends
+            .read()
+            .await
+            .entries
+            .values()
+            .map(|backend| (backend.config.clone(), backend.status.clone()))
             .collect()
     }
 
     pub async fn running_count(&self) -> usize {
-        let map = self.backends.read().await;
-        map.values()
-            .filter(|b| matches!(b.status, BackendStatus::Running { .. }))
+        self.backends
+            .read()
+            .await
+            .entries
+            .values()
+            .filter(|backend| matches!(backend.status, BackendStatus::Running { .. }))
             .count()
     }
 
-    pub async fn find_tool(&self, server_id: &str, tool_name: &str) -> Option<Tool> {
-        let map = self.backends.read().await;
-        map.get(server_id)?
-            .tools
-            .iter()
-            .find(|t| t.name.as_ref() == tool_name)
-            .cloned()
-    }
-
     async fn refresh_all(&self) {
-        let ids: Vec<String> = {
-            let map = self.backends.read().await;
-            map.iter()
-                .filter(|(_, b)| b.client.is_some())
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        for id in ids {
-            if let Err(err) = self.refresh_one(&id).await {
-                warn!(server_id = %id, %err, "tool refresh failed");
-            }
-        }
-    }
-
-    async fn refresh_one(&self, server_id: &str) -> Result<()> {
-        let tools = {
-            let map = self.backends.read().await;
-            let backend = map
-                .get(server_id)
-                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
-            let client = backend
-                .client
-                .as_ref()
-                .ok_or_else(|| Error::Backend(format!("server {server_id} is not running")))?;
-            let listed = client.list_tools(Default::default()).await.map_err(|_| {
-                Error::Backend(
-                    "tool listing failed; server error details omitted to protect credentials"
-                        .into(),
-                )
-            })?;
-            listed.tools
-        };
-        let mut map = self.backends.write().await;
-        if let Some(backend) = map.get_mut(server_id) {
-            let tool_count = tools.len();
-            backend.tools = tools;
-            backend.status = BackendStatus::Running { tool_count };
-            let _ = self.events.send(GatewayEvent::ServerStatus {
-                server_id: server_id.to_string(),
-                status: backend.status.clone(),
+        let peers: Vec<_> = self
+            .backends
+            .read()
+            .await
+            .entries
+            .iter()
+            .filter_map(|(id, backend)| {
+                Some((
+                    id.clone(),
+                    backend.generation,
+                    backend.client.as_ref()?.peer().clone(),
+                ))
+            })
+            .collect();
+        let mut refreshes = tokio::task::JoinSet::new();
+        for (id, generation, peer) in peers {
+            let catalog = Arc::downgrade(&self.backends);
+            let events = self.events.clone();
+            refreshes.spawn(async move {
+                if refresh_tools(&catalog, &events, &id, generation, &peer)
+                    .await
+                    .is_err()
+                {
+                    warn!(server_id = %id, "tool refresh failed; keeping last known catalog");
+                }
             });
         }
-        Ok(())
+        while refreshes.join_next().await.is_some() {}
     }
+}
 
-    async fn set_starting(&self, config: ServerConfig) {
-        let id = config.id.clone();
-        let mut map = self.backends.write().await;
-        map.insert(
-            id.clone(),
-            Backend {
-                config,
-                status: BackendStatus::Starting,
-                client: None,
-                tools: Vec::new(),
-            },
-        );
-        let _ = self.events.send(GatewayEvent::ServerStatus {
-            server_id: id,
-            status: BackendStatus::Starting,
+fn supports_updates(peer: &Peer<RoleClient>) -> bool {
+    peer.peer_info().is_some_and(|info| {
+        info.capabilities
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.list_changed == Some(true))
+    })
+}
+
+async fn list_peer_tools(peer: &Peer<RoleClient>) -> Result<Vec<Tool>> {
+    let mut tools = tokio::time::timeout(REFRESH_TIMEOUT, peer.list_all_tools())
+        .await
+        .map_err(|_| Error::Backend("tool listing timed out".into()))?
+        .map_err(|_| {
+            Error::Backend(
+                "tool listing failed; server error details omitted to protect credentials".into(),
+            )
+        })?;
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tools)
+}
+
+#[cfg(test)]
+#[path = "backend_updates_tests.rs"]
+mod updates_tests;
+
+async fn refresh_tools(
+    catalog: &Weak<RwLock<Catalog>>,
+    events: &EventSender,
+    id: &str,
+    generation: uuid::Uuid,
+    peer: &Peer<RoleClient>,
+) -> Result<()> {
+    let Some(shared) = catalog.upgrade() else {
+        return Ok(());
+    };
+    let (refresh, stop) = {
+        let catalog = shared.read().await;
+        let Some(backend) = catalog
+            .entries
+            .get(id)
+            .filter(|backend| backend.generation == generation)
+        else {
+            return Ok(());
+        };
+        (backend.refresh.clone(), backend.stop.clone())
+    };
+    drop(shared);
+    // Serialize explicit refreshes with notifications for this server only.
+    // A slow older response must never overwrite a newer catalog.
+    let _guard = tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Ok(()),
+        guard = refresh.lock() => guard,
+    };
+    let tools = list_peer_tools(peer).await?;
+    let Some(catalog) = catalog.upgrade() else {
+        return Ok(());
+    };
+    let mut catalog = catalog.write().await;
+    let Some(backend) = catalog
+        .entries
+        .get_mut(id)
+        .filter(|backend| backend.generation == generation && !backend.stop.is_cancelled())
+    else {
+        return Ok(());
+    };
+    if backend.tools != tools {
+        backend.status = BackendStatus::Running {
+            tool_count: tools.len(),
+        };
+        backend.tools = tools;
+        let status = backend.status.clone();
+        catalog.reindex();
+        let _ = events.send(GatewayEvent::ServerStatus {
+            server_id: id.to_string(),
+            status,
         });
     }
+    Ok(())
+}
 
-    async fn insert_stopped(&self, config: ServerConfig) {
-        let id = config.id.clone();
-        let mut map = self.backends.write().await;
-        map.insert(
-            id.clone(),
-            Backend {
-                config,
-                status: BackendStatus::Stopped,
-                client: None,
-                tools: Vec::new(),
-            },
-        );
-        let _ = self.events.send(GatewayEvent::ServerStatus {
-            server_id: id,
-            status: BackendStatus::Stopped,
-        });
+async fn watch_tools(
+    catalog: Weak<RwLock<Catalog>>,
+    events: EventSender,
+    id: String,
+    generation: uuid::Uuid,
+    peer: Peer<RoleClient>,
+    changes: Arc<Notify>,
+    stop: CancellationToken,
+) {
+    // Dropping this future cancels an open subscription and any pending refresh.
+    let work = async {
+        let modern = peer
+            .peer_info()
+            .is_some_and(|info| info.protocol_version >= ProtocolVersion::V_2026_07_28);
+        let mut retry = Duration::from_secs(1);
+        loop {
+            if peer.is_transport_closed() {
+                break;
+            }
+            if modern {
+                let listen = tokio::time::timeout(
+                    REFRESH_TIMEOUT,
+                    peer.listen(SubscriptionFilter::builder().tools_list_changed().build()),
+                )
+                .await;
+                if let Ok(Ok(mut subscription)) = listen {
+                    if subscription.acknowledged().tools_list_changed != Some(true) {
+                        warn!(server_id = %id, "upstream declined tool updates; reconnect to refresh");
+                        break;
+                    }
+                    // Refresh after acknowledgment to cover the initial list/subscribe gap.
+                    loop {
+                        if refresh_tools(&catalog, &events, &id, generation, &peer)
+                            .await
+                            .is_err()
+                        {
+                            warn!(server_id = %id, "tool refresh failed; retrying with last known catalog");
+                            tokio::time::sleep(retry).await;
+                            retry = (retry * 2).min(Duration::from_secs(30));
+                            continue;
+                        }
+                        retry = Duration::from_secs(1);
+                        match subscription.next().await {
+                            Ok(Some(_)) => {}
+                            _ => break,
+                        }
+                    }
+                }
+                // Re-establish an interrupted subscription without a tight reconnect loop.
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(Duration::from_secs(30));
+            } else {
+                changes.notified().await;
+                loop {
+                    if refresh_tools(&catalog, &events, &id, generation, &peer)
+                        .await
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    warn!(server_id = %id, "tool refresh failed; retrying with last known catalog");
+                    tokio::time::sleep(retry).await;
+                    retry = (retry * 2).min(Duration::from_secs(30));
+                }
+                retry = Duration::from_secs(1);
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = stop.cancelled() => {},
+        _ = work => {},
     }
 }
 
@@ -332,8 +545,6 @@ async fn connect(
     } else {
         let mut command = server_command(config, &launch, std::env::vars_os());
         command.kill_on_drop(true);
-        // Set this on the transport builder: its defaults override Command stdio settings.
-        // Servers can print credentials to stderr. Do not forward it to application logs.
         let (transport, _) = TokioChildProcess::builder(command)
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -343,14 +554,15 @@ async fn connect(
                     err.kind()
                 ))
             })?;
-        ().serve(transport).await.map_err(|_| {
-            Error::Backend("server handshake failed; check its launch settings".into())
-        })?
+        tokio::time::timeout(REFRESH_TIMEOUT, Upstream::default().serve(transport))
+            .await
+            .map_err(|_| Error::Backend("server handshake timed out".into()))?
+            .map_err(|_| {
+                Error::Backend("server handshake failed; check its launch settings".into())
+            })?
     };
-    let listed = client.list_tools(Default::default()).await.map_err(|_| {
-        Error::Backend("initial tool listing failed; check server configuration".into())
-    })?;
-    Ok((client, listed.tools))
+    let tools = list_peer_tools(client.peer()).await?;
+    Ok((client, tools))
 }
 
 fn inherited_env_allowed(name: &std::ffi::OsStr) -> bool {

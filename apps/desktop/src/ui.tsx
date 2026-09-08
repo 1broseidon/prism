@@ -162,9 +162,9 @@ export function Segmented<T extends string>({
   );
 }
 
-export function Switch({ checked, onChange, label }: { checked: boolean; onChange: (next: boolean) => void; label: string }) {
+export function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (next: boolean) => void; label: string; disabled?: boolean }) {
   return (
-    <button type="button" role="switch" aria-checked={checked} aria-label={label} class="switch" onClick={() => onChange(!checked)}>
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} class="switch" onClick={() => onChange(!checked)}>
       <i />
     </button>
   );

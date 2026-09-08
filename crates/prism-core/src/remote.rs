@@ -30,13 +30,17 @@ use crate::config::{HttpAuth, ServerConfig};
 use crate::credentials::{self, CredentialStore, LaunchSettings};
 use crate::error::{Error, Result};
 
+#[path = "remote_revoke.rs"]
+mod revocation;
+pub(crate) use revocation::sign_out;
+
 /// Name registered with the authorization server; it is what the consent page shows.
 pub const CLIENT_NAME: &str = "Prism";
 /// How long a browser sign-in may stay open before the loopback listener gives up.
 pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+use crate::backend::{McpClient, Upstream};
 
 fn http_client() -> Result<reqwest::Client> {
     // No global timeout: SSE responses stay open for as long as the session lives.
@@ -148,13 +152,13 @@ pub(crate) async fn connect(
         HttpAuth::None | HttpAuth::Header => {
             let transport =
                 StreamableHttpClientTransport::with_client(http_client()?, transport_config);
-            handshake(().serve_with_lifecycle(transport, remote_lifecycle())).await
+            handshake(Upstream::default().serve_with_lifecycle(transport, remote_lifecycle())).await
         }
         HttpAuth::Oauth => {
             let manager = authorized_manager(config, store).await?;
             let client = AuthClient::new(http_client()?, manager);
             let transport = StreamableHttpClientTransport::with_client(client, transport_config);
-            handshake(().serve_with_lifecycle(transport, remote_lifecycle())).await
+            handshake(Upstream::default().serve_with_lifecycle(transport, remote_lifecycle())).await
         }
     }
 }

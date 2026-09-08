@@ -43,6 +43,10 @@ pub enum GatewayEvent {
     },
     /// Do-not-disturb, timeout behaviour, or another operator setting changed.
     SettingsChanged,
+    /// A server's exposure settings changed without a lifecycle transition.
+    ToolsChanged {
+        server_id: String,
+    },
     ServerStatus {
         server_id: String,
         status: BackendStatus,

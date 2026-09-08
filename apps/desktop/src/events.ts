@@ -14,6 +14,7 @@ import {
   servers,
   signins,
   status,
+  toolRevisions,
   update,
   updateProgress,
 } from "./state";
@@ -148,6 +149,11 @@ export async function subscribeEvents(): Promise<() => void> {
         rules.value = await api.listRules();
         break;
       case "server_status":
+      case "tools_changed":
+        toolRevisions.value = {
+          ...toolRevisions.value,
+          [payload.data.server_id]: (toolRevisions.value[payload.data.server_id] ?? 0) + 1,
+        };
         servers.value = await api.listServers();
         status.value = await api.getStatus();
         break;

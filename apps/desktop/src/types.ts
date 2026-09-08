@@ -282,6 +282,7 @@ export type GatewayEvent =
   | { type: "agent_updated"; data: { agent_id: string } }
   | { type: "settings_changed" }
   | { type: "server_status"; data: { server_id: string; status: BackendStatus } }
+  | { type: "tools_changed"; data: { server_id: string } }
   | { type: "audit"; data: AuditEntry }
   | { type: "rules_changed" };
 

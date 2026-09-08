@@ -286,7 +286,7 @@ impl Gateway {
                 let changed = tokio::select! {
                     _ = backend_stop.cancelled() => break,
                     event = backend_events.recv() => match event {
-                        Ok(GatewayEvent::ServerStatus { .. }) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                        Ok(GatewayEvent::ServerStatus { .. } | GatewayEvent::ToolsChanged { .. }) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         _ => false,
                     },
@@ -503,6 +503,12 @@ impl Gateway {
             updated.save(&self.config_path)?;
             *config = updated;
         }
+        drop(config);
+        if changed {
+            let _ = self.events.send(GatewayEvent::ToolsChanged {
+                server_id: server_id.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -567,11 +573,7 @@ impl Gateway {
             return Err(Error::Invalid("this server does not use OAuth".into()));
         }
         self.backends.stop(server_id).await;
-        let store = self.credentials.clone();
-        let forget = config.clone();
-        tokio::task::spawn_blocking(move || crate::remote::forget_tokens(store.as_ref(), &forget))
-            .await
-            .map_err(|_| Error::Gateway("could not reach the credential store".into()))??;
+        crate::remote::sign_out(&config, self.credentials.clone()).await?;
         self.backends.start(config).await;
         Ok(())
     }
@@ -1440,10 +1442,10 @@ impl Gateway {
         }
 
         let aggregated = request.name.as_ref();
-        let resolved = self.resolve_aggregated(aggregated).await;
-        let hidden = self.hidden_tools().await;
-        let (server, original_tool) = match resolved {
-            Some((server, tool)) if !is_hidden(&hidden, &server.id, &tool) => (server, tool),
+        let resolved = self.backends.resolve_tool(aggregated).await;
+        let (server, tool) = match resolved {
+            Some((server, tool)) if self.config.read().await.servers.iter()
+                .any(|s| s.id == server.id && s.exposes(tool.name.as_ref())) => (server, tool),
             _ => {
                 return Err(McpError::invalid_params(
                     format!("unknown tool '{aggregated}'"),
@@ -1451,6 +1453,7 @@ impl Gateway {
                 ));
             }
         };
+        let original_tool = tool.name.to_string();
 
         let mut cancellation = CallAuditGuard {
             audit: &self.audit,
@@ -1464,11 +1467,7 @@ impl Gateway {
                 attention: Attention::Silent, native: None,
             }),
         };
-        let annotations = self
-            .backends
-            .find_tool(&server.id, &original_tool)
-            .await
-            .and_then(|t| t.annotations)
+        let annotations = tool.annotations
             .map(|a| ToolAnnotations::from(&a));
 
         let arguments = request
@@ -1787,29 +1786,6 @@ impl Gateway {
         }
     }
 
-    async fn resolve_aggregated(&self, aggregated: &str) -> Option<(ServerConfig, String)> {
-        let live = self.backends.list_tools(false).await;
-        let mut best: Option<(usize, ServerConfig, String)> = None;
-        let mut seen = Vec::new();
-        for (server, _) in &live {
-            if seen.iter().any(|id: &String| id == &server.id) {
-                continue;
-            }
-            seen.push(server.id.clone());
-            let prefix = format!("{}__", server.name);
-            if let Some(rest) = aggregated.strip_prefix(&prefix) {
-                if rest.is_empty() {
-                    continue;
-                }
-                let len = prefix.len();
-                let take = best.as_ref().map(|(n, _, _)| len > *n).unwrap_or(true);
-                if take {
-                    best = Some((len, server.clone(), rest.to_string()));
-                }
-            }
-        }
-        best.map(|(_, s, t)| (s, t))
-    }
 }
 
 fn is_hidden(
@@ -1938,7 +1914,7 @@ impl ServerHandler for PrismProxy {
                 _ = self.gateway.shutdown.cancelled() => break,
                 _ = validity.tick() => false,
                 event = events.recv() => match event {
-                    Ok(GatewayEvent::ServerStatus { .. }) => true,
+                    Ok(GatewayEvent::ServerStatus { .. } | GatewayEvent::ToolsChanged { .. }) => true,
                     Ok(GatewayEvent::AgentDecided { agent_id, .. } | GatewayEvent::AgentUpdated { agent_id }) => agent_id == identity.agent_id,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

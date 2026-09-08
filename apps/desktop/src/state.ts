@@ -20,6 +20,7 @@ import type {
 
 export const status = signal<GatewayStatus | null>(null);
 export const servers = signal<ServerView[]>([]);
+export const toolRevisions = signal<Record<string, number>>({});
 export const agents = signal<AgentConfig[]>([]);
 export const pending = signal<PendingCall[]>([]);
 export const signins = signal<PendingSignIn[]>([]);

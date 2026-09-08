@@ -1,7 +1,7 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import * as api from "../api";
-import { serverPrimaryAction } from "../server-actions";
-import { errorMessage, pop, servers, status } from "../state";
+import { persistExposure, serverPrimaryAction, toolExposureActions } from "../server-actions";
+import { errorMessage, pop, servers, status, toolRevisions } from "../state";
 import type { ToolInfo } from "../types";
 import { Button, Chip, ConfirmButton, Label, REVEAL, Screen, ShowMore, StatusText, Switch, describeError, useReveal } from "../ui";
 import { authenticationGuidance, refreshServers, serverWhere, statusChip } from "./Servers";
@@ -12,16 +12,26 @@ export function ServerScreen({ serverId }: { serverId: string }) {
   const running = server?.status.kind === "running";
   const [tools, setTools] = useState<ToolInfo[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [updating, setUpdating] = useState<Set<string>>(new Set());
+  const toolsRequest = useRef(0);
+  const revision = toolRevisions.value[serverId] ?? 0;
 
   useEffect(() => {
+    let current = true;
+    const request = ++toolsRequest.current;
     if (!running) {
       setTools(null);
       return;
     }
-    api.listServerTools(serverId).then(setTools).catch((err) => {
-      errorMessage.value = describeError(err);
+    // Don't let an older list overwrite an optimistic mutation.
+    if (updating.size > 0) return;
+    api.listServerTools(serverId).then((result) => {
+      if (current && request === toolsRequest.current) setTools(result);
+    }).catch((err) => {
+      if (current && request === toolsRequest.current) errorMessage.value = describeError(err);
     });
-  }, [serverId, running]);
+    return () => { current = false; };
+  }, [serverId, running, revision, updating]);
 
   // Removed elsewhere, or removed here: the screen has nothing to show, so it leaves.
   const loaded = status.value !== null;
@@ -45,17 +55,30 @@ export function ServerScreen({ serverId }: { serverId: string }) {
     }
   };
 
-  /** Flips at once; the gateway's answer settles it. */
+  /** Only one write per target; a refresh failure cannot undo a confirmed save. */
   const expose = async (tool: ToolInfo, next: boolean) => {
-    const flip = (list: ToolInfo[] | null, value: boolean) => list?.map((t) => (t.name === tool.name ? { ...t, exposed: value } : t)) ?? null;
-    setTools((list) => flip(list, next));
-    try {
-      await api.setToolExposed(server.id, tool.name, next);
-      await refreshServers();
-    } catch (err) {
-      errorMessage.value = describeError(err);
-      setTools((list) => flip(list, !next));
-    }
+    await toolExposureActions.run(JSON.stringify([serverId, tool.name]), async () => {
+      const flip = (list: ToolInfo[] | null, value: boolean) => list?.map((t) => (t.name === tool.name ? { ...t, exposed: value } : t)) ?? null;
+      // Invalidate reads immediately, before the disabled control re-renders.
+      toolsRequest.current += 1;
+      setUpdating((old) => new Set(old).add(tool.name));
+      setTools((list) => flip(list, next));
+      try {
+        await persistExposure(
+          () => api.setToolExposed(serverId, tool.name, next),
+          refreshServers,
+          () => setTools((list) => flip(list, tool.exposed)),
+        );
+      } catch (err) {
+        errorMessage.value = describeError(err);
+      } finally {
+        setUpdating((old) => {
+          const remaining = new Set(old);
+          remaining.delete(tool.name);
+          return remaining;
+        });
+      }
+    });
   };
 
   const primary = serverPrimaryAction(server.auth, server.status.kind);
@@ -109,7 +132,7 @@ export function ServerScreen({ serverId }: { serverId: string }) {
                     {tool.destructive ? <Chip tone="warn">Writes</Chip> : null}
                   </div>
                   <div class="side">
-                    <Switch checked={tool.exposed} label={`Expose ${tool.name} to agents`} onChange={(next) => void expose(tool, next)} />
+                    <Switch checked={tool.exposed} disabled={busy || updating.has(tool.name)} label={`Expose ${tool.name} to agents`} onChange={(next) => void expose(tool, next)} />
                   </div>
                   {tool.description ? <div class="sub truncate" title={tool.description}>{tool.description}</div> : null}
                 </div>
