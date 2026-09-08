@@ -4,13 +4,23 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-08
+
 ### Added
 - Global MCP and native observation setup for Cursor, OpenCode V1, Goose 1.49+ and the current Antigravity CLI configuration. Each harness groups its MCP registrations and tool observations into one agent entry. Setup preserves unrelated configuration, comments and disabled settings, with private backups, repair and owned-file removal.
 - Per-harness event parsing and bounded, neutral observers. OpenCode patch/file contents are omitted before transport; Goose decisions and Antigravity completion results remain distinct from Prism policy. Observation readiness requires a real event after configuration changes.
+- Per-server tool exposure. A server's row opens its own screen, which lists every tool with a switch. A hidden tool is not listed to any agent and is refused if called; the Servers list shows how many are hidden. Remove, Sign out and Restart live on that screen, and recovery (Sign in, Retry) stays on the row.
+- **Settings › Panel** chooses where the panel opens, Auto or a fixed corner, and shows the shortcut (Ctrl+Alt+P unless `panel_shortcut` says otherwise).
 
 ### Changed
-- Known agents are paginated; setup gives each harness its own sign-in instructions. Observer source is available to copy from a separate details view.
-- Quieter tray controls: routine status is plain text, server maintenance sits behind one Manage disclosure, and recovery actions remain visible. Keyboard focus returns after maintenance or removal; only OAuth servers offer Sign in.
+- Now at rest opens with **All clear.** and the server and agent counts above the seven-day chart and the busiest agents, as many whole rows as fit. **All actions** stays pinned bottom-right. The header no longer shows a Ready dot; it says Offline or Checking only when the gateway is not listening.
+- One way to grow a long list. Every list that outgrows the screen scrolls, with a thin thumb that appears only while scrolling, and a **Show 20 more** row appends the next slice without moving what is already shown. Previous/Next paging is gone from Rules, Tools, Servers, Agents, Connect and the agent subscreens; Actions keeps reading its slices against one snapshot.
+- The panel opens in the same place every time, from the tray, the shortcut or a pending call; the pointer no longer decides. On a Linux desktop that reserves no space for its bar, Auto reads the tray icon's position to find the bar and keeps the panel clear of it. macOS and Windows keep the panel on the tray icon. Explicit corners stay inside the desktop's work area.
+- Setup gives each harness its own sign-in instructions. Observer source is available to copy from a separate details view. Routine status on rows is plain text, and only OAuth servers offer Sign in.
+
+### Fixed
+- Agents lists a known harness only once it has a gateway record or a global setup on disk; Connect an agent offers the rest plus Other agent. Setup creates the host record, so a fresh harness is listed before its first contact, and a finished setup no longer offers Resume.
+- The back arrow sits centred in its button.
 
 ## [0.6.0] - 2026-09-07
 
