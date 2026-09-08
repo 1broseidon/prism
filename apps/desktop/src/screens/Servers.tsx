@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import * as api from "../api";
-import { serverPrimaryAction } from "../server-actions";
+import { serverFocusIndexAfterRemoval, serverPrimaryAction, toggleServerDisclosure } from "../server-actions";
 import { errorMessage, push, servers, status } from "../state";
-import type { BackendStatus, ServerView } from "../types";
+import type { ServerView } from "../types";
 import { Button, ChevronIcon, Chip, ConfirmButton, Empty, Label, Pager, Screen, StatusText, describeError, usePage } from "../ui";
 
-function statusChip(s: BackendStatus) {
+function statusChip(server: ServerView) {
+  const s = server.status;
   switch (s.kind) {
     case "running":
       return <StatusText>{s.tool_count} tools</StatusText>;
@@ -14,10 +15,15 @@ function statusChip(s: BackendStatus) {
     case "starting":
       return <Chip tone="warn">Starting</Chip>;
     case "sign_in_required":
-      return <Chip tone="warn">Needs sign-in</Chip>;
+      return server.auth === "oauth" ? <Chip tone="warn">Needs sign-in</Chip> : <Chip tone="danger">Authentication failed</Chip>;
     default:
       return <StatusText>Stopped</StatusText>;
   }
+}
+
+function authenticationGuidance(server: ServerView): string | null {
+  if (server.status.kind !== "sign_in_required" || server.auth === "oauth") return null;
+  return server.auth === "header" ? "Check the API key, then retry." : "The server returned 401. Check its setup, then retry.";
 }
 
 /** The URL without its scheme: the host is what tells servers apart, the scheme is always https. */
@@ -30,12 +36,26 @@ async function refresh() {
   status.value = await api.getStatus();
 }
 
-function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promise<unknown>) => Promise<boolean> }) {
-  const [open, setOpen] = useState(false);
+function ServerRow({
+  server,
+  open,
+  act,
+  onToggle,
+  onClose,
+  onRemoved,
+}: {
+  server: ServerView;
+  open: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
+  onToggle: () => void;
+  onClose: () => void;
+  onRemoved: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const running = server.status.kind === "running";
   const oauth = server.auth === "oauth";
   const primary = serverPrimaryAction(server.auth, server.status.kind);
+  const guidance = authenticationGuidance(server);
   const row = useRef<HTMLDivElement>(null);
   const maintenance = useRef<HTMLDivElement>(null);
   const panelId = `server-maintenance-${server.id}`;
@@ -45,14 +65,17 @@ function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promis
   }, [open]);
 
   const close = (returnFocus = false) => {
-    setOpen(false);
+    onClose();
     if (returnFocus) requestAnimationFrame(() => row.current?.querySelector<HTMLButtonElement>(`[aria-controls="${panelId}"]`)?.focus());
   };
-  const run = async (fn: () => Promise<unknown>) => {
+  const run = async (fn: () => Promise<unknown>, removesRow = false) => {
     if (busy) return;
     setBusy(true);
     try {
-      if (await act(fn)) close();
+      if (await act(fn)) {
+        if (removesRow) onRemoved();
+        else close(true);
+      }
     } finally {
       setBusy(false);
     }
@@ -68,7 +91,7 @@ function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promis
     <div ref={row} class={`item server-item ${open ? "maintenance-open" : ""}`}>
       <div class="title">
         <span class="truncate">{server.name}</span>
-        {statusChip(server.status)}
+        {statusChip(server)}
       </div>
       <div class="side">
         {primary === "sign-in" ? (
@@ -86,8 +109,9 @@ function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promis
           class="disclosure-trigger"
           aria-expanded={open}
           aria-controls={panelId}
+          data-server-manage={server.id}
           busy={busy}
-          onClick={() => setOpen(!open)}
+          onClick={onToggle}
         >
           Manage <ChevronIcon direction={open ? "up" : "down"} />
         </Button>
@@ -97,6 +121,7 @@ function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promis
         {server.auth === "header" ? " · API key" : server.auth === "oauth" ? " · OAuth" : ""}
       </div>
       {server.status.kind === "failed" ? <div class="sub danger">{server.status.error}</div> : null}
+      {guidance ? <div class="sub danger">{guidance}</div> : null}
       {open ? (
         <div
           ref={maintenance}
@@ -117,7 +142,7 @@ function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promis
               Sign out
             </ConfirmButton>
           ) : null}
-          <ConfirmButton variant="quiet" class="danger" confirm="Remove?" busy={busy} onConfirm={() => void run(() => api.removeServer(server.id))}>
+          <ConfirmButton variant="quiet" class="danger" confirm="Remove?" busy={busy} onConfirm={() => void run(() => api.removeServer(server.id), true)}>
             Remove
           </ConfirmButton>
         </div>
@@ -129,6 +154,7 @@ function ServerRow({ server, act }: { server: ServerView; act: (fn: () => Promis
 export function ServersScreen() {
   const list = servers.value;
   const { rows, offset, setOffset, total } = usePage(list, 5);
+  const [openServerId, setOpenServerId] = useState<string | null>(null);
 
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
     try {
@@ -141,13 +167,23 @@ export function ServersScreen() {
     }
   };
 
+  const focusAfterRemoval = (removedIndex: number) => {
+    setOpenServerId(null);
+    requestAnimationFrame(() => {
+      const manage = [...document.querySelectorAll<HTMLButtonElement>("[data-server-manage]")];
+      const focusIndex = serverFocusIndexAfterRemoval(removedIndex, manage.length);
+      if (focusIndex === null) document.querySelector<HTMLButtonElement>(".add-server-action")?.focus();
+      else manage[focusIndex]?.focus();
+    });
+  };
+
   return (
     <div class="screen">
       <Screen
         footer={
           <>
-            {total > 5 ? <Pager offset={offset} size={5} total={total} onOffset={setOffset} /> : undefined}
-            <Button onClick={() => push({ kind: "add-server" })}>Add server</Button>
+            {total > 5 ? <Pager offset={offset} size={5} total={total} onOffset={(next) => { setOpenServerId(null); setOffset(next); }} /> : undefined}
+            <Button class="add-server-action" onClick={() => push({ kind: "add-server" })}>Add server</Button>
           </>
         }
       >
@@ -156,8 +192,16 @@ export function ServersScreen() {
           <Empty title="No servers yet." />
         ) : (
           <div class="list">
-            {rows.map((server) => (
-              <ServerRow key={server.id} server={server} act={act} />
+            {rows.map((server, index) => (
+              <ServerRow
+                key={server.id}
+                server={server}
+                open={openServerId === server.id}
+                act={act}
+                onToggle={() => setOpenServerId(toggleServerDisclosure(openServerId, server.id))}
+                onClose={() => setOpenServerId(null)}
+                onRemoved={() => focusAfterRemoval(index)}
+              />
             ))}
           </div>
         )}
