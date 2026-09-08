@@ -4,6 +4,16 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+- Tool lists stay current. When a server announces new or changed tools, Prism re-reads that server's list and tells connected agents; hiding or exposing a tool tells them too. A server that cannot announce changes still needs a restart.
+- **Sign out** asks the provider to revoke the tokens when it offers revocation, then forgets them here; the local sign-out completes even when the provider cannot be reached. Removing a server does the same. Servers signed in before this release get local sign-out only until you sign in again.
+
+### Changed
+- Agents' tool calls are routed by the exact `{server}__{tool}` name. Two tools that would share one public name are kept off the list until the clash is resolved.
+
+### Fixed
+- Rapid flips of a tool's exposure switch no longer overlap: the switch waits for the save to land, and a failed refresh cannot undo a saved change.
+
 ## [0.7.1] - 2026-09-08
 
 The first published build of 0.7. Version 0.7.0 was tagged the same day but its Windows build failed its tests, so no installers were published for it; everything below ships here.

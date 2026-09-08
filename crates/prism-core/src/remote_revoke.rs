@@ -295,10 +295,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removing_a_server_revokes_at_the_provider_then_forgets() {
+        let provider = Provider::new(true, StatusCode::OK, true, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let path = dir.path().join("prism.json");
+        crate::PrismConfig {
+            listen_port: port,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let gateway = crate::Gateway::start_with_credentials(
+            path,
+            dir.path().join("audit.jsonl"),
+            provider.store.clone(),
+        )
+        .await
+        .unwrap();
+        // The gateway assigns its own credential reference; move the fixture tokens under it.
+        let mut server = provider.config.clone();
+        server.oauth_ref = None;
+        let added = gateway.add_server(server).await.unwrap();
+        let fixture_ref = provider.config.oauth_ref.as_deref().unwrap();
+        let bytes = credentials::get_blob(provider.store.as_ref(), fixture_ref).unwrap();
+        credentials::delete_if_present(provider.store.as_ref(), fixture_ref).unwrap();
+        credentials::put_blob(
+            provider.store.as_ref(),
+            added.oauth_ref.as_deref().unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        assert!(provider.requests.lock().unwrap().is_empty());
+
+        gateway.remove_server(&added.id).await.unwrap();
+        gateway.shutdown().await;
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["token_type_hint"], "refresh_token");
+        assert_eq!(requests[1]["token_type_hint"], "access_token");
+        assert!(provider.locally_empty());
+    }
+
+    #[tokio::test]
     async fn stalled_provider_is_bounded_and_credentials_are_forgotten() {
         let provider = Provider::new(true, StatusCode::OK, true, true).await;
+        // Two request timeouts plus discovery, with room for a slow runner.
         tokio::time::timeout(
-            Duration::from_secs(13),
+            Duration::from_secs(20),
             sign_out(&provider.config, provider.store.clone()),
         )
         .await

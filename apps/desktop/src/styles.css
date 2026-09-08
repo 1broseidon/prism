@@ -1342,6 +1342,11 @@ button.status:hover {
   transition: background-color var(--dur-short) var(--ease-out);
 }
 
+.switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .switch i {
   position: absolute;
   top: 3px;

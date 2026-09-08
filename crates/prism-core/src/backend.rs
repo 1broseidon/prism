@@ -273,7 +273,7 @@ impl BackendManager {
             self.refresh_all().await;
         }
         let catalog = self.backends.read().await;
-        catalog
+        let mut tools: Vec<_> = catalog
             .routes
             .values()
             .filter_map(|route| {
@@ -281,7 +281,10 @@ impl BackendManager {
                 let backend = catalog.entries.get(id)?;
                 Some((backend.config.clone(), backend.tools[*index].clone()))
             })
-            .collect()
+            .collect();
+        // Routes live in a hash map; give the panel and agents one stable order.
+        tools.sort_by(|(a, x), (b, y)| a.name.cmp(&b.name).then_with(|| x.name.cmp(&y.name)));
+        tools
     }
 
     /// Resolve the exact advertised name and its annotations in one lookup.
@@ -545,6 +548,8 @@ async fn connect(
     } else {
         let mut command = server_command(config, &launch, std::env::vars_os());
         command.kill_on_drop(true);
+        // Set this on the transport builder: its defaults override Command stdio settings.
+        // Servers can print credentials to stderr. Do not forward it to application logs.
         let (transport, _) = TokioChildProcess::builder(command)
             .stderr(std::process::Stdio::null())
             .spawn()

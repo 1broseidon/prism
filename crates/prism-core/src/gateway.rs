@@ -468,16 +468,17 @@ impl Gateway {
         };
         self.backends.remove(server_id).await;
         let store = self.credentials.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Some(id) = &removed.credential_ref {
-                crate::credentials::delete(store.as_ref(), id)?;
-            }
-            crate::remote::forget_tokens(store.as_ref(), &removed)
+        let credential_ref = removed.credential_ref.clone();
+        tokio::task::spawn_blocking(move || match &credential_ref {
+            Some(id) => crate::credentials::delete(store.as_ref(), id),
+            None => Ok(()),
         })
         .await
         .map_err(|_| {
             Error::Gateway("server removed, but credential cleanup could not complete".into())
         })??;
+        // Same as Sign out: revoke at the provider when it can, then forget the tokens here.
+        crate::remote::sign_out(&removed, self.credentials.clone()).await?;
         Ok(())
     }
 
@@ -1444,8 +1445,17 @@ impl Gateway {
         let aggregated = request.name.as_ref();
         let resolved = self.backends.resolve_tool(aggregated).await;
         let (server, tool) = match resolved {
-            Some((server, tool)) if self.config.read().await.servers.iter()
-                .any(|s| s.id == server.id && s.exposes(tool.name.as_ref())) => (server, tool),
+            Some((server, tool))
+                if self
+                    .config
+                    .read()
+                    .await
+                    .servers
+                    .iter()
+                    .any(|s| s.id == server.id && s.exposes(tool.name.as_ref())) =>
+            {
+                (server, tool)
+            }
             _ => {
                 return Err(McpError::invalid_params(
                     format!("unknown tool '{aggregated}'"),
@@ -1467,8 +1477,7 @@ impl Gateway {
                 attention: Attention::Silent, native: None,
             }),
         };
-        let annotations = tool.annotations
-            .map(|a| ToolAnnotations::from(&a));
+        let annotations = tool.annotations.map(|a| ToolAnnotations::from(&a));
 
         let arguments = request
             .arguments
@@ -1785,7 +1794,6 @@ impl Gateway {
             }
         }
     }
-
 }
 
 fn is_hidden(

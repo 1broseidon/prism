@@ -489,7 +489,13 @@ async fn routing_uses_exact_pairs_and_rejects_ambiguous_names() {
     );
     assert!(manager.resolve_tool("files__extra__read").await.is_none());
     assert!(manager.resolve_tool("files__nonexistent").await.is_none());
-    assert_eq!(manager.list_tools(false).await.len(), 2);
+    let listed: Vec<String> = manager
+        .list_tools(false)
+        .await
+        .iter()
+        .map(|(server, tool)| format!("{}__{}", server.name, tool.name))
+        .collect();
+    assert_eq!(listed, ["files__read", "files__extra__write"]);
     manager.remove("b").await;
     assert_eq!(
         manager
