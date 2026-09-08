@@ -278,12 +278,20 @@ fn directory(value: &Value, key: &str) -> Parsed<Option<String>> {
         .filter(|s| !s.is_empty())
         .map(|s| {
             path(s)?;
-            if !Path::new(s).is_absolute() {
+            // A harness on a POSIX host (WSL, a container) may post to a Windows Prism. Its
+            // paths are absolute where they came from, and stay spelled the way they arrived.
+            let posix = s.starts_with('/');
+            if !posix && !Path::new(s).is_absolute() {
                 return Err(InvalidHook);
             }
-            Ok(shadow::resolve(s, None, None)
+            let resolved = shadow::resolve(s, None, None)
                 .to_string_lossy()
-                .into_owned())
+                .into_owned();
+            Ok(if posix {
+                resolved.replace('\\', "/")
+            } else {
+                resolved
+            })
         })
         .transpose()
 }

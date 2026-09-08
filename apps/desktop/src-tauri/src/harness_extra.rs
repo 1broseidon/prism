@@ -1010,7 +1010,12 @@ mod tests {
 
     #[test]
     fn documented_paths_and_environment_roots() {
-        let home = Path::new("/fixture home");
+        // Absolute on the host running the test: an XDG root counts only when it is.
+        let home = if cfg!(windows) {
+            Path::new(r"C:\fixture home")
+        } else {
+            Path::new("/fixture home")
+        };
         let unix = resolve_paths("goose", home, false, None, None, None).unwrap();
         assert_eq!(unix.mcp, home.join(".config/goose/config.yaml"));
         assert_eq!(
