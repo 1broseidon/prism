@@ -4,18 +4,18 @@ import { ATTENTIONS, POSTURES } from "../policy";
 import { native, pop, push, rules, servers } from "../state";
 import { relative } from "../time";
 import type { AgentConfig, Attention, Posture } from "../types";
-import { Button, Chip, ConfirmButton, HubRow, Label, Screen, Segmented } from "../ui";
-import { coverageChip } from "./Agents";
+import { Button, Chip, ConfirmButton, HubRow, Label, Screen, Segmented, StatusText } from "../ui";
+import { coverageStatus } from "./Agents";
 import { act, grantsOf, useAgent } from "./AgentSub";
 
 function statusChip(agent: AgentConfig) {
   switch (agent.status) {
     case "approved":
-      return <Chip tone="ok">approved</Chip>;
+      return <StatusText tone="ok">Approved</StatusText>;
     case "denied":
-      return <Chip tone="danger">{agent.host ? "refused" : "denied"}</Chip>;
+      return <Chip tone="danger">{agent.host ? "Refused" : "Denied"}</Chip>;
     default:
-      return <Chip tone="accent">pending</Chip>;
+      return <Chip tone="accent">Pending</Chip>;
   }
 }
 
@@ -83,8 +83,8 @@ export function AgentScreen({ agentId }: { agentId: string }) {
         <div class="agent-head">
           <span class={`dot ${agent.connected ? "ok" : ""}`} title={agent.connected ? "Session open" : "No open session"} />
           {statusChip(agent)}
-          {harness ? coverageChip(agent) : null}
-          {manual ? <Chip tone="accent">manual token</Chip> : null}
+          {harness ? coverageStatus(agent) : null}
+          {manual ? <StatusText>Manual token</StatusText> : null}
           <span class="grow" />
           {harness && hs?.last_event_at ? (
             <button type="button" class="link" onClick={() => push({ kind: "activity", agentId })}>

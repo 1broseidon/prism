@@ -6,7 +6,7 @@ import { reconcileQueue } from "../lifecycle";
 import { activity, activityError, agents, connectAgentDraft, discardResumableNavigation, errorMessage, issuingManualTokens, manualTokens, pending, push, queueCursor, queuePosition, resumableNavigation, resumeNavigation, signins, status, tab } from "../state";
 import { mmss, now, relative, secondsUntil } from "../time";
 import type { ActivitySummary, AgentConfig, DayActivity, Decision, PendingCall, PendingSignIn } from "../types";
-import { Button, Chip, Empty, Label, Screen, describeError, useCopy } from "../ui";
+import { Button, ChevronIcon, Chip, Empty, Label, Screen, describeError, useCopy } from "../ui";
 
 /** Fallback when a call carries no deadline; mirrors DEFAULT_HOLD_TIMEOUT in prism-core. */
 const HOLD_SECONDS = 120;
@@ -154,7 +154,7 @@ function AgentCard({ agent }: { agent: AgentConfig }) {
         {!agent.client_id ? (
           <>
             {" "}
-            <Chip>needs token</Chip>
+            <Chip>Needs token</Chip>
           </>
         ) : null}
       </div>
@@ -420,8 +420,8 @@ export function NowScreen() {
               <div class="queue-strip">
                 <span>{index + 1} of {items.length} waiting</span>
                 <div>
-                  <Button variant="icon" aria-label="Previous request" disabled={index === 0} onClick={() => move(-1)}>‹</Button>
-                  <Button variant="icon" aria-label="Next request" disabled={index === items.length - 1} onClick={() => move(1)}>›</Button>
+                  <Button variant="icon" aria-label="Previous request" disabled={index === 0} onClick={() => move(-1)}><ChevronIcon direction="left" /></Button>
+                  <Button variant="icon" aria-label="Next request" disabled={index === items.length - 1} onClick={() => move(1)}><ChevronIcon /></Button>
                 </div>
               </div>
             ) : null}

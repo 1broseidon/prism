@@ -6,7 +6,7 @@ import { hostName } from "../hosts";
 import { agents, audit, errorMessage, replace } from "../state";
 import type { ActivityFilter } from "../state";
 import type { AuditPage } from "../types";
-import { Button, Chip, Label, Pager, Screen, Segmented, describeError } from "../ui";
+import { Button, Chip, CloseIcon, Label, Pager, Screen, Segmented, describeError } from "../ui";
 
 /** One page of retained rows. Moving pages replaces them; nothing accumulates. */
 const PAGE = 20;
@@ -103,7 +103,7 @@ function ActivityPage({ filter }: { filter: ActivityFilter }) {
         </select>
         <button type="button" class="link" onClick={refresh}>{latest && page && latest.at > page.window.snapshot_at ? "New actions · Refresh" : "Refresh"}</button>
       </div>
-      {chips.length ? <div class="filters">{chips.map(c => <button type="button" class="filter" key={c.key} onClick={() => narrow({[c.key]: undefined})} title="Remove this filter"><Chip>{c.text}</Chip><span aria-hidden="true">×</span></button>)}</div> : null}
+      {chips.length ? <div class="filters">{chips.map(c => <button type="button" class="filter" key={c.key} onClick={() => narrow({[c.key]: undefined})} title="Remove this filter"><Chip>{c.text}</Chip><CloseIcon /></button>)}</div> : null}
       <p class="hint">Retained events only · up to 30 days / 20 MiB.</p>
       {saved ? <p class="hint" role="status">{saved}</p> : null}
       {failed ? <Button variant="quiet" onClick={refresh}>Retry history</Button> : page === null ? <div class="muted small">Loading…</div> : page.entries.length === 0 ? <div class="muted small">Nothing here.</div> : page.entries.map(entry => <FeedRow key={entry.id} entry={entry} />)}

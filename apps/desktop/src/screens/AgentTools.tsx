@@ -44,8 +44,8 @@ export function AgentToolsScreen({ agentId, serverId }: { agentId: string; serve
                 <div class="item" key={tool.name}>
                   <div class="title">
                     <span class="truncate mono small">{tool.name}</span>
-                    {tool.read_only ? <Chip tone="ok">read</Chip> : null}
-                    {tool.destructive ? <Chip tone="warn">writes</Chip> : null}
+                    {tool.read_only ? <Chip tone="ok">Read</Chip> : null}
+                    {tool.destructive ? <Chip tone="warn">Writes</Chip> : null}
                   </div>
                   <div class="side">
                     <Segmented

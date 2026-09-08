@@ -4,7 +4,7 @@ import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { errorMessage, push, status, update, updateProgress } from "../state";
 import type { Settings, UpdateStatus } from "../types";
-import { Button, Chip, HubRow, Label, Screen, Segmented, Switch, describeError } from "../ui";
+import { Button, HubRow, Label, Screen, Segmented, StatusText, Switch, describeError } from "../ui";
 import { native } from "../state";
 import { loadNativeStatus } from "../events";
 
@@ -178,7 +178,7 @@ function NativeSection() {
   };
   return (
     <section class="section">
-      <Label right={st?.last_event_at ? <Chip tone="ok">observed</Chip> : <Chip>none yet</Chip>}>Native actions</Label>
+      <Label right={st?.last_event_at ? <StatusText tone="ok">Receiving</StatusText> : <StatusText>None yet</StatusText>}>Native actions</Label>
       <div class="list">
         <div class="setting">
           <div>

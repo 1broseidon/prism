@@ -18,7 +18,7 @@ import {
 } from "../state";
 import { relative, remaining } from "../time";
 import type { AgentConfig, Rule, RuleDecision } from "../types";
-import { Button, Chip, ConfirmButton, Pager, Screen, Segmented, describeError, usePage } from "../ui";
+import { Button, ChevronIcon, Chip, ConfirmButton, Pager, Screen, Segmented, StatusText, describeError, usePage } from "../ui";
 import { HarnessSections } from "./Host";
 
 /** Rows per page on an agent subscreen: six fit the budget with the pager in the footer. */
@@ -50,7 +50,7 @@ export function useAgent(agentId: string): AgentConfig | undefined {
 }
 
 export function decisionChip(d: RuleDecision) {
-  return <Chip tone={d === "allow" ? "ok" : d === "deny" ? "danger" : "warn"}>{d}</Chip>;
+  return <Chip tone={d === "allow" ? "ok" : d === "deny" ? "danger" : "warn"}>{d[0].toUpperCase() + d.slice(1)}</Chip>;
 }
 
 /** Grants are the rules that say more than the server-wide default: a tool, or a time box. */
@@ -133,7 +133,7 @@ export function AgentConnectionsScreen({ agentId }: { agentId: string }) {
               <div class="item" key={client.client_id}>
                 <div class="title">
                   <span class="truncate">{client.client_name}</span>
-                  {client.signed_in ? <Chip tone="ok">signed in</Chip> : <Chip>signed out</Chip>}
+                  {client.signed_in ? <StatusText tone="ok">Signed in</StatusText> : <StatusText>Signed out</StatusText>}
                 </div>
                 <div class="side">
                   <ConfirmButton variant="quiet" class="danger" confirm="Forget?" onConfirm={() => void act(() => api.forgetClient(agent.id, client.client_id))}>
@@ -189,9 +189,7 @@ export function AgentServersScreen({ agentId }: { agentId: string }) {
                 <div class="item" key={server.id}>
                   <button type="button" class="title row-btn" onClick={() => push({ kind: "agent-server", agentId: agent.id, serverId: server.id })}>
                     <span class="truncate">{server.name}</span>
-                    <span class="chev" aria-hidden="true">
-                      ›
-                    </span>
+                    <span class="chev"><ChevronIcon /></span>
                   </button>
                   <div class="side">
                     <Segmented

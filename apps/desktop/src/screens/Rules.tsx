@@ -14,7 +14,11 @@ function nameOf(list: { id: string; name: string }[], id: string | null): string
 
 function scopeChip(rule: Rule) {
   if (rule.expires_at) return <Chip tone="warn">{remaining(rule.expires_at)} left</Chip>;
-  return rule.scope === "session" ? <Chip tone="warn">this session</Chip> : <Chip>always</Chip>;
+  return rule.scope === "session" ? <Chip tone="warn">This session</Chip> : <Chip>Always</Chip>;
+}
+
+function sentence(value: string): string {
+  return value[0].toUpperCase() + value.slice(1);
 }
 
 function decisionTone(rule: Rule): "ok" | "danger" | "warn" {
@@ -44,9 +48,9 @@ export function RulesScreen() {
           {rows.map((rule) => (
             <div class="item" key={rule.id}>
               <div class="title">
-                <Chip tone={decisionTone(rule)}>{rule.decision}</Chip>
+                <Chip tone={decisionTone(rule)}>{sentence(rule.decision)}</Chip>
                 {scopeChip(rule)}
-                {rule.attention ? <Chip tone="accent">{rule.attention}</Chip> : null}
+                {rule.attention ? <Chip tone="accent">{sentence(rule.attention)}</Chip> : null}
               </div>
               <div class="side">
                 <ConfirmButton variant="quiet" class="danger" confirm="Delete?" onConfirm={() => void remove(rule.id)}>

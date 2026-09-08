@@ -17,7 +17,7 @@ import { ServersScreen } from "./screens/Servers";
 import { ObserveScreen, SettingsScreen, UpdatesScreen } from "./screens/Settings";
 import { agents, errorMessage, pending, pop, push, resetNavigation, servers, signins, stack, status, tab, update } from "./state";
 import type { Screen } from "./state";
-import { Button, Notice } from "./ui";
+import { BackIcon, Button, CloseIcon, Notice, SettingsIcon } from "./ui";
 
 const TABS = [
   { id: "now", label: "Now" },
@@ -73,14 +73,6 @@ const Mark = () => (
   </svg>
 );
 
-const SlidersIcon = () => (
-  <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-    <path d="M2 4.5h12M2 11.5h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" />
-    <circle cx="6" cy="4.5" r="2" fill="var(--color-paper)" stroke="currentColor" stroke-width="1.6" />
-    <circle cx="10.5" cy="11.5" r="2" fill="var(--color-paper)" stroke="currentColor" stroke-width="1.6" />
-  </svg>
-);
-
 export function App() {
   useEffect(() => {
     void loadAll();
@@ -112,7 +104,7 @@ export function App() {
         {top ? (
           <>
             <Button variant="icon" class="back" aria-label="Back" title="Back (Esc)" onClick={pop}>
-              ←
+              <BackIcon />
             </Button>
             <h1 class="screen-title truncate">{titleOf(top)}</h1>
             {waiting > 0 ? (
@@ -133,11 +125,12 @@ export function App() {
             <button
               type="button"
               class="status"
-              title={st?.listening ? "Listening. Connect an agent." : "Not listening"}
+              aria-label={st?.listening ? "Gateway ready, connect an agent" : "Gateway unavailable, open connection help"}
+              title={st?.listening ? "Gateway ready. Connect an agent." : "Gateway unavailable"}
               onClick={() => push({ kind: "connect-agent" })}
             >
               <span class={`dot ${st ? (st.listening ? "ok" : "danger") : ""}`} />
-              {st ? `:${st.listen_port}` : "…"}
+              {st ? (st.listening ? "Ready" : "Offline") : "Checking"}
             </button>
           </>
         )}
@@ -150,11 +143,11 @@ export function App() {
             title={update.value ? `Prism ${update.value.version} is ready` : "Settings"}
             onClick={() => push({ kind: "settings" })}
           >
-            <SlidersIcon />
+            <SettingsIcon />
           </Button>
         )}
         <Button variant="icon" aria-label="Hide panel" title="Hide" onClick={() => void api.hidePanel()}>
-          ×
+          <CloseIcon />
         </Button>
       </header>
       {top ? null : (

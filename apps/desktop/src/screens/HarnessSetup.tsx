@@ -3,7 +3,7 @@ import * as api from "../api";
 import { hostSetup, hostStatus } from "../hosts";
 import { agents, errorMessage, harnessSetupDraft, native, updateHarnessSetupDraft } from "../state";
 import { relative } from "../time";
-import { Button, Chip, CodeBlock, ConfirmButton, Label, Screen, describeError } from "../ui";
+import { Button, ChevronIcon, CodeBlock, ConfirmButton, Label, Screen, StatusText, describeError } from "../ui";
 
 export function HarnessSetupScreen({ host }: { host: string }) {
   const codex = host === "codex";
@@ -44,9 +44,9 @@ export function HarnessSetupScreen({ host }: { host: string }) {
   }>
     <p class="hint">Global MCP + native observation. Existing settings backed up.</p>
     <section class="section setup-status">
-      <Label right={<Chip tone={agent?.connected ? "ok" : undefined}>{agent?.connected ? "connected" : setup?.mcp_configured ? "configured" : "not configured"}</Chip>}>MCP</Label>
+      <Label right={<StatusText tone={agent?.connected ? "ok" : undefined}>{agent?.connected ? "Connected" : setup?.mcp_configured ? "Configured" : "Not configured"}</StatusText>}>MCP</Label>
       <p class="hint">{setup?.mcp_configured ? "Approve sign-in in Prism when the client connects." : "All projects use this machine’s gateway."}</p>
-      <Label right={<Chip tone={receiving ? "ok" : undefined}>{!native.value?.observe_native || setup?.hooks_disabled ? "off" : receiving ? "receiving" : setup?.hook_installed ? "configured" : "not configured"}</Chip>}>Observation</Label>
+      <Label right={<StatusText tone={receiving ? "ok" : undefined}>{!native.value?.observe_native || setup?.hooks_disabled ? "Off" : receiving ? "Receiving" : setup?.hook_installed ? "Configured" : "Not configured"}</StatusText>}>Observation</Label>
       <p class="hint">{setup?.hooks_disabled ? `Hooks are disabled in ${name}. Enable them there to observe tools.` : receiving ? `Last event ${relative(seen?.last_event_at ?? "")}.` : codex && setup?.hook_installed ? "Review the hook in Codex: /hooks. Then run a tool." : "Run a tool in a new session to verify."}</p>
     </section>
     {configured && !agent?.connected ? <section class="section">
@@ -56,7 +56,9 @@ export function HarnessSetupScreen({ host }: { host: string }) {
     </section> : null}
     {setup?.problem ? <p class="hint error" role="alert">{setup.problem}</p> : null}
     {message ? <p class="hint" role="status">{message}</p> : null}
-    <button type="button" class="link" aria-expanded={details} onClick={() => void showDetails()}>{details ? "Hide details" : "Files and hook snippet"}</button>
+    <button type="button" class="link disclosure-link" aria-expanded={details} onClick={() => void showDetails()}>
+      {details ? "Hide details" : "Files and hook snippet"}<ChevronIcon direction={details ? "up" : "down"} />
+    </button>
     {details ? <section class="section">
       <p class="hint setup-paths">{setup?.mcp_path}<br />{setup?.settings_path}</p>
       <CodeBlock text={snippet} copyable />

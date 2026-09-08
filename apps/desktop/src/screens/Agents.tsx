@@ -4,7 +4,7 @@ import { HOSTS, hostSetup, hostStatus, placeholderHost } from "../hosts";
 import { postureLabel } from "../policy";
 import { relative } from "../time";
 import type { AgentConfig } from "../types";
-import { Button, Chip, Empty, Label, Pager, Screen, describeError, usePage } from "../ui";
+import { Button, ChevronIcon, Chip, Empty, Label, Pager, Screen, StatusText, describeError, usePage } from "../ui";
 
 async function refresh() {
   agents.value = await api.listAgents();
@@ -16,21 +16,21 @@ function statusChip(agent: AgentConfig) {
     case "approved":
       return null;
     case "denied":
-      return <Chip tone="danger">refused</Chip>;
+      return <Chip tone="danger">Refused</Chip>;
     default:
-      return <Chip tone="accent">pending</Chip>;
+      return <Chip tone="accent">Pending</Chip>;
   }
 }
 
 /** Coverage in one word. Enforced arrives with phase 2; nothing claims it yet. */
-export function coverageChip(agent: AgentConfig) {
+export function coverageStatus(agent: AgentConfig) {
   const st = native.value;
   const setup = hostSetup(st, agent.host ?? "");
   if (agent.status === "denied") return null;
-  if (!st?.observe_native || setup?.hooks_disabled) return <Chip>observation off</Chip>;
-  if (setup?.events_received) return <Chip tone="ok">observed</Chip>;
-  if (setup?.hook_installed) return <Chip>configured</Chip>;
-  return <Chip>not configured</Chip>;
+  if (!st?.observe_native || setup?.hooks_disabled) return <StatusText>Observation off</StatusText>;
+  if (setup?.events_received) return <StatusText tone="ok">Receiving</StatusText>;
+  if (setup?.hook_installed) return <StatusText>Configured</StatusText>;
+  return <StatusText>Not configured</StatusText>;
 }
 
 function plural(n: number, word: string) {
@@ -64,18 +64,11 @@ function AgentRow({ agent }: { agent: AgentConfig }) {
   return (
     <div class="item">
       <button type="button" class="title row-btn" onClick={() => push({ kind: "agent", agentId: agent.id })}>
-        {harness ? (
-          <span class="host-mark" aria-hidden="true" />
-        ) : (
-          <span class={`dot ${agent.connected ? "ok" : ""}`} title={agent.connected ? "Session open" : "No open session"} />
-        )}
+        <span class={`dot ${agent.connected ? "ok" : ""}`} title={agent.connected ? "Session open" : "No open session"} />
         <span class="truncate">{agent.name}</span>
-        {harness && agent.connected ? <span class="dot ok" title="Session open" /> : null}
         {statusChip(agent)}
-        {harness ? coverageChip(agent) : null}
-        <span class="chev" aria-hidden="true">
-          ›
-        </span>
+        {harness ? coverageStatus(agent) : null}
+        <span class="chev"><ChevronIcon /></span>
       </button>
       {agent.status === "pending" ? (
         <div class="side">

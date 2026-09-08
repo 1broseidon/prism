@@ -17,7 +17,7 @@ import {
   status,
   updateConnectAgentDraft,
 } from "../state";
-import { Button, Chip, CodeBlock, Label, Screen, Segmented, describeError } from "../ui";
+import { Button, ChevronIcon, CodeBlock, Label, Screen, Segmented, StatusText, describeError } from "../ui";
 
 export function ConnectAgentScreen() {
   const [busy, setBusy] = useState(false);
@@ -56,17 +56,24 @@ export function ConnectAgentScreen() {
   }} />;
 
   if (!custom) return <div class="screen pushed"><Screen>
+    <section class="gateway-summary">
+      <Label right={<StatusText tone={status.value?.listening ? "ok" : "danger"}>{status.value?.listening ? "Ready" : "Unavailable"}</StatusText>}>Local gateway</Label>
+      <div class="gateway-address">
+        <span class="mono">127.0.0.1:{status.value?.listen_port ?? "…"}</span>
+        <span>{status.value?.listening ? "Agents connect through this machine." : "Connection setup is unavailable."}</span>
+      </div>
+    </section>
     <Label>Choose your agent</Label>
     <div class="list harness-picker">
       {HOSTS.map((h) => {
         const configured = hostSetup(native.value, h.host);
         return <button key={h.host} type="button" class="item harness-choice" onClick={() => push({ kind: "harness-setup", host: h.host })}>
-          <span class="host-mark" aria-hidden="true" /><span><strong>{h.name}</strong><small>MCP + native observation</small></span>
-          {configured?.mcp_configured && configured.hook_installed ? <Chip>configured</Chip> : null}<span class="chev">›</span>
+          <span><strong>{h.name}</strong><small>MCP + native observation</small></span>
+          {configured?.mcp_configured && configured.hook_installed ? <StatusText>Configured</StatusText> : null}<span class="chev"><ChevronIcon /></span>
         </button>;
       })}
       <button type="button" class="item harness-choice" onClick={() => updateConnectAgentDraft({ custom: true })}>
-        <span class="host-mark" aria-hidden="true" /><span><strong>Other</strong><small>Connect any MCP client</small></span><span class="chev">›</span>
+        <span><strong>Other</strong><small>Connect any MCP client</small></span><span class="chev"><ChevronIcon /></span>
       </button>
     </div>
     <p class="hint">Set up once for all your projects.</p>

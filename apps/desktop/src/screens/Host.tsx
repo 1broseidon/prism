@@ -2,7 +2,7 @@ import { useEffect } from "preact/hooks";
 import { loadNativeStatus } from "../events";
 import { hostSetup, hostStatus } from "../hosts";
 import { native, push } from "../state";
-import { Button, Chip, Label } from "../ui";
+import { Button, Label, StatusText } from "../ui";
 
 /** Connection setup and observed patterns for this harness. */
 export function HarnessSections({ agentId, host }: { agentId: string; host: string }) {
@@ -14,7 +14,7 @@ export function HarnessSections({ agentId, host }: { agentId: string; host: stri
   const asked = reasons.reduce((n, r) => n + r.count, 0);
   return <>
     <section class="section">
-      <Label right={<Chip tone={setup?.events_received && st?.observe_native ? "ok" : undefined}>{!st?.observe_native || setup?.hooks_disabled ? "observation off" : setup?.events_received ? "observed" : setup?.hook_installed ? "configured" : "not configured"}</Chip>}>Setup</Label>
+      <Label right={<StatusText tone={setup?.events_received && st?.observe_native ? "ok" : undefined}>{!st?.observe_native || setup?.hooks_disabled ? "Observation off" : setup?.events_received ? "Receiving" : setup?.hook_installed ? "Configured" : "Not configured"}</StatusText>}>Setup</Label>
       <Button variant="quiet" onClick={() => push({ kind: "harness-setup", host })}>{setup?.hook_installed || setup?.mcp_configured ? "Manage setup" : "Set up MCP + observation"}</Button>
     </section>
       <section class="section">

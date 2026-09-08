@@ -51,6 +51,36 @@ export function Chip({ tone, children }: { tone?: "ok" | "warn" | "danger" | "ac
   return <span class={`chip ${tone ?? ""}`}>{children}</span>;
 }
 
+export function StatusText({ tone, children }: { tone?: "ok" | "danger" | "accent"; children: ComponentChildren }) {
+  return <span class={`status-text ${tone ?? ""}`}>{children}</span>;
+}
+
+export function BackIcon() {
+  return <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3.5 6 8l4.5 4.5M6.5 8H14" /></svg>;
+}
+
+export function CloseIcon() {
+  return <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7m0-7-7 7" /></svg>;
+}
+
+export function SettingsIcon() {
+  return (
+    <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2 4.5h12M2 11.5h12" />
+      <circle cx="6" cy="4.5" r="1.75" />
+      <circle cx="10.5" cy="11.5" r="1.75" />
+    </svg>
+  );
+}
+
+export function ChevronIcon({ direction = "right" }: { direction?: "left" | "right" | "down" | "up" }) {
+  return (
+    <svg class={`control-icon chevron-icon ${direction}`} viewBox="0 0 16 16" aria-hidden="true">
+      <path d="m6 3.5 4.5 4.5L6 12.5" />
+    </svg>
+  );
+}
+
 export function Label({ children, right }: { children: ComponentChildren; right?: ComponentChildren }) {
   return (
     <div class="label">
@@ -167,13 +197,13 @@ export function Pager({ offset, size, total, onOffset, disabled = false }: { off
   return (
     <div class="pager" role="navigation" aria-label="Pages">
       <Button variant="icon" aria-label="Previous page" disabled={disabled || offset === 0} onClick={() => onOffset(Math.max(0, offset - size))}>
-        ‹
+        <ChevronIcon direction="left" />
       </Button>
       <span class="range">
         {offset + 1}–{end} <span class="muted">of {total}</span>
       </span>
       <Button variant="icon" aria-label="Next page" disabled={disabled || end >= total} onClick={() => onOffset(offset + size)}>
-        ›
+        <ChevronIcon />
       </Button>
     </div>
   );
@@ -185,9 +215,7 @@ export function HubRow({ label, value, tone, onClick }: { label: string; value?:
     <button type="button" class="hub-row" onClick={onClick}>
       <span class="hub-label truncate">{label}</span>
       {value ? <span class={`hub-value ${tone ?? ""}`}>{value}</span> : null}
-      <span class="chev" aria-hidden="true">
-        ›
-      </span>
+      <span class="chev"><ChevronIcon /></span>
     </button>
   );
 }
@@ -197,7 +225,7 @@ export function Notice({ text, onDismiss }: { text: string; onDismiss: () => voi
     <div class="notice" role="alert">
       <span>{text}</span>
       <Button variant="icon" aria-label="Dismiss" onClick={onDismiss}>
-        ×
+        <CloseIcon />
       </Button>
     </div>
   );
