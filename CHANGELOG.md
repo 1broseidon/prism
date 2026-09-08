@@ -4,7 +4,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-09-08
+## [0.7.1] - 2026-09-08
+
+The first published build of 0.7. Version 0.7.0 was tagged the same day but its Windows build failed its tests, so no installers were published for it; everything below ships here.
 
 ### Added
 - Global MCP and native observation setup for Cursor, OpenCode V1, Goose 1.49+ and the current Antigravity CLI configuration. Each harness groups its MCP registrations and tool observations into one agent entry. Setup preserves unrelated configuration, comments and disabled settings, with private backups, repair and owned-file removal.
@@ -19,6 +21,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - Setup gives each harness its own sign-in instructions. Observer source is available to copy from a separate details view. Routine status on rows is plain text, and only OAuth servers offer Sign in.
 
 ### Fixed
+- A hook whose working directory is a POSIX path (`/home/...`) is accepted on Windows and keeps its forward slashes, so a harness running on a POSIX host can report to a Windows Prism instead of being refused. This also made the test suite pass on Windows.
 - Agents lists a known harness only once it has a gateway record or a global setup on disk; Connect an agent offers the rest plus Other agent. Setup creates the host record, so a fresh harness is listed before its first contact, and a finished setup no longer offers Resume.
 - The back arrow sits centred in its button.
 
