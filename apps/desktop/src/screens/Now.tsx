@@ -1,3 +1,4 @@
+import { harness } from "../hosts";
 import { loadActivity } from "../events";
 import { signal } from "@preact/signals";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
@@ -379,7 +380,7 @@ function ResumeRow() {
   const what = token ? "Saved token"
     : top?.kind === "add-server" ? "Add server"
     : top?.kind === "connect-agent" ? "Connect an agent"
-    : top?.kind === "harness-setup" ? (top.host === "codex" ? "Set up Codex" : "Set up Claude Code")
+    : top?.kind === "harness-setup" ? `Set up ${harness(top.host)?.name ?? "agent"}`
     : "Setup";
   return (
     <div class="resume-row" role="status">

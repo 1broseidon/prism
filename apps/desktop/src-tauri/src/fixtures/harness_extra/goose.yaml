@@ -1,0 +1,21 @@
+# Keep my provider and extension comments.
+active_provider: fixture
+providers:
+  fixture: {enabled: true, model: local-fixture}
+GOOSE_MODE: approve
+instructions: |
+  extensions: is ordinary text here.
+  Keep this multi-line setting verbatim.
+extensions: # globally installed extensions
+  developer:
+    enabled: true
+    name: developer
+    type: builtin # built-in tools
+    timeout: 300
+  other:
+    enabled: false
+    name: other
+    type: streamable_http
+    uri: http://127.0.0.1:4101/mcp
+    headers: {X-Fixture: dummy}
+# Keep this trailing comment too.

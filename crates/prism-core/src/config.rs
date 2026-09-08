@@ -871,7 +871,7 @@ mod agent_tests {
         config.agents.push(hooked);
         config.clients.push(client("c1", "Claude Code"));
         config.clients.push(client("c2", "claude-code"));
-        config.clients.push(client("c9", "Cursor"));
+        config.clients.push(client("c9", "Unrelated MCP Client"));
 
         let (first, created) = config.find_or_request_agent_for_client(&config.clients[0].clone());
         assert!(!created);
@@ -888,7 +888,7 @@ mod agent_tests {
 
         let (other, created) = config.find_or_request_agent_for_client(&config.clients[2].clone());
         assert!(created);
-        assert_eq!(other.name, "Cursor");
+        assert_eq!(other.name, "Unrelated MCP Client");
         assert!(other.host.is_none());
         assert_eq!(other.status, AgentStatus::Pending);
 

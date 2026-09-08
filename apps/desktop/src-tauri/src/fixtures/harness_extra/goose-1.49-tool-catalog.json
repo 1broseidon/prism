@@ -1,0 +1,386 @@
+[
+  {
+    "name": "analyze",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "focus": {
+          "type": "string"
+        },
+        "max_depth": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "follow_depth": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "force": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "apps__create_app",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "prd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "prd"
+      ]
+    }
+  },
+  {
+    "name": "apps__delete_app",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "apps__iterate_app",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "feedback": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "feedback"
+      ]
+    }
+  },
+  {
+    "name": "apps__list_apps",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "delegate",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "instructions": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {},
+          "required": []
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "max_turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "context": {
+          "type": "string"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "async": {
+          "type": "boolean"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "edit",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "after": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "before",
+        "after"
+      ]
+    }
+  },
+  {
+    "name": "extensionmanager__list_resources",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "extension_name": {
+          "type": "string"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "extensionmanager__manage_extensions",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "enable",
+            "disable"
+          ]
+        },
+        "extension_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "extension_name"
+      ]
+    }
+  },
+  {
+    "name": "extensionmanager__read_resource",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "extension_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "extension_name"
+      ]
+    }
+  },
+  {
+    "name": "extensionmanager__search_available_extensions",
+    "parameters": {
+      "type": "object",
+      "required": [],
+      "properties": {}
+    }
+  },
+  {
+    "name": "load",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "cancel": {
+          "type": "boolean"
+        },
+        "peek": {
+          "type": "boolean"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "load_skill",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "args": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "read_image",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "crop": {
+          "$ref": "#/$defs/CropParams"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "$defs": {
+        "CropParams": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "y": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "width": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "height": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "width",
+            "height"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "shell",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "todo__todo_write",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content"
+      ]
+    }
+  },
+  {
+    "name": "tree",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "depth": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "write",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ]
+    }
+  }
+]

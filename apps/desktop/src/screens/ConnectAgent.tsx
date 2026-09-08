@@ -17,10 +17,11 @@ import {
   status,
   updateConnectAgentDraft,
 } from "../state";
-import { Button, ChevronIcon, CodeBlock, Label, Screen, Segmented, StatusText, describeError } from "../ui";
+import { Button, ChevronIcon, CodeBlock, Label, Screen, Segmented, StatusText, Pager, usePage, describeError } from "../ui";
 
 export function ConnectAgentScreen() {
   const [busy, setBusy] = useState(false);
+  const { rows, offset, setOffset, total } = usePage([...HOSTS], 5);
   const draft = connectAgentDraft.value;
   const { custom, mode, snippet } = draft;
   const issued = draft.issuedAgentId ? manualTokens.value[draft.issuedAgentId] ?? null : null;
@@ -55,7 +56,10 @@ export function ConnectAgentScreen() {
     push({ kind: "agent", agentId });
   }} />;
 
-  if (!custom) return <div class="screen pushed"><Screen>
+  if (!custom) return <div class="screen pushed"><Screen footer={<>
+    <Pager offset={offset} size={5} total={total} onOffset={setOffset} />
+    <Button onClick={() => updateConnectAgentDraft({ custom: true })}>Other agent</Button>
+  </>}>
     <section class="gateway-summary">
       <Label right={<StatusText tone={status.value?.listening ? "ok" : "danger"}>{status.value?.listening ? "Ready" : "Unavailable"}</StatusText>}>Local gateway</Label>
       <div class="gateway-address">
@@ -65,18 +69,16 @@ export function ConnectAgentScreen() {
     </section>
     <Label>Choose your agent</Label>
     <div class="list harness-picker">
-      {HOSTS.map((h) => {
+      {rows.map((h) => {
         const configured = hostSetup(native.value, h.host);
         return <button key={h.host} type="button" class="item harness-choice" onClick={() => push({ kind: "harness-setup", host: h.host })}>
-          <span><strong>{h.name}</strong><small>MCP + native observation</small></span>
+          <span><strong>{h.name}</strong><small>{h.scope}</small></span>
           {configured?.mcp_configured && configured.hook_installed ? <StatusText>Configured</StatusText> : null}<span class="chev"><ChevronIcon /></span>
         </button>;
       })}
-      <button type="button" class="item harness-choice" onClick={() => updateConnectAgentDraft({ custom: true })}>
-        <span><strong>Other</strong><small>Connect any MCP client</small></span><span class="chev"><ChevronIcon /></span>
-      </button>
+
     </div>
-    <p class="hint">Set up once for all your projects.</p>
+    <p class="hint">Global MCP + observation. Project overrides stay separate.</p>
   </Screen></div>;
 
   return (

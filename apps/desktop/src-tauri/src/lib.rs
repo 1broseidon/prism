@@ -886,7 +886,22 @@ async fn get_native_status(state: State<'_, AppState>) -> Result<NativeStatusDto
         hosts
             .iter()
             .map(|host| {
-                let paths = harness::Paths::for_host(&host.host)?;
+                let paths = match harness::Paths::for_host(&host.host) {
+                    Ok(paths) => paths,
+                    Err(problem) => {
+                        return Ok(harness::Setup {
+                            host: host.host.clone(),
+                            settings_path: String::new(),
+                            mcp_path: String::new(),
+                            mcp_configured: false,
+                            hook_installed: false,
+                            setup_present: false,
+                            hooks_disabled: false,
+                            events_received: false,
+                            problem: Some(problem),
+                        })
+                    }
+                };
                 Ok(harness::inspect(
                     &paths,
                     &host.host,
@@ -948,10 +963,7 @@ async fn rotate_hook_token(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn get_host_hook_snippet(state: State<'_, AppState>, host: String) -> Result<String, String> {
     let url = state.gateway.hook_url(&host);
-    let value = serde_json::json!({
-        "hooks": { "PreToolUse": [ { "hooks": [ harness::hook_entry(&host, &url)? ] } ] }
-    });
-    serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
+    harness::snippet(&host, &url)
 }
 
 /// Hook-only repair for installations created before the combined harness setup flow.

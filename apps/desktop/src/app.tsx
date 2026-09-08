@@ -8,9 +8,9 @@ import { AgentToolsScreen } from "./screens/AgentTools";
 import { ActivityScreen } from "./screens/Activity";
 import { AgentsScreen } from "./screens/Agents";
 import { ConnectAgentScreen } from "./screens/ConnectAgent";
-import { HarnessSetupScreen } from "./screens/HarnessSetup";
+import { HarnessFilesScreen, HarnessSetupScreen } from "./screens/HarnessSetup";
 import { InspectCallScreen } from "./screens/InspectCall";
-import { hostName } from "./hosts";
+import { harness, hostName } from "./hosts";
 import { NowScreen } from "./screens/Now";
 import { RulesScreen } from "./screens/Rules";
 import { ServersScreen } from "./screens/Servers";
@@ -35,7 +35,9 @@ function titleOf(screen: Screen): string {
     case "add-server":
       return "Add server";
     case "harness-setup":
-      return screen.host === "codex" ? "Set up Codex" : "Set up Claude Code";
+      return `Set up ${harness(screen.host)?.name ?? "agent"}`;
+    case "harness-files":
+      return `${harness(screen.host)?.name ?? "Agent"} · Files`;
     case "connect-agent":
       return "Connect an agent";
     case "settings":
@@ -181,6 +183,7 @@ export function App() {
         {top?.kind === "add-server" ? <AddServerScreen /> : null}
         {top?.kind === "connect-agent" ? <ConnectAgentScreen /> : null}
         {top?.kind === "harness-setup" ? <HarnessSetupScreen host={top.host} /> : null}
+        {top?.kind === "harness-files" ? <HarnessFilesScreen host={top.host} /> : null}
         {top?.kind === "settings" ? <SettingsScreen /> : null}
         {top?.kind === "agent" ? <AgentScreen agentId={top.agentId} /> : null}
         {top?.kind === "host" ? <AgentScreen agentId={top.agentId} /> : null}

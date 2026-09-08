@@ -1,8 +1,8 @@
 //! Native actions, phase 1: observe what an agent host does outside MCP.
 //!
-//! Claude Code posts every `PreToolUse` event to `/hooks/claude-code/{token}` on the loopback
-//! listener. Each becomes an audit entry with a one-line redacted subject. The route always answers
-//! `200 {}` in this phase, so the host's own permission flow is untouched. A short curated deny list
+//! Harness adapters post one selected lifecycle event to `/hooks/{host}/{token}` on the loopback
+//! listener. Valid observations become audit entries with a one-line redacted subject. Successful
+//! requests answer `200 {}`; adapters preserve the host's own permission flow. A curated deny list
 //! runs in shadow and marks entries it *would* have held; that count decides whether enforcement
 //! ever ships. See `.brainfile/plans/native-actions.md`.
 
@@ -23,15 +23,43 @@ use tracing::warn;
 
 use crate::gateway::Gateway;
 
+mod parse;
+pub(crate) use parse::{parse_hook, Observation};
+mod redaction;
+pub use redaction::redact;
+pub(crate) use redaction::redact_identifier;
+
+#[cfg(test)]
+mod harness_tests;
+
 /// Host ids; each is also the suffix of the host's agent record id (`host:<id>`).
 pub const HOST_CLAUDE_CODE: &str = "claude-code";
 pub const HOST_CODEX: &str = "codex";
-pub const HOSTS: &[&str] = &[HOST_CLAUDE_CODE, HOST_CODEX];
+pub const HOST_CURSOR: &str = "cursor";
+pub const HOST_OPENCODE: &str = "opencode";
+pub const HOST_GOOSE: &str = "goose";
+pub const HOST_ANTIGRAVITY: &str = "antigravity";
+pub const HOSTS: &[&str] = &[
+    HOST_CLAUDE_CODE,
+    HOST_CODEX,
+    HOST_CURSOR,
+    HOST_OPENCODE,
+    HOST_GOOSE,
+    HOST_ANTIGRAVITY,
+];
 
-/// The harness a self-declared OAuth client name belongs to, if Prism knows it. Matching is
-/// anchored at the start and blind to case and punctuation, so "Claude Code", "claude-code" and
-/// "Claude Code 2.1" all land on the same entry.
+/// The harness a self-declared OAuth client name belongs to, if Prism knows it. Matching
+/// preserves legacy Claude/Codex aliases. New hosts use exact, case-insensitive names rather than
+/// prefix or punctuation folding. This groups presentation only; it does not authenticate a client.
 pub fn harness_for_client_name(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "cursor" => return Some(HOST_CURSOR),
+        "opencode" => return Some(HOST_OPENCODE),
+        // GoosePlatform's Display implementation in aaif-goose/goose v1.49.0 agent.rs.
+        "goose" | "goose-cli" | "goose-desktop" => return Some(HOST_GOOSE),
+        "antigravity" => return Some(HOST_ANTIGRAVITY),
+        _ => {}
+    }
     let key: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -50,6 +78,10 @@ pub fn harness_display_name(host: &str) -> &str {
     match host {
         HOST_CLAUDE_CODE => "Claude Code",
         HOST_CODEX => "Codex",
+        HOST_CURSOR => "Cursor",
+        HOST_OPENCODE => "OpenCode",
+        HOST_GOOSE => "Goose",
+        HOST_ANTIGRAVITY => "Antigravity",
         other => other,
     }
 }
@@ -67,7 +99,8 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 const SUBJECT_MAX_CHARS: usize = 240;
 const EVENTS_PER_MINUTE: usize = 1000;
 
-/// The fields Prism reads from a Claude Code hook event. Everything else is ignored.
+/// Common projection of a hook event. Host-specific decoding removes file contents, diffs,
+/// prompts, tool output, and unrelated fields before passing this to the gateway.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookEvent {
     #[serde(default)]
@@ -128,9 +161,44 @@ pub struct ReasonCount {
 #[derive(Default)]
 pub(crate) struct EventBudget {
     stamps: VecDeque<Instant>,
+    calls: VecDeque<(Instant, [u8; 32])>,
 }
 
 impl EventBudget {
+    /// A bounded, in-memory retry window keyed by host/session/call, never by tool arguments.
+    /// Repeated identical commands with different call IDs remain separate observations.
+    pub(crate) fn admit_event(&mut self, host: &str, event: &Observation) -> bool {
+        use sha2::{Digest, Sha256};
+        let now = Instant::now();
+        while self
+            .calls
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) > Duration::from_secs(60))
+        {
+            self.calls.pop_front();
+        }
+        let key = event
+            .event
+            .session_id
+            .as_ref()
+            .zip(event.call_id.as_ref())
+            .map(|(session, call)| {
+                let mut hash = Sha256::new();
+                for part in [host, session, call] {
+                    hash.update(part.len().to_le_bytes());
+                    hash.update(part.as_bytes());
+                }
+                <[u8; 32]>::from(hash.finalize())
+            });
+        if key.is_some_and(|key| self.calls.iter().any(|(_, seen)| *seen == key)) || !self.admit() {
+            return false;
+        }
+        if let Some(key) = key {
+            self.calls.push_back((now, key));
+        }
+        true
+    }
+
     pub(crate) fn admit(&mut self) -> bool {
         let now = Instant::now();
         while self
@@ -158,7 +226,7 @@ pub(crate) fn router(gateway: Arc<Gateway>) -> Router {
 async fn host_hook(
     State(gateway): State<Arc<Gateway>>,
     RoutePath((host, token)): RoutePath<(String, String)>,
-    body: Result<Json<HookEvent>, axum::extract::rejection::JsonRejection>,
+    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Some(host) = HOSTS.iter().copied().find(|h| *h == host) else {
         return (StatusCode::NOT_FOUND, "").into_response();
@@ -166,8 +234,14 @@ async fn host_hook(
     if !gateway.hook_token_matches(&token) {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
-    let Ok(Json(event)) = body else {
-        return (StatusCode::BAD_REQUEST, "").into_response();
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(err) => return (err.status(), "").into_response(),
+    };
+    let event = match parse_hook(host, body) {
+        Ok(Some(event)) => event,
+        Ok(None) => return Json(serde_json::json!({})).into_response(),
+        Err(_) => return (StatusCode::BAD_REQUEST, "").into_response(),
     };
     match gateway.record_native(host, event).await {
         Ok(()) => Json(serde_json::json!({})).into_response(),
@@ -217,37 +291,63 @@ fn command_text(input: &Value) -> Option<String> {
     }
 }
 
-/// File paths named by an `apply_patch` body: the `*** Add/Update/Delete File:` headers only.
+/// File paths named by an `apply_patch` body, including a move's destination.
 /// The patch content itself is never kept.
 pub fn patch_paths(patch: &str) -> Vec<String> {
     patch
         .lines()
         .filter_map(|line| {
-            let line = line.trim_start();
-            ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
-                .iter()
-                .find_map(|prefix| line.strip_prefix(prefix))
+            // Do not mistake indented patch context (file content) for a header.
+            [
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
         })
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect()
 }
 
+fn input_patch_paths(input: &Value) -> Vec<String> {
+    if let Some(paths) = input.get("paths").and_then(Value::as_array) {
+        return paths
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
+    command_text(input)
+        .map(|body| patch_paths(&body))
+        .unwrap_or_default()
+}
+
 /// The one line the record keeps about an action. Never the raw input.
 pub fn subject(tool: &str, input: &Value, cwd: Option<&Path>, home: Option<&Path>) -> String {
     let text = match tool {
         "Bash" | "shell" | "local_shell" | "exec_command" => {
-            command_text(input).map(|c| redact(&c)).unwrap_or_default()
+            command_text(input)
+                .map(|c| {
+                    // Script/heredoc bodies can be file contents or embedded credentials. Keep
+                    // only the first command line; shadow evaluation still sees the whole command.
+                    let first = c.lines().next().unwrap_or_default();
+                    let summary = redact(first);
+                    if c.lines().count() > 1 {
+                        format!("{summary} …")
+                    } else {
+                        summary
+                    }
+                })
+                .unwrap_or_default()
         }
-        "apply_patch" => command_text(input)
-            .map(|body| {
-                patch_paths(&body)
-                    .iter()
-                    .map(|p| display_path(p, cwd, home))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default(),
+        "apply_patch" => input_patch_paths(input)
+            .iter()
+            .map(|p| display_path(p, cwd, home))
+            .collect::<Vec<_>>()
+            .join(", "),
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => str_field(input, "file_path")
             .or_else(|| str_field(input, "notebook_path"))
             .map(|p| display_path(p, cwd, home))
@@ -260,12 +360,10 @@ pub fn subject(tool: &str, input: &Value, cwd: Option<&Path>, home: Option<&Path
         "WebSearch" => "web search".to_string(),
         _ => String::new(),
     };
-    let text = if text.is_empty() {
-        tool.to_string()
-    } else {
-        text
-    };
-    cap(&text, SUBJECT_MAX_CHARS)
+    if text.is_empty() {
+        return cap(&redact_identifier(tool), SUBJECT_MAX_CHARS);
+    }
+    cap(&redact(&text), SUBJECT_MAX_CHARS)
 }
 
 fn cap(text: &str, max: usize) -> String {
@@ -307,51 +405,6 @@ fn origin_of(url: &str) -> String {
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.rsplit('@').next().unwrap_or(host);
     format!("{scheme}://{host}")
-}
-
-/// Strip the shapes secrets take on a command line. Tokens after `bearer`, values of key-ish
-/// assignments, URL userinfo, and long opaque runs are replaced. Everything else stays readable.
-pub fn redact(command: &str) -> String {
-    let mut out = Vec::new();
-    let mut prev_bearer = false;
-    for raw in command.split_whitespace() {
-        // Keep closing quotes and punctuation so the line still reads as a command.
-        let trail_at = raw.trim_end_matches(['\'', '"', ';', ')', ',', '`']).len();
-        let (token, trail) = raw.split_at(trail_at);
-        let lower = token.to_ascii_lowercase();
-        let replaced = if prev_bearer {
-            "***".to_string()
-        } else if let Some((key, _)) = token.split_once('=') {
-            let k = key.to_ascii_lowercase();
-            if ["key", "token", "secret", "password", "passwd", "pwd"]
-                .iter()
-                .any(|needle| k.contains(needle))
-            {
-                format!("{key}=***")
-            } else {
-                token.to_string()
-            }
-        } else if let Some((scheme, rest)) = token.split_once("://") {
-            match rest.split_once('@') {
-                Some((userinfo, tail)) if userinfo.contains(':') => {
-                    format!("{scheme}://***@{tail}")
-                }
-                _ => token.to_string(),
-            }
-        } else if token.len() >= 32
-            && !token.starts_with(['/', '~', '.'])
-            && token
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
-        {
-            "***".to_string()
-        } else {
-            token.to_string()
-        };
-        prev_bearer = lower == "bearer";
-        out.push(format!("{replaced}{trail}"));
-    }
-    out.join(" ")
 }
 
 // ----- shadow deny list --------------------------------------------------------------------
@@ -403,9 +456,8 @@ pub mod shadow {
                 evaluate_command(&command, cwd, home)
             }
             "apply_patch" => {
-                let body = command_text(input)?;
                 let mut outside = false;
-                for raw in patch_paths(&body) {
+                for raw in input_patch_paths(input) {
                     let path = resolve(&raw, cwd, home);
                     if is_sensitive_write(&path, home) {
                         return Some("sensitive_write");
@@ -466,7 +518,7 @@ pub mod shadow {
             }
             if bin == "git" {
                 let sub = seg.get(1).copied().unwrap_or("");
-                let flags = &seg[2..];
+                let flags = seg.get(2..).unwrap_or_default();
                 let forced = |names: &[&str]| flags.iter().any(|f| names.contains(f));
                 if (sub == "push" && forced(&["--force", "-f"]))
                     || (sub == "reset" && forced(&["--hard"]))
@@ -511,8 +563,8 @@ pub mod shadow {
         let bytes = command.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
-            let two = &command[i..(i + 2).min(command.len())];
-            let (cut, width) = if two == "&&" || two == "||" {
+            let two = bytes.get(i..i + 2);
+            let (cut, width) = if two == Some(b"&&") || two == Some(b"||") {
                 (true, 2)
             } else if matches!(bytes[i], b';' | b'|' | b'\n') {
                 (true, 1)

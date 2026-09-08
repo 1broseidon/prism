@@ -4,6 +4,14 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+- Global MCP and native observation setup for Cursor, OpenCode V1, Goose 1.49+ and the current Antigravity CLI configuration. Each harness groups its MCP registrations and tool observations into one agent entry. Setup preserves unrelated configuration, comments and disabled settings, with private backups, repair and owned-file removal.
+- Per-harness event parsing and bounded, neutral observers. OpenCode patch/file contents are omitted before transport; Goose decisions and Antigravity completion results remain distinct from Prism policy. Observation readiness requires a real event after configuration changes.
+
+### Changed
+- Known agents are paginated; setup gives each harness its own sign-in instructions. Observer source is available to copy from a separate details view.
+- Quieter tray controls: routine status is plain text, server maintenance sits behind one Manage disclosure, and recovery actions remain visible. Keyboard focus returns after maintenance or removal; only OAuth servers offer Sign in.
+
 ## [0.6.0] - 2026-09-07
 
 ### Changed

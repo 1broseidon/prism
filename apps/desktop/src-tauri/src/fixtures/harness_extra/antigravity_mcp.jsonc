@@ -1,0 +1,11 @@
+{
+  // Existing native Antigravity MCP server.
+  "mcpServers": {
+    "fixture": {
+      "command": "fixture-tool",
+      "args": ["--path", "/fixture path"],
+      "env": {"FIXTURE_VALUE": "dummy"},
+    },
+  },
+  "fixturePreference": true,
+}

@@ -144,6 +144,7 @@ export type Screen =
   | { kind: "add-server" }
   | { kind: "connect-agent" }
   | { kind: "harness-setup"; host: string }
+  | { kind: "harness-files"; host: string }
   | { kind: "agent"; agentId: string }
   | { kind: "agent-connections"; agentId: string }
   | { kind: "agent-harness"; agentId: string }
@@ -274,6 +275,7 @@ if (hashScreen && hashScreen.startsWith("a") && tab.value === "agents" && hashSc
 }
 
 if (hashScreen === "setup-codex") stack.value = [{ kind: "harness-setup", host: "codex" }];
+if (["cursor", "opencode", "goose", "antigravity"].some(h => hashScreen === `setup-${h}`)) stack.value = [{ kind: "harness-setup", host: hashScreen.slice(6) }];
 if (hashScreen === "setup-claude") stack.value = [{ kind: "harness-setup", host: "claude-code" }];
 /** A third segment opens a hub's subscreen: `#agents/host/grants`, `#now/settings/updates`. */
 const hubTop = stack.value[stack.value.length - 1];

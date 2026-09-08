@@ -763,7 +763,8 @@ async fn every_registration_of_a_harness_is_one_agent() {
     assert_eq!(tokens.status, 200, "{}", tokens.body);
 
     // One agent, two clients, both signed in. Another product is still its own agent.
-    let (_other, _) = signed_in_agent(&gateway, port, "Cursor").await;
+    let (other, _) = signed_in_agent(&gateway, port, "Cursor").await;
+    assert_eq!(other, "host:cursor");
     let agents = gateway.agents().await;
     let harness: Vec<_> = agents
         .iter()
@@ -779,7 +780,7 @@ async fn every_registration_of_a_harness_is_one_agent() {
     assert!(harness[0].clients.iter().all(|c| c.signed_in));
     assert!(agents
         .iter()
-        .any(|a| a.agent.name == "Cursor" && a.agent.host.is_none()));
+        .any(|a| a.agent.name == "Cursor" && a.agent.host.as_deref() == Some("cursor")));
 
     // Forgetting one client leaves the other and the agent's settings alone.
     gateway
@@ -797,6 +798,30 @@ async fn every_registration_of_a_harness_is_one_agent() {
         .forget_client("host:claude-code", &second)
         .await
         .is_err());
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn new_harness_client_aliases_share_only_their_own_authenticated_agent() {
+    let (gateway, port, _dir) = start().await;
+    for (host, first, second) in [
+        ("cursor", "Cursor", "cursor"),
+        ("opencode", "OpenCode", "opencode"),
+        ("goose", "goose-cli", "goose-desktop"),
+        ("antigravity", "Antigravity", "antigravity"),
+    ] {
+        let (first_id, _) = signed_in_agent(&gateway, port, first).await;
+        let (second_id, _) = signed_in_agent(&gateway, port, second).await;
+        assert_eq!(first_id, format!("host:{host}"));
+        assert_eq!(first_id, second_id);
+    }
+    let agents = gateway.agents().await;
+    assert_eq!(agents.len(), 4);
+    for agent in agents {
+        assert!(agent.agent.is_approved());
+        assert_eq!(agent.clients.len(), 2);
+        assert!(agent.clients.iter().all(|client| client.signed_in));
+    }
     gateway.shutdown().await;
 }
 

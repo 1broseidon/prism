@@ -51,6 +51,8 @@ function Details({ entry }: { entry: AuditEntry }) {
   const lines: [string, string][] = n
     ? [
         ["subject", n.subject],
+        ...(n.host === "goose" ? ([["host decision", entry.verdict === "denied" ? "Denied by Goose" : "Allowed by Goose"]] as [string, string][]) : []),
+        ...(n.host === "antigravity" ? ([["tool result", entry.verdict === "error" ? "Failed" : "Completed"]] as [string, string][]) : []),
         ...(n.would_hold ? ([["matched", reasonText(n.would_hold)]] as [string, string][]) : []),
         ...(n.cwd ? ([["in", n.cwd]] as [string, string][]) : []),
         ...(n.session ? ([["session", n.session.slice(0, 8)]] as [string, string][]) : []),

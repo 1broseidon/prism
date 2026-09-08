@@ -9,8 +9,14 @@ use std::{
 };
 use toml_edit::{value, DocumentMut, Item, Table};
 
+#[path = "harness_extra.rs"]
+mod extra;
 #[path = "harness_state.rs"]
 mod hook_state;
+#[path = "harness_json.rs"]
+mod json_edit;
+#[path = "harness_local.rs"]
+mod local;
 
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
 
@@ -48,6 +54,8 @@ impl Paths {
                     codex: true,
                 })
             }
+            "cursor" | "opencode" => local::paths(host, &home),
+            "goose" | "antigravity" => extra::paths(host, &home),
             _ => Err("Unknown harness".into()),
         }
     }
@@ -124,6 +132,17 @@ pub fn hook_entry(host: &str, url: &str) -> Result<Value, String> {
     }
 }
 
+pub fn snippet(host: &str, url: &str) -> Result<String, String> {
+    match host {
+        "cursor" | "opencode" => local::snippet(host, url),
+        "goose" | "antigravity" => extra::snippet(host, url),
+        _ => serde_json::to_string_pretty(
+            &json!({"hooks":{"PreToolUse":[{"hooks":[hook_entry(host,url)?]}]}}),
+        )
+        .map_err(|e| e.to_string()),
+    }
+}
+
 fn owned_hook(hook: &Value, host: &str) -> bool {
     let url = if host == "claude-code" {
         if hook["type"] != "http" {
@@ -175,6 +194,12 @@ pub fn inspect(
     hook_url: &str,
     last_event: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Setup {
+    if matches!(host, "cursor" | "opencode") {
+        return local::inspect(paths, host, url, hook_url, last_event);
+    }
+    if matches!(host, "goose" | "antigravity") {
+        return extra::inspect(paths, host, url, hook_url, last_event);
+    }
     let mut setup = Setup {
         host: host.into(),
         settings_path: paths.hooks.display().to_string(),
@@ -376,7 +401,7 @@ fn edit_toml_mcp(config: &mut DocumentMut, url: &str, remove: bool) -> Result<()
 struct Edit {
     path: PathBuf,
     old: Option<Vec<u8>>,
-    new: Vec<u8>,
+    new: Option<Vec<u8>>,
 }
 
 fn commit(edits: Vec<Edit>) -> Result<Changes, String> {
@@ -387,10 +412,7 @@ fn commit_with(
     edits: Vec<Edit>,
     mut write: impl FnMut(&Path, &[u8]) -> std::io::Result<()>,
 ) -> Result<Changes, String> {
-    let edits: Vec<_> = edits
-        .into_iter()
-        .filter(|e| e.old.as_deref() != Some(e.new.as_slice()))
-        .collect();
+    let edits: Vec<_> = edits.into_iter().filter(|e| e.old != e.new).collect();
     let mut out = Changes {
         paths: vec![],
         backups: vec![],
@@ -420,7 +442,11 @@ fn commit_with(
                 write(&backup, old).map_err(|_| "Could not back up client settings".to_string())?;
                 out.backups.push(backup.display().to_string());
             }
-            write(&e.path, &e.new).map_err(|_| format!("Could not save {}", e.path.display()))?;
+            match &e.new {
+                Some(bytes) => write(&e.path, bytes),
+                None => fs::remove_file(&e.path),
+            }
+            .map_err(|_| format!("Could not save {}", e.path.display()))?;
             out.paths.push(e.path.display().to_string());
             Ok::<_, String>(())
         })();
@@ -430,7 +456,7 @@ fn commit_with(
             for previous in edits[..=i].iter().rev() {
                 match read(&previous.path) {
                     Ok(current) if current == previous.old => {}
-                    Ok(current) if current.as_deref() == Some(previous.new.as_slice()) => {
+                    Ok(current) if current == previous.new => {
                         let restored = match &previous.old {
                             Some(old) => write(&previous.path, old),
                             None => fs::remove_file(&previous.path),
@@ -468,6 +494,26 @@ pub fn configure(
     let _guard = CONFIG_WRITE
         .lock()
         .map_err(|_| "Client settings are busy")?;
+    let valid_hook = hook_url.rsplit_once('/').is_some_and(|(base, token)| {
+        local_url(base, &format!("hooks/{host}"))
+            && !token.is_empty()
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    });
+    if !local_url(url, "mcp") || !valid_hook {
+        return Err("Invalid local Prism endpoint".into());
+    }
+    if matches!(host, "cursor" | "opencode") {
+        return commit(local::edits(
+            paths, host, url, hook_url, remove, hooks_only,
+        )?);
+    }
+    if matches!(host, "goose" | "antigravity") {
+        return commit(extra::edits(
+            paths, host, url, hook_url, remove, hooks_only,
+        )?);
+    }
     let old = read(&paths.hooks)?;
     let mut hooks = json_config(old.as_deref(), &paths.hooks)?;
     let moves = edit_hooks(&mut hooks, host, hook_url, remove)?;
@@ -476,11 +522,13 @@ pub fn configure(
         edits.push(Edit {
             path: paths.hooks.clone(),
             old,
-            new: format!(
-                "{}\n",
-                serde_json::to_string_pretty(&hooks).map_err(|_| "Could not format hooks")?
-            )
-            .into_bytes(),
+            new: Some(
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&hooks).map_err(|_| "Could not format hooks")?
+                )
+                .into_bytes(),
+            ),
         });
     }
     if !hooks_only || (paths.codex && !moves.is_empty()) {
@@ -506,7 +554,7 @@ pub fn configure(
             edits.push(Edit {
                 path: paths.mcp.clone(),
                 old,
-                new,
+                new: Some(new),
             });
         }
     }
@@ -647,12 +695,12 @@ mod tests {
                     Edit {
                         path: first.clone(),
                         old: Some(b"original first".to_vec()),
-                        new: b"replacement".to_vec(),
+                        new: Some(b"replacement".to_vec()),
                     },
                     Edit {
                         path: second.clone(),
                         old: second_old.clone(),
-                        new: b"replacement".to_vec(),
+                        new: Some(b"replacement".to_vec()),
                     },
                 ],
                 |path, bytes| {
@@ -680,7 +728,7 @@ mod tests {
             vec![Edit {
                 path: file.clone(),
                 old: Some(b"original".to_vec()),
-                new: b"replacement".to_vec(),
+                new: Some(b"replacement".to_vec()),
             }],
             |path, bytes| {
                 if path == file && bytes == b"original" {
@@ -704,6 +752,38 @@ mod tests {
             .find(|p| p.extension().is_some_and(|e| e == "bak"))
             .unwrap();
         assert_eq!(fs::read(backup).unwrap(), b"original");
+    }
+
+    #[test]
+    fn failed_removal_transaction_restores_deleted_observer() {
+        let dir = tempfile::tempdir().unwrap();
+        let observer = dir.path().join("prism.js");
+        let config = dir.path().join("settings.json");
+        fs::write(&observer, "original observer").unwrap();
+        fs::write(&config, "original config").unwrap();
+        let result = commit_with(
+            vec![
+                Edit {
+                    path: observer.clone(),
+                    old: Some(b"original observer".to_vec()),
+                    new: None,
+                },
+                Edit {
+                    path: config.clone(),
+                    old: Some(b"original config".to_vec()),
+                    new: Some(b"replacement".to_vec()),
+                },
+            ],
+            |path, bytes| {
+                if path == config && bytes == b"replacement" {
+                    return Err(std::io::Error::other("write refused"));
+                }
+                prism_core::write_client_config(path, bytes)
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(observer).unwrap(), b"original observer");
+        assert_eq!(fs::read(config).unwrap(), b"original config");
     }
 
     #[test]
@@ -801,7 +881,7 @@ mod tests {
         assert!(commit(vec![Edit {
             path: path.clone(),
             old: Some(b"old".to_vec()),
-            new: b"replacement".to_vec()
+            new: Some(b"replacement".to_vec())
         }])
         .is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "newer user edit");

@@ -1,0 +1,7 @@
+{
+  // Keep this user-owned permission gate and its disabled state.
+  "fixture-gate": {
+    "enabled": false,
+    "PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "fixture-check"}]}],
+  },
+}

@@ -1,3 +1,4 @@
+import { HOSTS } from "./hosts";
 /** Fixture backend for `pnpm dev` in a plain browser, where Tauri's invoke is absent. Never used inside the app. */
 import type {
   HttpAuth,
@@ -31,7 +32,7 @@ const servers: ServerView[] = [
 const agents: AgentConfig[] = [
   { id: "host:claude-code", name: "Claude Code", client_name: "claude-code", client_version: "2.1.14", status: "approved", created_at: iso(3600 * 30), decided_at: iso(3600 * 30), posture: "guided", attention: "badge", client_id: null, host: "claude-code", connected: true, tokens: [{ kind: "access", created_at: iso(1200), expires_at: iso(-2400) }, { kind: "refresh", created_at: iso(3600 * 26), expires_at: iso(-3600 * 24 * 29) }, { kind: "refresh", created_at: iso(3600 * 3), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-claude-user", client_name: "Claude Code", created_at: iso(3600 * 26), origin: null, signed_in: true }, { client_id: "c-claude-prism", client_name: "Claude Code", created_at: iso(3600 * 3), origin: null, signed_in: true }, { client_id: "c-claude-recoil", client_name: "claude-code", created_at: iso(900), origin: null, signed_in: false }] },
   { id: "host:codex", name: "Codex", client_name: "codex", client_version: "0.42.0", status: "approved", created_at: iso(3600 * 20), decided_at: iso(3600 * 20), posture: "first_use", attention: "silent", client_id: null, host: "codex", connected: false, tokens: [{ kind: "refresh", created_at: iso(3600 * 20), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-codex", client_name: "Codex", created_at: iso(3600 * 20), origin: null, signed_in: true }] },
-  { id: "a2", name: "cursor", client_name: "cursor", client_version: "1.7.0", status: "approved", created_at: iso(600), decided_at: iso(590), posture: "first_use", attention: "silent", client_id: "c-cursor", connected: false, tokens: [{ kind: "refresh", created_at: iso(600), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-cursor", client_name: "cursor", created_at: iso(600), origin: null, signed_in: true }] },
+  { id: "host:cursor", host: "cursor", name: "Cursor", client_name: "cursor", client_version: "1.7.0", status: "approved", created_at: iso(600), decided_at: iso(590), posture: "first_use", attention: "silent", client_id: "c-cursor", connected: false, tokens: [{ kind: "refresh", created_at: iso(600), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-cursor", client_name: "cursor", created_at: iso(600), origin: null, signed_in: true }] },
   { id: "a3", name: "Toad MCP Gateway", client_name: "Toad MCP Gateway", client_version: "0.1.0", status: "pending", created_at: iso(12), decided_at: null, posture: "first_use", attention: "silent", client_id: "c-toad", connected: false, tokens: [], clients: [{ client_id: "c-toad", client_name: "Toad MCP Gateway", created_at: iso(12), origin: null, signed_in: false }] },
   { id: "a4", name: "some-random-script", client_name: "some-random-script", client_version: null, status: "denied", created_at: iso(3600 * 50), decided_at: iso(3600 * 50), posture: "supervised", attention: "silent", client_id: null, connected: false, tokens: [], clients: [] },
 ];
@@ -40,12 +41,12 @@ let pending: PendingCall[] = [
 ];
 let rules: Rule[] = [
   { id: "r1", agent_id: "host:claude-code", server_id: "s1", tool: "read_file", decision: "allow", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 5) },
-  { id: "r2", agent_id: "a2", server_id: "s2", tool: "create_issue", decision: "allow", attention: null, scope: "session", expires_at: null, created_at: iso(300) },
+  { id: "r2", agent_id: "host:cursor", server_id: "s2", tool: "create_issue", decision: "allow", attention: null, scope: "session", expires_at: null, created_at: iso(300) },
   { id: "r3", agent_id: null, server_id: "s3", tool: null, decision: "deny", attention: "notify", scope: "always", expires_at: null, created_at: iso(3600 * 30) },
   { id: "r4", agent_id: "host:claude-code", server_id: "s2", tool: null, decision: "allow", attention: null, scope: "always", expires_at: iso(-60 * 24), created_at: iso(360) },
   { id: "r5", agent_id: "host:claude-code", server_id: "s1", tool: "delete_*", decision: "ask", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 2) },
   { id: "r6", agent_id: "host:codex", server_id: "s5", tool: null, decision: "allow", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 8) },
-  { id: "r7", agent_id: "a2", server_id: "s1", tool: "write_file", decision: "ask", attention: "notify", scope: "always", expires_at: null, created_at: iso(3600 * 12) },
+  { id: "r7", agent_id: "host:cursor", server_id: "s1", tool: "write_file", decision: "ask", attention: "notify", scope: "always", expires_at: null, created_at: iso(3600 * 12) },
   { id: "r8", agent_id: null, server_id: "s4", tool: null, decision: "deny", attention: null, scope: "session", expires_at: null, created_at: iso(120) },
 ];
 const HOOK_TOKEN = "k3Jx9v2mQd8sT1uWbC4eF6gH7iJ0lM_nO-pQrStUvWx";
@@ -77,6 +78,17 @@ const nativeStatus = {
     { id: "write_outside_cwd", summary: "Writing a file outside the working directory" },
   ],
 };
+for (const h of HOSTS.slice(2)) {
+  const files: Record<string, [string, string]> = {
+    cursor: [".cursor/mcp.json", ".cursor/hooks.json"],
+    opencode: [".config/opencode/opencode.json", ".config/opencode/plugins/prism.js"],
+    goose: [".config/goose/config.yaml", ".agents/plugins/prism-goose/hooks/hooks.json"],
+    antigravity: [".gemini/config/mcp_config.json", ".gemini/config/hooks.json"],
+  };
+  const [mcp, hooks] = files[h.host];
+  nativeStatus.hosts.push({ host: h.host, hook_url: `http://127.0.0.1:9086/hooks/${h.host}/${HOOK_TOKEN}`, last_event_at: "", actions_7d: 0, by_reason: [] });
+  nativeStatus.setup.push({ host: h.host, mcp_path: `/home/george/${mcp}`, settings_path: `/home/george/${hooks}`, mcp_configured: false, hook_installed: false, setup_present: false, hooks_disabled: false, events_received: false, problem: null });
+}
 const nat = (host: string, subject: string, extra: Partial<import("./types").NativeDetail> = {}) => ({ host, subject, cwd: "/home/george/Projects/prism", session: "s-1", via_prism: false, ...extra });
 /** Mirrors prism_core::activity::needs_attention. */
 const needsAttention = (e: AuditEntry) => (e.native ? !!e.native.would_hold : e.source.kind === "human" || e.source.kind === "timeout" || e.verdict === "denied");
@@ -132,9 +144,9 @@ let audit: AuditEntry[] = [
   { id: "n4", at: iso(300), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "WebFetch", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "https://code.claude.com") },
   { id: "n5", at: iso(320), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "claude-code", tool: "mcp__prism__filesystem__read_file", verdict: "allowed", source: { kind: "observed" }, duration_ms: 0, error: null, attention: "silent", native: nat("claude-code", "mcp__prism__filesystem__read_file", { via_prism: true }) },
   { id: "e1", at: iso(40), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", tool: "read_file", verdict: "allowed", source: { kind: "rule", rule_id: "r1" }, duration_ms: 12, error: null, attention: "silent" },
-  { id: "e2", at: iso(95), agent_id: "a2", agent_name: "Cursor", server_id: "s2", tool: "create_issue", verdict: "allowed", source: { kind: "human" }, duration_ms: 840, error: null, attention: "silent" },
+  { id: "e2", at: iso(95), agent_id: "host:cursor", agent_name: "Cursor", server_id: "s2", tool: "create_issue", verdict: "allowed", source: { kind: "human" }, duration_ms: 840, error: null, attention: "silent" },
   { id: "e3", at: iso(200), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s3", tool: "query", verdict: "denied", source: { kind: "rule", rule_id: "r3" }, duration_ms: 1, error: null, attention: "notify" },
-  { id: "e4", at: iso(500), agent_id: "a2", agent_name: "Cursor", server_id: "s1", tool: "delete_file", verdict: "timeout", source: { kind: "timeout" }, duration_ms: 120000, error: null, attention: "badge" },
+  { id: "e4", at: iso(500), agent_id: "host:cursor", agent_name: "Cursor", server_id: "s1", tool: "delete_file", verdict: "timeout", source: { kind: "timeout" }, duration_ms: 120000, error: null, attention: "badge" },
   { id: "e0", at: iso(10), agent_id: "a3", agent_name: "codex-cli", server_id: "", tool: "filesystem__read_file", verdict: "denied", source: { kind: "unapproved" }, duration_ms: 0, error: "Prism has not approved 'codex-cli' yet. Open the Prism panel and approve it, then retry.", attention: "silent" },
   { id: "e6", at: iso(70), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", tool: "list_directory", verdict: "allowed", source: { kind: "posture", posture: "guided" }, duration_ms: 8, error: null, attention: "badge" },
   { id: "e5", at: iso(900), agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s2", tool: "search_code", verdict: "error", source: { kind: "human" }, duration_ms: 3300, error: "backend exited with status 1", attention: "silent" },

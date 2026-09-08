@@ -1,0 +1,14 @@
+{
+  "event": "PreToolUseResult",
+  "session_id": "goose-fixture-session",
+  "matcher_context": "shell",
+  "tool_call_id": "fixture-shell-call",
+  "tool_name": "shell",
+  "tool_input": {
+    "command": "printf PRISM_GOOSE_OBSERVER_OK",
+    "description": "Print fixture marker"
+  },
+  "working_dir": "/fixture/work",
+  "decision": "allow",
+  "policy_evaluated": false
+}

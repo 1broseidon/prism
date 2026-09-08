@@ -1116,12 +1116,12 @@ impl Gateway {
     pub(crate) async fn record_native(
         &self,
         host: &str,
-        event: crate::native::HookEvent,
+        observation: crate::native::Observation,
     ) -> Result<()> {
         if !self
             .native_budget
             .lock()
-            .map(|mut b| b.admit())
+            .map(|mut b| b.admit_event(host, &observation))
             .unwrap_or(false)
         {
             return Ok(());
@@ -1163,51 +1163,56 @@ impl Gateway {
             return Ok(());
         }
         let home = home_dir();
+        let event = &observation.event;
         let cwd = event.cwd.as_deref().map(Path::new);
-        let subject =
-            crate::native::subject(&event.tool_name, &event.tool_input, cwd, home.as_deref());
+        let subject = crate::native::subject(
+            observation.policy_tool(),
+            &event.tool_input,
+            cwd,
+            home.as_deref(),
+        );
         let would_hold = crate::native::shadow::evaluate(
-            &event.tool_name,
+            observation.policy_tool(),
             &event.tool_input,
             cwd,
             home.as_deref(),
         )
         .map(str::to_string);
-        let via_prism = if event.tool_name.starts_with("mcp__") {
-            self.backends
-                .list_tools(false)
-                .await
-                .iter()
-                .any(|(server, tool)| {
-                    event
-                        .tool_name
-                        .ends_with(&format!("__{}__{}", server.name, tool.name))
-                })
-        } else {
-            false
-        };
+        let via_prism = self
+            .backends
+            .list_tools(false)
+            .await
+            .iter()
+            .any(|(server, tool)| observation.matches_prism_tool(host, &server.name, &tool.name));
         if let Ok(mut last) = self.native_last.lock() {
             last.insert(host.to_string(), now);
         }
+        let event = observation.event;
         self.audit.record(AuditEntry {
             id: uuid::Uuid::new_v4().to_string(),
             at: now,
             agent_id,
             agent_name,
             server_id: host.to_string(),
-            tool: event.tool_name,
-            verdict: AuditVerdict::Allowed,
+            tool: crate::native::redact_identifier(&event.tool_name),
+            // A Goose denial is the host's decision, never a Prism enforcement decision.
+            // Antigravity reports completed calls, including errors; it cannot report blocks.
+            verdict: observation.verdict,
             source: AuditSource::Observed,
             duration_ms: 0,
             error: None,
             attention: Attention::Silent,
             native: Some(crate::audit::NativeDetail {
                 host: host.to_string(),
-                session: event.session_id,
-                cwd: event.cwd,
+                session: event
+                    .session_id
+                    .map(|s| crate::native::redact_identifier(&s)),
+                cwd: event.cwd.map(|s| crate::native::redact(&s)),
                 subject,
                 would_hold,
-                agent_type: event.agent_type,
+                agent_type: event
+                    .agent_type
+                    .map(|s| crate::native::redact_identifier(&s)),
                 via_prism,
             }),
         });
@@ -2057,11 +2062,15 @@ fn load_or_create_hook_token(path: &Path) -> Result<String> {
 }
 
 #[cfg(test)]
+#[path = "native/http_tests.rs"]
+mod native_http_tests;
+
+#[cfg(test)]
 mod retained_history_tests {
     use super::*;
     use crate::audit::{AuditQuery, NativeDetail};
 
-    fn gateway(path: &Path) -> Gateway {
+    pub(super) fn gateway(path: &Path) -> Gateway {
         let (events, _) = channel();
         let credentials = Arc::new(crate::credentials::NativeStore::default());
         Gateway {

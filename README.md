@@ -92,11 +92,11 @@ If the credential store is locked when Prism starts, affected servers show as fa
 
 ## Connect an agent
 
-**Agents → Connect an agent** offers **Claude Code**, **Codex**, and **Other**. Choose a known harness to set up both MCP and native observation globally. Prism backs up existing files, preserves other settings and project overrides, and offers **Repair setup** and **Remove setup**. A conflicting `prism` entry pointing elsewhere is left alone.
+**Agents → Connect an agent** offers **Claude Code**, **Codex**, **Cursor**, **OpenCode**, **Goose**, **Antigravity**, and **Other agent**. Choose a known harness to set up both MCP and native observation globally. Prism backs up existing files, preserves other settings and project overrides, and offers **Repair setup** and **Remove setup**. A conflicting `prism` entry pointing elsewhere is left alone.
 
 Setup writes configuration; it does not grant access. Restart the client, complete its MCP sign-in, and approve that request in Prism. Codex also requires hook review through `/hooks`. **Configured** means the expected settings exist. **Receiving** means native events have arrived since those settings changed; a previous trust entry is never treated as proof. Observation remains optional and never blocks native actions.
 
-Choose **Other** for an OAuth URL or a manual bearer token. Project overrides still take precedence inside the client; Prism only manages global setup.
+Choose **Other agent** for an OAuth URL or a manual bearer token. Project overrides still take precedence inside the client; Prism only manages global setup.
 
 **Protocol negotiation is automatic.** The same `/mcp` URL supports MCP 2026-07-28 stateless requests and older clients that initialize a session. Modern clients receive tool-list changes through `subscriptions/listen`. HTTP upstreams also negotiate modern or legacy support; no protocol switch is needed.
 
@@ -156,11 +156,11 @@ Every update file is signed with Prism's minisign key and checked against the pu
 
 ## Native actions
 
-MCP is only part of what an agent does. Claude Code and Codex run shell commands, edit files and fetch pages on their own, and none of that passes through the gateway. Prism can observe those too.
+MCP is only part of what an agent does. Supported harnesses also report native shell commands, file changes and other tool calls through their hooks or plugins.
 
-**Agents → Connect an agent → Claude Code / Codex** configures native observation alongside MCP. Claude Code posts directly from an HTTP hook in `~/.claude/settings.json`; Codex uses a short `curl` command in `~/.codex/hooks.json`. Custom `CLAUDE_CONFIG_DIR` and `CODEX_HOME` locations are honoured. Existing files are backed up, and repair or removal preserves other settings and hooks.
+**Agents → Connect an agent** configures global MCP and native observation together. The adapters preserve other settings, comments and project overrides, with backups and repair/removal of Prism-owned entries. See [harness setup and coverage](docs/harnesses.md) for client versions, config paths and verification limits.
 
-A hook reports each attempted action before it runs. Prism adds no permission prompt and never blocks the native action. If Prism is stopped, the hook fails silently. Codex requires you to review new or changed hooks through `/hooks`; setup does not grant that trust. **Configured** means the hook matches this gateway. **Receiving** means an event has arrived since configuration changed. If the host has disabled hooks, setup leaves them disabled.
+Claude Code, Codex, Cursor and OpenCode report attempted actions before execution. Goose 1.49+ reports its hook-chain decision; Antigravity reports completed calls through `PostToolUse`. These are different observation points, not proof that every proposal succeeded. Prism adds no permission decision. Its command/plugin observers discard gateway responses and return neutrally with bounded delivery time when Prism is stopped. Codex requires you to review new or changed hooks through `/hooks`; setup does not grant that trust. **Configured** means the hook matches this gateway. **Receiving** means an event has arrived since configuration changed. If the host has disabled hooks, setup leaves them disabled.
 
 What the record keeps is one line per action, never the raw input: the redacted command for a shell call, the path for a file read or write (for a Codex `apply_patch`, the file paths named in the patch and nothing of its content), the origin for a fetch, the tool name for anything else. Bearer tokens, key-like assignments, URL passwords and long opaque strings are replaced before the line is stored.
 
