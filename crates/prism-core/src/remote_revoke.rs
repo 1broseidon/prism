@@ -294,9 +294,11 @@ mod tests {
         assert!(provider.locally_empty());
     }
 
-    #[tokio::test]
-    async fn removing_a_server_revokes_at_the_provider_then_forgets() {
-        let provider = Provider::new(true, StatusCode::OK, true, false).await;
+    /// A gateway on the provider's store with the fixture server added and its tokens moved
+    /// under the credential reference the gateway assigned.
+    async fn gateway_with(
+        provider: &Provider,
+    ) -> (Arc<crate::Gateway>, tempfile::TempDir, ServerConfig) {
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -317,9 +319,10 @@ mod tests {
         )
         .await
         .unwrap();
-        // The gateway assigns its own credential reference; move the fixture tokens under it.
         let mut server = provider.config.clone();
         server.oauth_ref = None;
+        // A plaintext header gives the server a launch record alongside its tokens.
+        server.headers.insert("X-Fixture".into(), "1".into());
         let added = gateway.add_server(server).await.unwrap();
         let fixture_ref = provider.config.oauth_ref.as_deref().unwrap();
         let bytes = credentials::get_blob(provider.store.as_ref(), fixture_ref).unwrap();
@@ -330,6 +333,13 @@ mod tests {
             &bytes,
         )
         .unwrap();
+        (gateway, dir, added)
+    }
+
+    #[tokio::test]
+    async fn removing_a_server_revokes_at_the_provider_then_forgets() {
+        let provider = Provider::new(true, StatusCode::OK, true, false).await;
+        let (gateway, _dir, added) = gateway_with(&provider).await;
         assert!(provider.requests.lock().unwrap().is_empty());
 
         gateway.remove_server(&added.id).await.unwrap();
@@ -338,6 +348,23 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["token_type_hint"], "refresh_token");
         assert_eq!(requests[1]["token_type_hint"], "access_token");
+        assert!(provider.locally_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lost_launch_record_does_not_skip_revocation_on_remove() {
+        let provider = Provider::new(true, StatusCode::OK, true, false).await;
+        let (gateway, _dir, added) = gateway_with(&provider).await;
+        // The launch record disappears before Remove, so its deletion fails.
+        credentials::delete(
+            provider.store.as_ref(),
+            added.credential_ref.as_deref().unwrap(),
+        )
+        .unwrap();
+
+        assert!(gateway.remove_server(&added.id).await.is_err());
+        gateway.shutdown().await;
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
         assert!(provider.locally_empty());
     }
 

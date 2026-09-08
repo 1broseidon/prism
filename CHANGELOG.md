@@ -6,7 +6,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ### Added
 - Tool lists stay current. When a server announces new or changed tools, Prism re-reads that server's list and tells connected agents; hiding or exposing a tool tells them too. A server that cannot announce changes still needs a restart.
-- **Sign out** asks the provider to revoke the tokens when it offers revocation, then forgets them here; the local sign-out completes even when the provider cannot be reached. Removing a server does the same. Servers signed in before this release get local sign-out only until you sign in again.
+- **Sign out** asks the provider to revoke the tokens when it offers revocation, then forgets them here; the local sign-out completes even when the provider cannot be reached. Removing a server does the same. A sign-in whose saved record has no issuer gets local sign-out only until you sign in again.
 
 ### Changed
 - Agents' tool calls are routed by the exact `{server}__{tool}` name. Two tools that would share one public name are kept off the list until the clash is resolved.

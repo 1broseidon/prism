@@ -467,19 +467,23 @@ impl Gateway {
             server
         };
         self.backends.remove(server_id).await;
+        // The server is already gone from the config, so both cleanups run whatever the other
+        // one does; the first failure is reported once the second has been tried.
         let store = self.credentials.clone();
         let credential_ref = removed.credential_ref.clone();
-        tokio::task::spawn_blocking(move || match &credential_ref {
+        let launch = tokio::task::spawn_blocking(move || match &credential_ref {
             Some(id) => crate::credentials::delete(store.as_ref(), id),
             None => Ok(()),
         })
         .await
-        .map_err(|_| {
-            Error::Gateway("server removed, but credential cleanup could not complete".into())
-        })??;
+        .unwrap_or_else(|_| {
+            Err(Error::Gateway(
+                "server removed, but credential cleanup could not complete".into(),
+            ))
+        });
         // Same as Sign out: revoke at the provider when it can, then forget the tokens here.
-        crate::remote::sign_out(&removed, self.credentials.clone()).await?;
-        Ok(())
+        let tokens = crate::remote::sign_out(&removed, self.credentials.clone()).await;
+        launch.and(tokens)
     }
 
     pub async fn restart_server(&self, server_id: &str) -> Result<()> {
