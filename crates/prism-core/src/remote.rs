@@ -775,6 +775,7 @@ mod tests {
             auth,
             headers,
             oauth_ref: None,
+            hidden_tools: Default::default(),
         }
     }
 

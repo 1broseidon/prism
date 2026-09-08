@@ -36,7 +36,13 @@ export interface Settings {
   rate_limit_per_minute: number | null;
   hold_timeout_secs: number;
   auto_open_on_pending: boolean;
+  /** Which corner the panel opens in; auto follows the desktop's bar. */
+  panel_anchor: PanelAnchor;
+  /** The global shortcut as configured: null is the built-in one, empty turns it off. Applied at the next launch. */
+  panel_shortcut: string | null;
 }
+
+export type PanelAnchor = "auto" | "top-right" | "top-left" | "bottom-right" | "bottom-left";
 
 /** A token an agent holds. Prism keeps only the hash, so this is all there is to show. */
 export interface TokenView {
@@ -56,6 +62,8 @@ export interface ToolInfo {
   description: string | null;
   read_only: boolean;
   destructive: boolean;
+  /** False when the panel hid it: agents neither list nor call it. */
+  exposed: boolean;
 }
 
 export interface ServerView {
@@ -70,6 +78,8 @@ export interface ServerView {
   /** Endpoint of a remote server; null for a stdio one. */
   url: string | null;
   auth: HttpAuth;
+  /** Tools the panel hid from every agent, by name. */
+  hidden_tools: string[];
 }
 
 export type AgentStatus = "pending" | "approved" | "denied";

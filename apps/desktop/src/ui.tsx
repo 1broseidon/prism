@@ -56,7 +56,7 @@ export function StatusText({ tone, children }: { tone?: "ok" | "danger" | "accen
 }
 
 export function BackIcon() {
-  return <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3.5 6 8l4.5 4.5M6.5 8H14" /></svg>;
+  return <svg class="control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8.5 3.5 4 8l4.5 4.5M4.5 8H12" /></svg>;
 }
 
 export function CloseIcon() {
@@ -172,40 +172,62 @@ export function Switch({ checked, onChange, label }: { checked: boolean; onChang
 
 /** A screen owns its own scroll region and an optional action bar pinned to the bottom, phone-style. */
 /** `log` marks a screen that is a long list by nature and so shows a scrollbar; others scroll without one. */
-export function Screen({ children, footer, log }: { children: ComponentChildren; footer?: ComponentChildren; log?: boolean }) {
+/**
+ * `fill` lays the body out as a column that owns the whole height, for pages that pin things to the bottom.
+ * The body draws its own scroll thumb: the webview's bar depends on window focus and repaints only while
+ * moving, so this one is a plain element placed from the scroll offset, shown while the list moves.
+ */
+export function Screen({ children, footer, log, fill }: { children: ComponentChildren; footer?: ComponentChildren; log?: boolean; fill?: boolean }) {
+  const body = useRef<HTMLDivElement>(null);
+  const [thumb, setThumb] = useState<{ top: number; height: number } | null>(null);
+  const [scrolling, setScrolling] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const onScroll = () => {
+    const el = body.current;
+    if (!el) return;
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    if (scrollHeight <= clientHeight) { setThumb(null); return; }
+    const inset = 4;
+    const track = clientHeight - inset * 2;
+    const height = Math.max(28, Math.round(track * (clientHeight / scrollHeight)));
+    const top = inset + Math.round((track - height) * (scrollTop / (scrollHeight - clientHeight)));
+    setThumb({ top, height });
+    setScrolling(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setScrolling(false), 900);
+  };
   return (
     <>
-      <div class={`screen-body ${log ? "log" : ""}`}>{children}</div>
+      <div class="screen-scroll">
+        <div ref={body} class={`screen-body ${log ? "log" : ""} ${fill ? "fill" : ""}`} onScroll={onScroll}>{children}</div>
+        {thumb ? <div class={`scroll-thumb ${scrolling ? "on" : ""}`} style={{ top: `${thumb.top}px`, height: `${thumb.height}px` }} aria-hidden="true" /> : null}
+      </div>
       {footer ? <div class="screen-footer">{footer}</div> : null}
     </>
   );
 }
 
-/** A bounded page of a collection. The start clamps when the collection shrinks and resets when `key` changes. */
-export function usePage<T>(items: T[], size: number, key?: string): { rows: T[]; offset: number; setOffset: (offset: number) => void; total: number } {
-  const [offset, setOffset] = useState(0);
-  useEffect(() => setOffset(0), [key]);
+/** Rows a list shows at first; each "Show more" adds as many again. */
+export const REVEAL = 20;
+
+/** The first slice of a list; `more` appends the next. Nothing already shown moves, and the count stays in view. */
+export function useReveal<T>(items: T[], size: number, key?: string): { rows: T[]; total: number; more: () => void } {
+  const [shown, setShown] = useState(size);
+  useEffect(() => setShown(size), [key, size]);
   const total = items.length;
-  const start = Math.min(offset, Math.max(0, Math.floor((total - 1) / size) * size));
-  return { rows: items.slice(start, start + size), offset: start, setOffset, total };
+  return { rows: items.slice(0, Math.min(shown, total)), total, more: () => setShown((n) => n + size) };
 }
 
-/** Where a page sits in its collection and the two moves. Renders nothing while one page holds everything. */
-export function Pager({ offset, size, total, onOffset, disabled = false }: { offset: number; size: number; total: number; onOffset: (offset: number) => void; disabled?: boolean }) {
-  if (total <= size) return null;
-  const end = Math.min(offset + size, total);
+/** The one way a long list grows on every screen: "Show N more", with shown-of-total beside it. Nothing once everything is shown. */
+export function ShowMore({ shown, total, size, busy, onMore }: { shown: number; total: number; size: number; busy?: boolean; onMore: () => void }) {
+  const left = total - shown;
+  if (left <= 0) return null;
   return (
-    <div class="pager" role="navigation" aria-label="Pages">
-      <Button variant="icon" aria-label="Previous page" disabled={disabled || offset === 0} onClick={() => onOffset(Math.max(0, offset - size))}>
-        <ChevronIcon direction="left" />
-      </Button>
-      <span class="range">
-        {offset + 1}–{end} <span class="muted">of {total}</span>
-      </span>
-      <Button variant="icon" aria-label="Next page" disabled={disabled || end >= total} onClick={() => onOffset(offset + size)}>
-        <ChevronIcon />
-      </Button>
-    </div>
+    <button type="button" class="more" disabled={busy} onClick={onMore}>
+      <span>{busy ? "Loading…" : `Show ${Math.min(size, left)} more`}</span>
+      <span class="muted">{shown} of {total}</span>
+    </button>
   );
 }
 

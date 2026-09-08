@@ -3321,6 +3321,7 @@ name = "prism-desktop"
 version = "0.6.0"
 dependencies = [
  "chrono",
+ "gdk",
  "jsonc-parser",
  "prism-core",
  "serde",

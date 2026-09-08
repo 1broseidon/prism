@@ -2,10 +2,7 @@ import * as api from "../api";
 import { agents, errorMessage, rules, servers } from "../state";
 import { relative, remaining } from "../time";
 import type { Rule } from "../types";
-import { Chip, ConfirmButton, Empty, Label, Pager, Screen, describeError, usePage } from "../ui";
-
-/** Rows per page: five chip-and-line rows fit under the tabs beside the pager. */
-const PAGE = 5;
+import { Chip, ConfirmButton, Empty, Label, REVEAL, Screen, ShowMore, describeError, useReveal } from "../ui";
 
 function nameOf(list: { id: string; name: string }[], id: string | null): string {
   if (!id) return "any";
@@ -27,7 +24,7 @@ function decisionTone(rule: Rule): "ok" | "danger" | "warn" {
 
 export function RulesScreen() {
   const list = rules.value;
-  const { rows, offset, setOffset, total } = usePage(list, PAGE);
+  const { rows, total, more } = useReveal(list, REVEAL);
   const remove = async (id: string) => {
     try {
       await api.deleteRule(id);
@@ -39,7 +36,7 @@ export function RulesScreen() {
 
   return (
     <div class="screen">
-      <Screen footer={total > PAGE ? <Pager offset={offset} size={PAGE} total={total} onOffset={setOffset} /> : undefined}>
+      <Screen>
       <Label right={<span>{list.length}</span>}>Rules</Label>
       {list.length === 0 ? (
         <Empty title="No rules yet." />
@@ -62,6 +59,7 @@ export function RulesScreen() {
               </div>
             </div>
           ))}
+          <ShowMore shown={rows.length} total={total} size={REVEAL} onMore={more} />
         </div>
       )}
       </Screen>

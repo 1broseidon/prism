@@ -23,11 +23,11 @@ import type {
 const iso = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
 
 const servers: ServerView[] = [
-  { id: "s1", name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/george/Projects"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 11 }, url: null, auth: "none" },
-  { id: "s2", name: "github", command: "docker", args: ["run", "-i", "--rm", "ghcr.io/github/github-mcp-server"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 42 }, url: null, auth: "none" },
-  { id: "s3", name: "postgres", command: "uvx", args: ["mcp-server-postgres", "postgres://localhost/app"], env: {}, credentials_stored: true, enabled: true, status: { kind: "failed", error: "connection refused (127.0.0.1:5432)" }, url: null, auth: "none" },
-  { id: "s4", name: "linear", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "sign_in_required" }, url: "https://mcp.linear.app/mcp", auth: "oauth" },
-  { id: "s5", name: "cloudflare docs", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "running", tool_count: 2 }, url: "https://docs.mcp.cloudflare.com/mcp", auth: "none" },
+  { id: "s1", name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/george/Projects"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 11 }, url: null, auth: "none", hidden_tools: [] },
+  { id: "s2", name: "github", command: "docker", args: ["run", "-i", "--rm", "ghcr.io/github/github-mcp-server"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 42 }, url: null, auth: "none", hidden_tools: [] },
+  { id: "s3", name: "postgres", command: "uvx", args: ["mcp-server-postgres", "postgres://localhost/app"], env: {}, credentials_stored: true, enabled: true, status: { kind: "failed", error: "connection refused (127.0.0.1:5432)" }, url: null, auth: "none", hidden_tools: [] },
+  { id: "s4", name: "linear", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "sign_in_required" }, url: "https://mcp.linear.app/mcp", auth: "oauth", hidden_tools: [] },
+  { id: "s5", name: "cloudflare docs", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "running", tool_count: 2 }, url: "https://docs.mcp.cloudflare.com/mcp", auth: "none", hidden_tools: [] },
 ];
 const agents: AgentConfig[] = [
   { id: "host:claude-code", name: "Claude Code", client_name: "claude-code", client_version: "2.1.14", status: "approved", created_at: iso(3600 * 30), decided_at: iso(3600 * 30), posture: "guided", attention: "badge", client_id: null, host: "claude-code", connected: true, tokens: [{ kind: "access", created_at: iso(1200), expires_at: iso(-2400) }, { kind: "refresh", created_at: iso(3600 * 26), expires_at: iso(-3600 * 24 * 29) }, { kind: "refresh", created_at: iso(3600 * 3), expires_at: iso(-3600 * 24 * 30) }], clients: [{ client_id: "c-claude-user", client_name: "Claude Code", created_at: iso(3600 * 26), origin: null, signed_in: true }, { client_id: "c-claude-prism", client_name: "Claude Code", created_at: iso(3600 * 3), origin: null, signed_in: true }, { client_id: "c-claude-recoil", client_name: "claude-code", created_at: iso(900), origin: null, signed_in: false }] },
@@ -164,20 +164,20 @@ for (let day = 1; day <= 6; day++) {
 let signins: PendingSignIn[] = [
   { id: "si1", agent_id: "host:claude-code", agent_name: "Claude Code", client_name: "claude-code", client_id: "c-claude-recoil", requested_at: iso(8), needs_consent: true, new_client: true },
 ];
-let settings: Settings = { on_timeout: "deny", do_not_disturb: false, rate_limit_per_minute: null, hold_timeout_secs: 120, auto_open_on_pending: true };
+let settings: Settings = { on_timeout: "deny", do_not_disturb: false, rate_limit_per_minute: null, hold_timeout_secs: 120, auto_open_on_pending: true, panel_anchor: "auto", panel_shortcut: null };
 const tools: Record<string, ToolInfo[]> = {
   s1: [
-    { name: "read_file", description: "Read the complete contents of a file.", read_only: true, destructive: false },
-    { name: "read_multiple_files", description: "Read several files at once.", read_only: true, destructive: false },
-    { name: "write_file", description: "Create or overwrite a file.", read_only: false, destructive: true },
-    { name: "edit_file", description: "Make line-based edits to a text file.", read_only: false, destructive: false },
-    { name: "list_directory", description: "List files and directories.", read_only: true, destructive: false },
-    { name: "delete_file", description: "Delete a file.", read_only: false, destructive: true },
+    { name: "read_file", description: "Read the complete contents of a file.", read_only: true, destructive: false, exposed: true },
+    { name: "read_multiple_files", description: "Read several files at once.", read_only: true, destructive: false, exposed: true },
+    { name: "write_file", description: "Create or overwrite a file.", read_only: false, destructive: true, exposed: true },
+    { name: "edit_file", description: "Make line-based edits to a text file.", read_only: false, destructive: false, exposed: true },
+    { name: "list_directory", description: "List files and directories.", read_only: true, destructive: false, exposed: true },
+    { name: "delete_file", description: "Delete a file.", read_only: false, destructive: true, exposed: true },
   ],
   s2: [
-    { name: "create_issue", description: "Open a GitHub issue.", read_only: false, destructive: false },
-    { name: "search_code", description: "Search code across repositories.", read_only: true, destructive: false },
-    { name: "create_pull_request", description: "Open a pull request.", read_only: false, destructive: false },
+    { name: "create_issue", description: "Open a GitHub issue.", read_only: false, destructive: false, exposed: true },
+    { name: "search_code", description: "Search code across repositories.", read_only: true, destructive: false, exposed: true },
+    { name: "create_pull_request", description: "Open a pull request.", read_only: false, destructive: false, exposed: true },
   ],
   s3: [],
 };
@@ -193,6 +193,7 @@ export const mock = {
     const auth = a.args.auth ?? "none";
     const s: ServerView = {
       id: `s${Date.now()}`,
+      hidden_tools: [],
       name: a.args.name,
       command: remote ? "" : (a.args.command ?? ""),
       args: [],
@@ -262,6 +263,13 @@ export const mock = {
   get_settings: () => delay(settings),
   set_settings: (a: { settings: Settings }) => { settings = { ...a.settings }; return delay(undefined); },
   list_server_tools: (a: { serverId: string }) => delay(tools[a.serverId] ?? []),
+  set_tool_exposed: (a: { serverId: string; tool: string; exposed: boolean }) => {
+    const tool = (tools[a.serverId] ?? []).find((x) => x.name === a.tool);
+    if (tool) tool.exposed = a.exposed;
+    const server = servers.find((x) => x.id === a.serverId);
+    if (server) server.hidden_tools = (tools[a.serverId] ?? []).filter((x) => !x.exposed).map((x) => x.name);
+    return delay(undefined);
+  },
   list_audit: (a: {limit:number} & import("./state").ActivityFilter) => delay(mockQuery(a).entries.slice(0,a.limit)),
   list_audit_page: (a: {query: import("./state").ActivityFilter & {offset?:number; limit?:number}}) => {
     const result = mockQuery(a.query); const offset=a.query.offset ?? 0; const limit=a.query.limit ?? 100;

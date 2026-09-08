@@ -17,13 +17,13 @@ import {
   status,
   updateConnectAgentDraft,
 } from "../state";
-import { Button, ChevronIcon, CodeBlock, Empty, Label, Screen, Segmented, StatusText, Pager, usePage, describeError } from "../ui";
+import { Button, ChevronIcon, CodeBlock, Empty, Label, REVEAL, Screen, Segmented, ShowMore, StatusText, useReveal, describeError } from "../ui";
 
 export function ConnectAgentScreen() {
   const [busy, setBusy] = useState(false);
   // Harnesses already on the Agents list are repaired from their own Setup row, not added twice.
   const available = HOSTS.filter((h) => !hostPresent(native.value, agents.value, h));
-  const { rows, offset, setOffset, total } = usePage(available, 5);
+  const { rows, total, more } = useReveal(available, REVEAL);
   const draft = connectAgentDraft.value;
   const { custom, mode, snippet } = draft;
   const issued = draft.issuedAgentId ? manualTokens.value[draft.issuedAgentId] ?? null : null;
@@ -59,7 +59,6 @@ export function ConnectAgentScreen() {
   }} />;
 
   if (!custom) return <div class="screen pushed"><Screen footer={<>
-    {total > 5 ? <Pager offset={offset} size={5} total={total} onOffset={setOffset} /> : undefined}
     <Button onClick={() => updateConnectAgentDraft({ custom: true })}>Other agent</Button>
   </>}>
     <section class="gateway-summary">
@@ -77,6 +76,7 @@ export function ConnectAgentScreen() {
           <span class="chev"><ChevronIcon /></span>
         </button>
       ))}
+      <ShowMore shown={rows.length} total={total} size={REVEAL} onMore={more} />
     </div>}
     {available.length ? <p class="hint">Global MCP + observation. Project overrides stay separate.</p> : null}
   </Screen></div>;

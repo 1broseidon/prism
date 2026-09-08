@@ -143,6 +143,7 @@ export interface ActivityFilter {
 /** Screens pushed on top of a tab, phone-style. Each owns the whole panel until it is popped. */
 export type Screen =
   | { kind: "add-server" }
+  | { kind: "server"; serverId: string }
   | { kind: "connect-agent" }
   | { kind: "harness-setup"; host: string }
   | { kind: "harness-files"; host: string }

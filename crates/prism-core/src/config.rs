@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -36,11 +36,19 @@ pub struct ServerConfig {
     /// Credential-store reference for the OAuth client registration and tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_ref: Option<String>,
+    /// Tools the panel keeps from every agent: not listed, and refused as unknown if called.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub hidden_tools: BTreeSet<String>,
 }
 
 impl ServerConfig {
     pub fn is_remote(&self) -> bool {
         self.url.is_some()
+    }
+
+    /// Whether agents may see and call `tool` on this server.
+    pub fn exposes(&self, tool: &str) -> bool {
+        !self.hidden_tools.contains(tool)
     }
 }
 
@@ -650,6 +658,7 @@ mod tests {
                 auth: HttpAuth::None,
                 headers: Default::default(),
                 oauth_ref: None,
+                hidden_tools: ["delete_file".to_string()].into_iter().collect(),
                 enabled: true,
             }],
             agents: vec![AgentConfig {
@@ -718,6 +727,8 @@ mod tests {
         assert!(!loaded.auto_open_on_pending);
         assert_eq!(loaded.panel_anchor, PanelAnchor::BottomLeft);
         assert_eq!(loaded.servers, original.servers);
+        assert!(!loaded.servers[0].exposes("delete_file"));
+        assert!(loaded.servers[0].exposes("read_file"));
         assert_eq!(loaded.agents, original.agents);
         assert_eq!(loaded.rules.len(), 1);
         assert_eq!(loaded.rules[0].id, "rule-always");

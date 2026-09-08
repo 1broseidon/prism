@@ -5,11 +5,11 @@ import { FeedRow } from "../feed";
 import { hostName } from "../hosts";
 import { agents, audit, errorMessage, replace } from "../state";
 import type { ActivityFilter } from "../state";
-import type { AuditPage } from "../types";
-import { Button, Chip, CloseIcon, Label, Pager, Screen, Segmented, describeError } from "../ui";
+import type { AuditEntry, AuditPage } from "../types";
+import { Button, Chip, CloseIcon, Label, REVEAL, Screen, Segmented, ShowMore, describeError } from "../ui";
 
-/** One page of retained rows. Moving pages replaces them; nothing accumulates. */
-const PAGE = 20;
+/** Rows arrive in slices of this size from one snapshot. Each slice appends below the last; nothing shifts. */
+const PAGE = REVEAL;
 
 function dayText(day: string): string {
   return new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
@@ -22,8 +22,9 @@ export function ActivityScreen({ filter }: { filter: ActivityFilter }) {
 }
 
 function ActivityPage({ filter }: { filter: ActivityFilter }) {
+  /** The first slice: it fixes the snapshot and the total every later slice is read against. */
   const [page, setPage] = useState<AuditPage | null>(null);
-  const [offset, setOffset] = useState(0);
+  const [rows, setRows] = useState<AuditEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
@@ -34,6 +35,7 @@ function ActivityPage({ filter }: { filter: ActivityFilter }) {
   useEffect(() => {
     void requests.current.run(() => api.listAuditPage(filter, 0, PAGE), p => {
       setPage(p);
+      setRows(p.entries);
       setLoading(false);
     }, e => {
       setLoading(false);
@@ -47,15 +49,14 @@ function ActivityPage({ filter }: { filter: ActivityFilter }) {
     const timer = window.setTimeout(() => setSaved(null), 4000);
     return () => window.clearTimeout(timer);
   }, [saved]);
-  /** Pages read against the snapshot the first page fixed, so retention cannot shift the rows under them. */
-  const go = async (next: number) => {
+  /** The next slice reads against the snapshot the first one fixed, so retention cannot shift the rows above it. */
+  const more = async () => {
     if (!page || loading || failed) return;
     setLoading(true);
-    await requests.current.run(() => api.listAuditPage({...filter, at: page.window.snapshot_at}, next, PAGE), p => {
+    await requests.current.run(() => api.listAuditPage({...filter, at: page.window.snapshot_at}, rows.length, PAGE), p => {
       setLoading(false);
       if (p.total !== page.total) { setPage(null); setFailed(true); errorMessage.value = "Retained history changed. Refresh the log."; return; }
-      setPage(p);
-      setOffset(next);
+      setRows((shown) => [...shown, ...p.entries]);
     }, e => {
       setLoading(false);
       errorMessage.value = describeError(e);
@@ -86,7 +87,6 @@ function ActivityPage({ filter }: { filter: ActivityFilter }) {
   ];
   return <div class="screen pushed"><Screen log footer={
     <>
-      {page && page.total > PAGE ? <Pager disabled={loading} offset={offset} size={PAGE} total={page.total} onOffset={o => void go(o)} /> : undefined}
       <Button variant="quiet" onClick={() => void openLog()}>Open log</Button>
       <Button busy={busy} disabled={!page || page.total === 0} onClick={() => void exportRows()}>Export</Button>
     </>
@@ -106,7 +106,12 @@ function ActivityPage({ filter }: { filter: ActivityFilter }) {
       {chips.length ? <div class="filters">{chips.map(c => <button type="button" class="filter" key={c.key} onClick={() => narrow({[c.key]: undefined})} title="Remove this filter"><Chip>{c.text}</Chip><CloseIcon /></button>)}</div> : null}
       <p class="hint">Retained events only · up to 30 days / 20 MiB.</p>
       {saved ? <p class="hint" role="status">{saved}</p> : null}
-      {failed ? <Button variant="quiet" onClick={refresh}>Retry history</Button> : page === null ? <div class="muted small">Loading…</div> : page.entries.length === 0 ? <div class="muted small">Nothing here.</div> : page.entries.map(entry => <FeedRow key={entry.id} entry={entry} />)}
+      {failed ? <Button variant="quiet" onClick={refresh}>Retry history</Button> : page === null ? <div class="muted small">Loading…</div> : rows.length === 0 ? <div class="muted small">Nothing here.</div> : (
+        <>
+          {rows.map(entry => <FeedRow key={entry.id} entry={entry} />)}
+          <ShowMore shown={rows.length} total={page.total} size={PAGE} busy={loading} onMore={() => void more()} />
+        </>
+      )}
     </div>
   </Screen></div>;
 }

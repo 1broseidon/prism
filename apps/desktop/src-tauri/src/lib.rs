@@ -21,7 +21,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 const TRAY_ID: &str = "prism-tray";
 const PANEL_LABEL: &str = "panel";
@@ -88,16 +88,24 @@ static IGNORE_FOCUS_LOSS: AtomicBool = AtomicBool::new(false);
 static SEEN_FOCUS: AtomicBool = AtomicBool::new(false);
 /// Calls resolved without a human that asked for a badge, not yet seen. Cleared when the panel opens.
 static UNSEEN: AtomicU64 = AtomicU64::new(0);
-/// Last cursor position when opening from the tray, reused for later auto-opens.
-/// Where the cursor was when the tray was last used, and when. Fresh, it says where the panel
-/// should open; stale, it still says which monitor the tray is on.
-static TRAY_HINT: Mutex<Option<(PhysicalPosition<f64>, std::time::Instant)>> = Mutex::new(None);
-/// How long a tray click counts as "the user just clicked here".
-const HINT_FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+/// Where the cursor was when the tray was last used. It only ever says which monitor the tray
+/// is on; the panel's corner never follows the pointer.
+static TRAY_HINT: Mutex<Option<PhysicalPosition<f64>>> = Mutex::new(None);
 /// The tray icon's rectangle from the last tray event, on the platforms that report it (macOS and
 /// Windows). Physical pixels. Linux tray events carry no usable rect.
 static TRAY_RECT: Mutex<Option<(PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>> =
     Mutex::new(None);
+/// Linux: where our tray icon sits, in root physical pixels, on the desktops that embed it as
+/// an X window of ours (XEmbed trays: Cinnamon, XFCE, MATE). It never moves, so it says which
+/// monitor and edge the bar is on and, on a desktop that reserves no space for its bar, how
+/// tall the bar is. Refreshed on the main thread whenever the panel is placed from there; other
+/// threads use the last reading. Empty on Wayland and SNI trays, where the icon is not ours.
+#[cfg(target_os = "linux")]
+static TRAY_ICON: Mutex<Option<(PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>> =
+    Mutex::new(None);
+/// The thread `run` started on: the one GDK may be used from.
+#[cfg(target_os = "linux")]
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
 
 #[derive(Clone, Serialize)]
 struct ConnectSnippetDto {
@@ -116,14 +124,15 @@ fn panel_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     app.get_webview_window(PANEL_LABEL)
 }
 
-/// Place the panel next to the tray. macOS and Windows report the icon's rect through tray
-/// events, so the panel anchors to it: below a top bar, above a bottom taskbar, clamped to the
-/// work area so it never covers the bar or leaves the screen. Linux uses the cursor position when
-/// the tray was clicked within the last couple of seconds. Anything else (the keyboard shortcut,
-/// auto-open on a pending call) lands in a fixed corner of the tray's monitor: the corner the
-/// desktop panel's reserved area points at, top right when nothing is reserved, always inside
-/// the work area.
+/// Place the panel. The same spot every time it opens, however it was opened: tray, shortcut,
+/// or a pending call. macOS and Windows report the icon's rect through tray events, so on
+/// `auto` the panel hangs off the icon there: below a top bar, above a bottom taskbar, inside
+/// the work area. Everywhere else it is a corner of the tray's monitor, inside the work area:
+/// the operator's `panel_anchor`, or on `auto` the corner the desktop's reserved bar points at.
+/// The pointer never decides the corner; on Linux it once did, and the panel wandered.
 fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    refresh_tray_icon();
     let anchor = app
         .try_state::<AppState>()
         .map(|s| s.gateway.panel_anchor())
@@ -138,58 +147,11 @@ fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
                 Err(err) => warn!(%err, "tray-anchored positioning failed"),
             }
         }
-        let hint = TRAY_HINT
-            .lock()
-            .ok()
-            .and_then(|h| *h)
-            .filter(|(_, at)| at.elapsed() < HINT_FRESH_FOR);
-        if let Some((point, _)) = hint {
-            match position_by_cursor(app, window, point) {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(err) => warn!(%err, "cursor-anchored positioning failed"),
-            }
-        }
     }
 
     if let Err(err) = position_by_work_area(app, window, anchor) {
         warn!(%err, "could not position panel; leaving it where the window manager put it");
     }
-}
-
-/// Anchor the panel to where the user just clicked. A tray on a top bar puts the cursor near the
-/// top of the monitor, so the panel hangs below it; a bottom bar makes it sit above. Horizontally
-/// the panel centres on the cursor and clamps to the monitor.
-fn position_by_cursor(
-    app: &AppHandle,
-    window: &tauri::WebviewWindow,
-    point: PhysicalPosition<f64>,
-) -> tauri::Result<bool> {
-    let monitor = match app.monitor_from_point(point.x, point.y)? {
-        Some(m) => m,
-        None => return Ok(false),
-    };
-    let pos = *monitor.position();
-    let size = *monitor.size();
-    let win = panel_size(window, monitor.scale_factor())?;
-    let margin = (8.0 * monitor.scale_factor()).round() as i32;
-    let (px, py) = (point.x.round() as i32, point.y.round() as i32);
-
-    let left = pos.x + margin;
-    let right = pos.x + size.width as i32 - win.width as i32 - margin;
-    let top = pos.y + margin;
-    let bottom = pos.y + size.height as i32 - win.height as i32 - margin;
-
-    let x = (px - win.width as i32 / 2).clamp(left.min(right), right.max(left));
-    let near_top = py < pos.y + size.height as i32 / 2;
-    let y = if near_top {
-        py + margin
-    } else {
-        py - win.height as i32 - margin
-    };
-    let y = y.clamp(top.min(bottom), bottom.max(top));
-    window.set_position(PhysicalPosition::new(x, y))?;
-    Ok(true)
 }
 
 /// Anchor the panel to the tray icon itself. An icon in the top half of its monitor means a top
@@ -238,6 +200,14 @@ fn position_by_tray_rect(
 /// under the last tray click however old. The tray does not move, so an old click still names
 /// the right screen.
 fn tray_monitor(app: &AppHandle) -> tauri::Result<Option<tauri::Monitor>> {
+    #[cfg(target_os = "linux")]
+    if let Some((pos, size)) = TRAY_ICON.lock().ok().and_then(|r| *r) {
+        let cx = pos.x as f64 + size.width as f64 / 2.0;
+        let cy = pos.y as f64 + size.height as f64 / 2.0;
+        if let Some(monitor) = app.monitor_from_point(cx, cy)? {
+            return Ok(Some(monitor));
+        }
+    }
     if let Some((pos, size)) = TRAY_RECT.lock().ok().and_then(|r| *r) {
         let cx = pos.x as f64 + size.width as f64 / 2.0;
         let cy = pos.y as f64 + size.height as f64 / 2.0;
@@ -245,7 +215,7 @@ fn tray_monitor(app: &AppHandle) -> tauri::Result<Option<tauri::Monitor>> {
             return Ok(Some(monitor));
         }
     }
-    if let Some((point, _)) = TRAY_HINT.lock().ok().and_then(|h| *h) {
+    if let Some(point) = TRAY_HINT.lock().ok().and_then(|h| *h) {
         return app.monitor_from_point(point.x, point.y);
     }
     Ok(None)
@@ -264,9 +234,9 @@ fn panel_size(
     Ok(tauri::LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1).to_physical(scale))
 }
 
-/// A fixed corner of the tray's monitor, chosen from what the desktop has reserved: below a top
-/// bar, above a bottom one, and top right when nothing is reserved. The user's `panel_anchor`
-/// setting overrides the guess.
+/// A fixed corner of the tray's monitor, inside the work area. On `auto` the corner comes from
+/// what the desktop has reserved: above a bottom bar, otherwise top right, and left only for a
+/// dock-style bar down the left edge. The operator's `panel_anchor` names a corner outright.
 fn position_by_work_area(
     app: &AppHandle,
     window: &tauri::WebviewWindow,
@@ -289,49 +259,37 @@ fn position_by_work_area(
     let margin = (8.0 * monitor.scale_factor()).round() as i32;
 
     let work_left = work.position.x;
-    let work_top = work.position.y;
     let work_right = work_left + work.size.width as i32;
-    let work_bottom = work_top + work.size.height as i32;
 
-    // Struts: how much each edge of the screen a desktop panel has reserved.
-    let strut_top = work_top - screen_pos.y;
-    let strut_bottom = (screen_pos.y + screen.height as i32) - work_bottom;
+    // Struts: how much of each screen edge a desktop panel has reserved.
+    let strut_top = work.position.y - screen_pos.y;
+    let strut_bottom =
+        (screen_pos.y + screen.height as i32) - (work.position.y + work.size.height as i32);
     let strut_left = work_left - screen_pos.x;
     let strut_right = (screen_pos.x + screen.width as i32) - work_right;
-
-    // The last tray click, on this monitor, when the desktop has reserved nothing: the bar is
-    // there even if the work area does not say so. Half a tall bar keeps the panel clear of it.
-    let bar_allowance = (24.0 * monitor.scale_factor()).round() as i32;
-    let tray_click = TRAY_HINT
-        .lock()
-        .ok()
-        .and_then(|h| *h)
-        .map(|(p, _)| PhysicalPosition::new(p.x.round() as i32, p.y.round() as i32))
-        .filter(|p| {
-            p.x >= screen_pos.x
-                && p.x < screen_pos.x + screen.width as i32
-                && p.y >= screen_pos.y
-                && p.y < screen_pos.y + screen.height as i32
-        });
+    // A desktop that reserves nothing for its bar still has one where our tray icon sits.
     let nothing_reserved =
         strut_top == 0 && strut_bottom == 0 && strut_left == 0 && strut_right == 0;
+    let (strut_top, strut_bottom) = match unreserved_bar(&monitor).filter(|_| nothing_reserved) {
+        Some(bar) => bar,
+        None => (strut_top, strut_bottom),
+    };
+    let work_top = screen_pos.y + strut_top;
+    let work_bottom = screen_pos.y + screen.height as i32 - strut_bottom;
 
     let (at_bottom, at_left) = match anchor {
         PanelAnchor::TopRight => (false, false),
         PanelAnchor::TopLeft => (false, true),
         PanelAnchor::BottomRight => (true, false),
         PanelAnchor::BottomLeft => (true, true),
-        PanelAnchor::Auto => match tray_click.filter(|_| nothing_reserved) {
-            Some(p) => (p.y >= screen_pos.y + screen.height as i32 / 2, false),
-            None => {
-                // A vertical panel on the left (dock-style) is the only case that pulls us
-                // left; otherwise trays live at the right end of a top or bottom bar.
-                let vertical_left = strut_left > 0
-                    && strut_left >= strut_right
-                    && strut_left > strut_top.max(strut_bottom);
-                (strut_bottom > strut_top, vertical_left)
-            }
-        },
+        PanelAnchor::Auto => {
+            // A vertical panel on the left (dock-style) is the only case that pulls us left;
+            // otherwise trays live at the right end of a top or bottom bar.
+            let vertical_left = strut_left > 0
+                && strut_left >= strut_right
+                && strut_left > strut_top.max(strut_bottom);
+            (strut_bottom > strut_top, vertical_left)
+        }
     };
 
     let x = if at_left {
@@ -339,25 +297,96 @@ fn position_by_work_area(
     } else {
         work_right - win.width as i32 - margin
     };
-    let mut y = if at_bottom {
+    let y = if at_bottom {
         work_bottom - win.height as i32 - margin
     } else {
         work_top + margin
     };
-    if anchor == PanelAnchor::Auto && nothing_reserved {
-        if let Some(p) = tray_click {
-            y = if at_bottom {
-                y.min(p.y - bar_allowance - win.height as i32 - margin)
-            } else {
-                y.max(p.y + bar_allowance + margin)
-            };
-        }
-    }
     window.set_position(PhysicalPosition::new(x, y))
 }
 
-/// The tray was just used: the cursor is on it. Kept for this run and, since the tray does
-/// not move, for the next one.
+/// Linux: a bar the desktop reserved no space for, read from where our tray icon sits on this
+/// monitor. The icon is centred in its bar, so the bar is the icon plus its inset from the
+/// screen edge on both sides: (top, bottom) thickness in physical pixels.
+#[cfg(target_os = "linux")]
+fn unreserved_bar(monitor: &tauri::Monitor) -> Option<(i32, i32)> {
+    let (pos, size) = TRAY_ICON.lock().ok().and_then(|r| *r)?;
+    let screen_pos = *monitor.position();
+    let screen = *monitor.size();
+    let cx = pos.x + size.width as i32 / 2;
+    let cy = pos.y + size.height as i32 / 2;
+    let on_monitor = cx >= screen_pos.x
+        && cx < screen_pos.x + screen.width as i32
+        && cy >= screen_pos.y
+        && cy < screen_pos.y + screen.height as i32;
+    if !on_monitor {
+        return None;
+    }
+    let bottom_edge = screen_pos.y + screen.height as i32;
+    let top_inset = pos.y - screen_pos.y;
+    let bottom_inset = bottom_edge - (pos.y + size.height as i32);
+    let thickness = |inset: i32| inset * 2 + size.height as i32;
+    let bar = if cy < screen_pos.y + screen.height as i32 / 2 {
+        (thickness(top_inset), 0)
+    } else {
+        (0, thickness(bottom_inset))
+    };
+    // An icon far from any edge is not in a bar we understand.
+    (bar.0.max(bar.1) <= screen.height as i32 / 4).then_some(bar)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unreserved_bar(_monitor: &tauri::Monitor) -> Option<(i32, i32)> {
+    None
+}
+
+/// Linux: read where our tray icon sits from GDK, which knows this process's windows and their
+/// root positions. Main thread only; elsewhere the last reading stands. On Wayland the icon is
+/// the compositor's, so there is nothing to read.
+#[cfg(target_os = "linux")]
+fn refresh_tray_icon() {
+    let on_main_thread = MAIN_THREAD.get() == Some(&std::thread::current().id());
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() || !on_main_thread {
+        return;
+    }
+    let Some(screen) = gdk::Screen::default() else {
+        return;
+    };
+    let found = screen
+        .toplevel_windows()
+        .into_iter()
+        .filter(|w| {
+            w.is_viewable() && (1..=64).contains(&w.width()) && (1..=64).contains(&w.height())
+        })
+        .map(|w| {
+            let scale = w.scale_factor().max(1);
+            let (_, x, y) = w.origin();
+            (
+                PhysicalPosition::new(x * scale, y * scale),
+                tauri::PhysicalSize::new((w.width() * scale) as u32, (w.height() * scale) as u32),
+            )
+        })
+        // Until the tray has embedded it, the icon reports the screen origin: not a reading.
+        .find(|(pos, _)| pos.x != 0 || pos.y != 0);
+    let Some(found) = found else {
+        return;
+    };
+    if let Ok(mut slot) = TRAY_ICON.lock() {
+        if *slot != Some(found) {
+            debug!(
+                x = found.0.x,
+                y = found.0.y,
+                w = found.1.width,
+                h = found.1.height,
+                "tray icon located"
+            );
+            *slot = Some(found);
+        }
+    }
+}
+
+/// The tray was just used: the cursor is on it, so this is the tray's monitor. Kept for this
+/// run and, since the tray does not move, for the next one.
 fn remember_tray_hint(app: &AppHandle) {
     if let Some(pos) = note_cursor_hint(app) {
         if let Some(path) = tray_hint_path(app) {
@@ -366,22 +395,22 @@ fn remember_tray_hint(app: &AppHandle) {
     }
 }
 
-/// Anchor the next show to the cursor without claiming the tray is there.
+/// Take the cursor's monitor as the tray's without claiming the tray is there.
 fn note_cursor_hint(app: &AppHandle) -> Option<PhysicalPosition<f64>> {
     let pos = app.cursor_position().ok()?;
     if let Ok(mut hint) = TRAY_HINT.lock() {
-        *hint = Some((pos, std::time::Instant::now()));
+        *hint = Some(pos);
     }
     Some(pos)
 }
 
 /// Where the last tray click was recorded between runs. Only a point, and only so the panel
-/// knows which edge the bar is on before the tray has been clicked in this run.
+/// knows which monitor the tray is on before it has been clicked in this run.
 fn tray_hint_path(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_data_dir().ok().map(|d| d.join("tray-hint"))
 }
 
-/// Load the previous run's tray click as a stale hint: right monitor and edge, never "fresh".
+/// Load the previous run's tray click: the tray's monitor before anything has been clicked.
 fn recall_tray_hint(app: &AppHandle) {
     let Some(text) = tray_hint_path(app).and_then(|p| std::fs::read_to_string(p).ok()) else {
         return;
@@ -390,12 +419,9 @@ fn recall_tray_hint(app: &AppHandle) {
         .split_whitespace()
         .filter_map(|n| n.parse::<f64>().ok());
     if let (Some(x), Some(y)) = (parts.next(), parts.next()) {
-        let long_ago = std::time::Instant::now()
-            .checked_sub(HINT_FRESH_FOR * 2)
-            .unwrap_or_else(std::time::Instant::now);
         if let Ok(mut hint) = TRAY_HINT.lock() {
             if hint.is_none() {
-                *hint = Some((PhysicalPosition::new(x, y), long_ago));
+                *hint = Some(PhysicalPosition::new(x, y));
             }
         }
     }
@@ -476,9 +502,13 @@ fn show_panel(app: &AppHandle, reason: &'static str) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-            if let Some(window) = panel_window(&app) {
-                position_panel(&app, &window);
-            }
+            // On the main thread, so the tray icon can be re-read where GDK allows it.
+            let placed = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(window) = panel_window(&placed) {
+                    position_panel(&placed, &window);
+                }
+            });
             tokio::time::sleep(std::time::Duration::from_millis(170)).await;
             IGNORE_FOCUS_LOSS.store(false, Ordering::SeqCst);
         });
@@ -597,6 +627,7 @@ async fn add_server(state: State<'_, AppState>, args: AddServerArgs) -> Result<S
         auth: args.auth,
         headers: args.headers,
         oauth_ref: None,
+        hidden_tools: Default::default(),
     };
     let added = state.gateway.add_server(server).await.map_err(map_err)?;
     state
@@ -794,6 +825,20 @@ async fn list_server_tools(
     server_id: String,
 ) -> Result<Vec<ToolInfo>, String> {
     Ok(state.gateway.server_tools(&server_id).await)
+}
+
+#[tauri::command]
+async fn set_tool_exposed(
+    state: State<'_, AppState>,
+    server_id: String,
+    tool: String,
+    exposed: bool,
+) -> Result<(), String> {
+    state
+        .gateway
+        .set_tool_exposed(&server_id, &tool, exposed)
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -1429,6 +1474,8 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    let _ = MAIN_THREAD.set(std::thread::current().id());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -1485,6 +1532,15 @@ pub fn run() {
 
             recall_tray_hint(app.handle());
             build_tray(app.handle())?;
+            // The tray embeds the icon a moment after it is built; read it once it has.
+            #[cfg(target_os = "linux")]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    let _ = handle.run_on_main_thread(refresh_tray_icon);
+                });
+            }
             forward_events(app.handle().clone(), gateway);
             start_update_checks(app.handle().clone());
 
@@ -1585,6 +1641,7 @@ pub fn run() {
             get_settings,
             set_settings,
             list_server_tools,
+            set_tool_exposed,
             list_audit,
             list_audit_page,
             hide_panel,

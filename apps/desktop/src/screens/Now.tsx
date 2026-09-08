@@ -7,7 +7,7 @@ import { harnessSetupPending, reconcileQueue } from "../lifecycle";
 import { activity, activityError, agents, connectAgentDraft, discardResumableNavigation, errorMessage, issuingManualTokens, manualTokens, native, pending, push, queueCursor, queuePosition, resumableNavigation, resumeNavigation, signins, status, tab } from "../state";
 import { mmss, now, relative, secondsUntil } from "../time";
 import type { ActivitySummary, AgentConfig, DayActivity, Decision, PendingCall, PendingSignIn } from "../types";
-import { Button, ChevronIcon, Chip, Empty, Label, Screen, describeError, useCopy } from "../ui";
+import { Button, ChevronIcon, Chip, Label, Screen, describeError, useCopy } from "../ui";
 
 /** Fallback when a call carries no deadline; mirrors DEFAULT_HOLD_TIMEOUT in prism-core. */
 const HOLD_SECONDS = 120;
@@ -316,26 +316,38 @@ function DailyChart({ days, at }: { days: DayActivity[]; at: string }) {
   );
 }
 
-/** The week at a glance. Every number is a door into the list, not the list itself. */
+const MAX_AGENT_ROWS = 5;
+
+/** Agents fill the space between the chart and the foot: as many whole rows as fit, up to five, never a clipped one. */
+function useAgentSlots() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [slots, setSlots] = useState(MAX_AGENT_ROWS);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      const row = parseFloat(getComputedStyle(el).getPropertyValue("--row-h")) || 44;
+      setSlots(Math.max(1, Math.min(MAX_AGENT_ROWS, Math.floor(el.clientHeight / row))));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return { ref, slots };
+}
+
+/** The week's shape and who made it. Every bar is a door into the list; the totals live there, not here. */
 function ActivityBlock({ summary }: { summary: ActivitySummary }) {
   const at = summary.window.snapshot_at;
   const days = summary.days;
-  const top = summary.agents.slice(0, 3);
+  const bars = useAgentSlots();
+  const top = summary.agents.slice(0, bars.slots);
   const widest = Math.max(1, ...top.map((a) => a.total));
   return (
     <>
-      <div class="activity-head">
-        <button type="button" class="stat" onClick={() => push({ kind: "activity", at, days })}>
-          <b>{summary.total}</b>
-          <span>actions</span>
-        </button>
-        <button type="button" class="stat" disabled={summary.attention === 0} onClick={() => push({ kind: "activity", attention: true, at, days })}>
-          <b class={summary.attention ? "accent" : ""}>{summary.attention}</b>
-          <span>needed attention</span>
-        </button>
-      </div>
       <DailyChart days={summary.daily} at={at} />
-      <div class="agent-bars">
+      <div class="agent-bars" ref={bars.ref}>
         {top.map((a) => (
           <button
             type="button"
@@ -362,7 +374,7 @@ function ActivityBlock({ summary }: { summary: ActivitySummary }) {
       </div>
       <div class="activity-foot">
         <button type="button" class="link" onClick={() => push({ kind: "activity", at, days })}>
-          All {summary.total} ›
+          All actions ›
         </button>
       </div>
     </>
@@ -414,7 +426,7 @@ export function NowScreen() {
 
   return (
     <div class="screen">
-      <Screen footer={current ? <DecisionFooter key={current.key} item={current} /> : undefined}>
+      <Screen fill={!current} footer={current ? <DecisionFooter key={current.key} item={current} /> : undefined}>
         <ResumeRow />
         {current ? (
           <>
@@ -433,25 +445,22 @@ export function NowScreen() {
           </>
         ) : (
           <>
-            <Empty title="Nothing waiting." />
+            <div class="opener">
+              <strong>All clear.</strong>
+              {st ? (
+                <span class="health">
+                  <button type="button" class="link" onClick={() => (tab.value = "servers")}>
+                    {st.servers_running}/{st.servers_total} servers
+                  </button>
+                  {" · "}
+                  <button type="button" class="link" onClick={() => (tab.value = "agents")}>
+                    {st.agent_count} {st.agent_count === 1 ? "agent" : "agents"}
+                  </button>
+                </span>
+              ) : null}
+            </div>
             <div class="section activity">
-              <Label
-                right={
-                  st ? (
-                    <span class="counts">
-                      <button type="button" class="link" onClick={() => (tab.value = "servers")}>
-                        {st.servers_running}/{st.servers_total} servers
-                      </button>
-                      {" · "}
-                      <button type="button" class="link" onClick={() => (tab.value = "agents")}>
-                        {st.agent_count} agents
-                      </button>
-                    </span>
-                  ) : null
-                }
-              >
-                Last {summary?.days ?? 7} days · retained
-              </Label>
+              <Label>Last {summary?.days ?? 7} days · retained</Label>
               {activityError.value ? (
                 <Button variant="quiet" onClick={() => loadActivity()}>History unavailable · Retry</Button>
               ) : summary === null ? (

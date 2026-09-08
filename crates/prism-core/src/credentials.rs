@@ -295,6 +295,7 @@ pub(crate) mod tests {
             auth: crate::config::HttpAuth::None,
             headers: Default::default(),
             oauth_ref: None,
+            hidden_tools: Default::default(),
         }
     }
 

@@ -142,6 +142,11 @@ export function listServerTools(serverId: string) {
   return invoke<ToolInfo[]>("list_server_tools", { serverId });
 }
 
+/** Show or hide one tool of a server for every agent. */
+export function setToolExposed(serverId: string, tool: string, exposed: boolean) {
+  return invoke<void>("set_tool_exposed", { serverId, tool, exposed });
+}
+
 export function listAudit(limit = 20, filter: ActivityFilter = {}) {
   return invoke<AuditEntry[]>("list_audit", {
     limit,

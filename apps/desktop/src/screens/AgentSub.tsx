@@ -20,11 +20,8 @@ import {
 import { hostOf, hostSetup, placeholderHost } from "../hosts";
 import { relative, remaining } from "../time";
 import type { AgentConfig, Rule, RuleDecision } from "../types";
-import { Button, ChevronIcon, Chip, ConfirmButton, Pager, Screen, Segmented, StatusText, describeError, usePage } from "../ui";
+import { Button, ChevronIcon, Chip, ConfirmButton, REVEAL, Screen, Segmented, ShowMore, StatusText, describeError, useReveal } from "../ui";
 import { HarnessSections } from "./Host";
-
-/** Rows per page on an agent subscreen: six fit the budget with the pager in the footer. */
-export const PAGE = 6;
 
 export async function refresh(): Promise<void> {
   agents.value = await api.listAgents();
@@ -70,7 +67,7 @@ export function AgentConnectionsScreen({ agentId }: { agentId: string }) {
   const issued = manualTokens.value[agentId] ?? null;
   const tokenBusy = !!issuingManualTokens.value[agentId];
   const clients = agent?.clients ?? [];
-  const { rows, offset, setOffset, total } = usePage(clients, PAGE, agentId);
+  const { rows, total, more } = useReveal(clients, REVEAL, agentId);
   if (!agent) return <div class="screen pushed" />;
   if (issued) return <ManualTokenDetails issued={issued} onDone={() => {
     discardManualToken(agentId);
@@ -94,8 +91,6 @@ export function AgentConnectionsScreen({ agentId }: { agentId: string }) {
 
   const footer = (
     <>
-      {total > PAGE ? <Pager offset={offset} size={PAGE} total={total} onOffset={setOffset} /> : null}
-      <span class="spacer" />
       {manual ? (
         agent.status === "approved" ? (
           <>
@@ -152,6 +147,7 @@ export function AgentConnectionsScreen({ agentId }: { agentId: string }) {
                 </div>
               </div>
             ))}
+            <ShowMore shown={rows.length} total={total} size={REVEAL} onMore={more} />
           </div>
         ) : harness ? (
           <p class="hint">No MCP client yet. Point it at Prism from Connect an agent.</p>
@@ -178,12 +174,12 @@ export function AgentHarnessScreen({ agentId }: { agentId: string }) {
 /** What this agent may touch on each server: the server-wide default, and a way into its tools. */
 export function AgentServersScreen({ agentId }: { agentId: string }) {
   const agent = useAgent(agentId);
-  const { rows, offset, setOffset, total } = usePage(servers.value, PAGE, agentId);
+  const { rows, total, more } = useReveal(servers.value, REVEAL, agentId);
   if (!agent) return <div class="screen pushed" />;
   const mine = rules.value.filter((r) => r.agent_id === agent.id);
   return (
     <div class="screen pushed">
-      <Screen footer={total > PAGE ? <Pager offset={offset} size={PAGE} total={total} onOffset={setOffset} /> : undefined}>
+      <Screen>
         {total === 0 ? (
           <p class="hint">No servers yet.</p>
         ) : (
@@ -217,6 +213,7 @@ export function AgentServersScreen({ agentId }: { agentId: string }) {
                 </div>
               );
             })}
+            <ShowMore shown={rows.length} total={total} size={REVEAL} onMore={more} />
           </div>
         )}
       </Screen>
@@ -228,11 +225,11 @@ export function AgentServersScreen({ agentId }: { agentId: string }) {
 export function AgentGrantsScreen({ agentId }: { agentId: string }) {
   const agent = useAgent(agentId);
   const grants = grantsOf(agentId);
-  const { rows, offset, setOffset, total } = usePage(grants, PAGE, agentId);
+  const { rows, total, more } = useReveal(grants, REVEAL, agentId);
   if (!agent) return <div class="screen pushed" />;
   return (
     <div class="screen pushed">
-      <Screen footer={total > PAGE ? <Pager offset={offset} size={PAGE} total={total} onOffset={setOffset} /> : undefined}>
+      <Screen>
         {total === 0 ? (
           <p class="hint">None. Grants appear here when a hold is allowed for longer than once.</p>
         ) : (
@@ -267,6 +264,7 @@ export function AgentGrantsScreen({ agentId }: { agentId: string }) {
                 </div>
               </div>
             ))}
+            <ShowMore shown={rows.length} total={total} size={REVEAL} onMore={more} />
           </div>
         )}
       </Screen>

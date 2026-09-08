@@ -3,10 +3,7 @@ import * as api from "../api";
 import { ACCESS, findRule, postureLabel, setAccess } from "../policy";
 import { agents, errorMessage, pop, rules, servers, status } from "../state";
 import type { ToolInfo } from "../types";
-import { Chip, Label, Pager, Screen, Segmented, describeError, usePage } from "../ui";
-
-/** Rows per page: six two-line rows fit the body beside the pager. */
-const PAGE = 6;
+import { Chip, Label, REVEAL, Screen, Segmented, ShowMore, describeError, useReveal } from "../ui";
 
 /** Per-tool overrides for one agent on one server. */
 export function AgentToolsScreen({ agentId, serverId }: { agentId: string; serverId: string }) {
@@ -28,11 +25,11 @@ export function AgentToolsScreen({ agentId, serverId }: { agentId: string; serve
 
   const serverRule = findRule(rules.value, agent.id, server.id, null);
   const fallback = serverRule ? serverRule.decision : postureLabel(agent.posture).toLowerCase();
-  const { rows, offset, setOffset, total } = usePage(tools ?? [], PAGE, serverId);
+  const { rows, total, more } = useReveal(tools ?? [], REVEAL, serverId);
 
   return (
     <div class="screen pushed">
-      <Screen footer={total > PAGE ? <Pager offset={offset} size={PAGE} total={total} onOffset={setOffset} /> : undefined}>
+      <Screen>
         <Label right={<span>unset: {fallback}</span>}>Tools</Label>
         {tools === null ? null : tools.length === 0 ? (
           <p class="hint">No tools.</p>
@@ -64,6 +61,7 @@ export function AgentToolsScreen({ agentId, serverId }: { agentId: string; serve
                 </div>
               );
             })}
+            <ShowMore shown={rows.length} total={total} size={REVEAL} onMore={more} />
           </div>
         )}
       </Screen>

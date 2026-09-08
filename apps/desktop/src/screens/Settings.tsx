@@ -3,7 +3,7 @@ import { signal } from "@preact/signals";
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { errorMessage, push, status, update, updateProgress } from "../state";
-import type { Settings, UpdateStatus } from "../types";
+import type { PanelAnchor, Settings, UpdateStatus } from "../types";
 import { Button, HubRow, Label, Screen, Segmented, StatusText, Switch, describeError } from "../ui";
 import { native } from "../state";
 import { loadNativeStatus } from "../events";
@@ -233,6 +233,25 @@ export function SettingsScreen() {
   return (
     <div class="screen pushed settings-hub">
       <Screen>
+        <section class="section">
+          <Label>Panel</Label>
+          <div class="list">
+            <label class="setting">
+              <div>
+                <div class="setting-title">Opens at</div>
+                <div class="hint">{settings.panel_shortcut === "" ? "No shortcut." : `Shortcut ${settings.panel_shortcut ?? "Ctrl+Alt+P"}.`}</div>
+              </div>
+              <select aria-label="Panel corner" value={settings.panel_anchor} onChange={(e) => void save({ panel_anchor: e.currentTarget.value as PanelAnchor })}>
+                <option value="auto">Auto</option>
+                <option value="top-right">Top right</option>
+                <option value="bottom-right">Bottom right</option>
+                <option value="top-left">Top left</option>
+                <option value="bottom-left">Bottom left</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
         <section class="section">
           <Label>Interruptions</Label>
           <div class="list">

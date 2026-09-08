@@ -25,6 +25,10 @@ toml_edit = "0.25"
 jsonc-parser = { version = "0.33.1", features = ["cst", "serde_json"] }
 serde_yaml_ng = "0.10"
 
+# The tray icon is an X window of ours on XEmbed trays; GDK knows where it sits. Same GDK Tauri links.
+[target.'cfg(target_os = "linux")'.dependencies]
+gdk = "0.18"
+
 [dev-dependencies]
 tempfile = "3"
 

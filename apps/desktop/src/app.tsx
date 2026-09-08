@@ -13,6 +13,7 @@ import { InspectCallScreen } from "./screens/InspectCall";
 import { harness, hostName } from "./hosts";
 import { NowScreen } from "./screens/Now";
 import { RulesScreen } from "./screens/Rules";
+import { ServerScreen } from "./screens/Server";
 import { ServersScreen } from "./screens/Servers";
 import { ObserveScreen, SettingsScreen, UpdatesScreen } from "./screens/Settings";
 import { agents, errorMessage, pending, pop, push, resetNavigation, servers, signins, stack, status, tab, update } from "./state";
@@ -34,6 +35,8 @@ function titleOf(screen: Screen): string {
   switch (screen.kind) {
     case "add-server":
       return "Add server";
+    case "server":
+      return servers.value.find((s) => s.id === screen.serverId)?.name ?? "Server";
     case "harness-setup":
       return `Set up ${harness(screen.host)?.name ?? "agent"}`;
     case "harness-files":
@@ -124,16 +127,17 @@ export function App() {
           <>
             <Mark />
             <h1 class="wordmark">Prism</h1>
-            <button
-              type="button"
-              class="status"
-              aria-label={st?.listening ? "Gateway ready, connect an agent" : "Gateway unavailable, open connection help"}
-              title={st?.listening ? "Gateway ready. Connect an agent." : "Gateway unavailable"}
-              onClick={() => push({ kind: "connect-agent" })}
-            >
-              <span class={`dot ${st ? (st.listening ? "ok" : "danger") : ""}`} />
-              {st ? (st.listening ? "Ready" : "Offline") : "Checking"}
-            </button>
+            {st?.listening ? null : (
+              <button
+                type="button"
+                class={`status ${st ? "danger" : ""}`}
+                aria-label="Gateway unavailable, open connection help"
+                title="Gateway unavailable"
+                onClick={() => push({ kind: "connect-agent" })}
+              >
+                {st ? "Offline" : "Checking"}
+              </button>
+            )}
           </>
         )}
         <span class="spacer" />
@@ -181,6 +185,7 @@ export function App() {
       ) : null}
       <main class="body">
         {top?.kind === "add-server" ? <AddServerScreen /> : null}
+        {top?.kind === "server" ? <ServerScreen serverId={top.serverId} /> : null}
         {top?.kind === "connect-agent" ? <ConnectAgentScreen /> : null}
         {top?.kind === "harness-setup" ? <HarnessSetupScreen host={top.host} /> : null}
         {top?.kind === "harness-files" ? <HarnessFilesScreen host={top.host} /> : null}

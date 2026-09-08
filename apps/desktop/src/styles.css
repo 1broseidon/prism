@@ -193,29 +193,70 @@ kbd {
   margin: 0;
 }
 
+/* The scrolling region and the thumb drawn over its right padding. */
+.screen-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .screen-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 var(--space-4) var(--space-5);
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-line-strong) transparent;
+  scrollbar-width: none;
 }
 
 .screen-body::-webkit-scrollbar {
-  display: block;
-  width: 6px;
+  display: none;
+  width: 0;
+  height: 0;
 }
 
-.screen-body::-webkit-scrollbar-thumb {
-  background: var(--color-line-strong);
+/* Shows while the list moves, fades when it stops; never takes space or pointer events. */
+.scroll-thumb {
+  position: absolute;
+  right: 5px;
+  width: 5px;
   border-radius: 3px;
+  background: color-mix(in oklab, var(--color-ink-3) 70%, transparent);
+  opacity: 0;
+  transition: opacity 360ms ease;
+  pointer-events: none;
+}
+
+.scroll-thumb.on {
+  opacity: 1;
+  transition-duration: 60ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-thumb {
+    transition: none;
+  }
 }
 
 /* `.log` marks a screen that is a long list by nature. Scrollbar styling now lives on
    `.screen-body` itself; this selector stays as the marker other rules key off. */
 .screen-body.log {
+}
+
+/* A body that owns its height: sections grow, whatever sits last stays at the bottom. */
+.screen-body.fill {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.screen-body.fill .section.activity {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .screen-footer {
@@ -363,6 +404,36 @@ kbd {
   color: var(--color-ink-2);
   max-width: 34ch;
   text-wrap: pretty;
+}
+
+/* The Now tab at rest: the state first, at display size, then the two counts that can be wrong. */
+.opener {
+  padding: 22px var(--space-2) var(--space-3);
+}
+
+.opener strong {
+  display: block;
+  font-size: var(--text-display);
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+  line-height: 1.15;
+}
+
+.opener .health {
+  display: block;
+  margin-top: 5px;
+  color: var(--color-ink-3);
+  font-size: var(--text-sm);
+}
+
+.opener .health .link {
+  font-size: inherit;
+  color: inherit;
+}
+
+.opener .health .link:hover,
+.opener .health .link:focus-visible {
+  color: var(--color-ink);
 }
 
 /* Buttons. Tall and decisive in the hero; small and tonal in rows. */
@@ -568,39 +639,8 @@ kbd {
   background: var(--color-danger-soft);
 }
 
-.server-item.maintenance-open {
-  padding-bottom: 8px;
-}
 
-.disclosure-trigger .control-icon {
-  width: 13px;
-  height: 13px;
-  margin-left: -3px;
-}
 
-.server-maintenance {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-height: 38px;
-  margin-top: 7px;
-  padding: 5px 6px 5px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-}
-
-.server-maintenance > span {
-  flex: 1 1 auto;
-  color: var(--color-ink-3);
-  font-size: var(--text-sm);
-  font-weight: 500;
-}
-
-.server-maintenance .btn.quiet {
-  height: 28px;
-  padding: 0 var(--space-2);
-}
 
 /* Chips are reserved for states that need attention or affect a decision. */
 .chip {
@@ -771,15 +811,6 @@ kbd {
   outline: none;
 }
 
-.label .counts .link {
-  font-size: inherit;
-  color: inherit;
-}
-
-.label .counts .link:hover {
-  color: var(--color-ink);
-}
-
 /* Two-tap destructive buttons: armed for 3 s after the first tap. */
 .btn.armed {
   color: var(--color-danger);
@@ -798,6 +829,10 @@ button.status:hover {
   color: var(--color-ink);
 }
 
+.status.danger {
+  color: var(--color-danger);
+}
+
 .snippet-row {
   display: flex;
   align-items: center;
@@ -814,6 +849,41 @@ button.status:hover {
 
 .feed .row:last-child {
   border-bottom: 0;
+}
+
+/* The end of what is shown so far. One tap appends the next slice; the count says where you are. */
+/* Show more: the one way a long list grows, on every screen. */
+.more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: var(--row-h);
+  margin-top: var(--space-2);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-ink-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.more:hover:not(:disabled),
+.more:focus-visible {
+  color: var(--color-ink);
+}
+
+.more:disabled {
+  cursor: default;
+}
+
+.more .muted {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
 
 .feed .row time {
@@ -1325,14 +1395,16 @@ button.status:hover {
 }
 
 /* Agent screen head: state at a glance, details in mono. */
-.agent-head {
+.agent-head,
+.server-head {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 0 var(--space-2) var(--space-2);
 }
 
-.agent-head .sub {
+.agent-head .sub,
+.server-head .sub {
   color: var(--color-ink-3);
   font-size: var(--text-xs);
 }
@@ -1432,6 +1504,16 @@ button.status:hover {
   color: var(--color-ink-2);
   font-size: var(--text-sm);
 }
+.setting select {
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--color-ink);
+  background: var(--color-surface);
+  border: 0;
+  border-radius: var(--radius-xs);
+  padding: var(--space-1) var(--space-2);
+}
+
 .setting .num {
   display: inline-flex;
   align-items: center;
@@ -1761,59 +1843,8 @@ textarea.input {
 
 /* ---- Activity: the week at a glance ------------------------------------------------------ */
 
-.activity-head {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
-  margin: var(--space-2) 0 var(--space-3);
-}
-
-.activity-head .stat {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-}
-
-.activity-head .stat:disabled {
-  cursor: default;
-}
-
-.activity-head .stat:not(:disabled):hover span {
-  color: var(--color-ink);
-}
-
-.activity-head .stat:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 4px;
-}
-
-.activity-head .stat b {
-  font-size: 30px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
-
-.activity-head .stat b.accent {
-  color: var(--color-accent-text);
-}
-
-.activity-head .stat span {
-  color: var(--color-ink-3);
-  font-size: var(--text-sm);
-}
-
 .daily {
+  flex: 0 0 auto;
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 1fr;
@@ -1894,8 +1925,11 @@ textarea.input {
 }
 
 .agent-bars {
+  flex: 1 1 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .agent-bar {
@@ -2037,50 +2071,18 @@ textarea.input {
 .history-controls { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); }
 .history-controls select { font: inherit; font-size: var(--text-sm); color: var(--color-ink); background: var(--color-surface); border: 0; border-radius: var(--radius-xs); padding: var(--space-1) var(--space-2); }
 
-/* Pager: shared paging control that sits at the left of a screen-footer. */
-.pager {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.pager .range {
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* Footer with a pager: the pager keeps to the left, the actions pack to the right at their own width. */
-.screen-footer:has(.pager) {
-  justify-content: flex-start;
-  align-items: center;
-}
-.screen-footer .pager {
-  flex: 0 0 auto;
-  margin-right: auto;
-  gap: 6px;
-}
-.screen-footer .pager .btn {
-  flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
-  border-radius: 999px;
-  font-size: var(--text-xl);
-  font-weight: 400;
-}
-.screen-footer:has(.pager) > .btn {
-  flex: 0 1 auto;
-  padding: 0 var(--space-4);
-}
+/* A footer's quiet button keeps the primary's height and type. */
 .screen-footer > .btn.quiet {
   height: var(--btn-h);
   font-size: var(--text-md);
   font-weight: 500;
 }
-.pager .range {
-  font-size: var(--text-sm);
-  color: var(--color-ink-2);
-}
-.pager .range .muted {
+
+/* A hidden tool stays in the list, quieter, so what agents no longer see is still one glance away. */
+.item.hidden-tool .title {
   color: var(--color-ink-3);
+}
+
+.hint.danger {
+  color: var(--color-danger);
 }

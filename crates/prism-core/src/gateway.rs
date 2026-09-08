@@ -63,6 +63,11 @@ pub struct Settings {
     pub rate_limit_per_minute: Option<u32>,
     pub hold_timeout_secs: u64,
     pub auto_open_on_pending: bool,
+    /// Which corner the panel opens in; `auto` follows the desktop's bar.
+    pub panel_anchor: PanelAnchor,
+    /// The global shortcut as configured; `None` is the built-in one, empty turns it off.
+    /// Shown in the panel, applied at the next launch.
+    pub panel_shortcut: Option<String>,
 }
 
 /// A rule as the panel creates it. Same triple as an existing rule replaces that rule.
@@ -92,6 +97,8 @@ pub struct ToolInfo {
     pub description: Option<String>,
     pub read_only: bool,
     pub destructive: bool,
+    /// False when the panel hid it: agents neither list nor call it.
+    pub exposed: bool,
 }
 
 /// The gateway URL and a generic `mcp.json` block pointing at it.
@@ -478,6 +485,39 @@ impl Gateway {
         self.backends.restart(server_id).await
     }
 
+    /// Show or hide one tool of a server for every agent. Saved to config; the next list or call sees it.
+    pub async fn set_tool_exposed(&self, server_id: &str, tool: &str, exposed: bool) -> Result<()> {
+        let mut config = self.config.write().await;
+        let mut updated = config.clone();
+        let server = updated
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
+        let changed = if exposed {
+            server.hidden_tools.remove(tool)
+        } else {
+            server.hidden_tools.insert(tool.to_string())
+        };
+        if changed {
+            updated.save(&self.config_path)?;
+            *config = updated;
+        }
+        Ok(())
+    }
+
+    /// The hidden set per server, from the live config rather than a backend's start-time copy.
+    async fn hidden_tools(&self) -> HashMap<String, std::collections::BTreeSet<String>> {
+        self.config
+            .read()
+            .await
+            .servers
+            .iter()
+            .filter(|s| !s.hidden_tools.is_empty())
+            .map(|s| (s.id.clone(), s.hidden_tools.clone()))
+            .collect()
+    }
+
     async fn server_config(&self, server_id: &str) -> Result<ServerConfig> {
         self.config
             .read()
@@ -830,6 +870,8 @@ impl Gateway {
             rate_limit_per_minute: config.rate_limit_per_minute,
             hold_timeout_secs: config.hold_timeout_secs,
             auto_open_on_pending: config.auto_open_on_pending,
+            panel_anchor: config.panel_anchor,
+            panel_shortcut: config.panel_shortcut.clone(),
         }
     }
 
@@ -846,6 +888,8 @@ impl Gateway {
             config.rate_limit_per_minute = settings.rate_limit_per_minute.filter(|n| *n > 0);
             config.hold_timeout_secs = settings.hold_timeout_secs;
             config.auto_open_on_pending = settings.auto_open_on_pending;
+            config.panel_anchor = settings.panel_anchor;
+            config.panel_shortcut = settings.panel_shortcut;
             config.save(&self.config_path)?;
         }
         let _ = self.events.send(GatewayEvent::SettingsChanged);
@@ -854,12 +898,14 @@ impl Gateway {
 
     /// Tools one server currently exposes, for per-tool overrides in the panel.
     pub async fn server_tools(&self, server_id: &str) -> Vec<ToolInfo> {
+        let hidden = self.hidden_tools().await;
         self.backends
             .list_tools(false)
             .await
             .into_iter()
             .filter(|(server, _)| server.id == server_id)
             .map(|(_, tool)| ToolInfo {
+                exposed: !is_hidden(&hidden, server_id, tool.name.as_ref()),
                 name: tool.name.to_string(),
                 description: tool.description.as_ref().map(|d| d.to_string()),
                 read_only: tool
@@ -1337,8 +1383,10 @@ impl Gateway {
             return ListToolsResult::default();
         }
         let pairs = self.backends.list_tools(false).await;
+        let hidden = self.hidden_tools().await;
         let mut tools: Vec<_> = pairs
             .into_iter()
+            .filter(|(server, tool)| !is_hidden(&hidden, &server.id, tool.name.as_ref()))
             .map(|(server, tool)| aggregate_tool(&server.name, tool))
             .collect();
         tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1392,9 +1440,11 @@ impl Gateway {
         }
 
         let aggregated = request.name.as_ref();
-        let (server, original_tool) = match self.resolve_aggregated(aggregated).await {
-            Some(pair) => pair,
-            None => {
+        let resolved = self.resolve_aggregated(aggregated).await;
+        let hidden = self.hidden_tools().await;
+        let (server, original_tool) = match resolved {
+            Some((server, tool)) if !is_hidden(&hidden, &server.id, &tool) => (server, tool),
+            _ => {
                 return Err(McpError::invalid_params(
                     format!("unknown tool '{aggregated}'"),
                     None,
@@ -1760,6 +1810,14 @@ impl Gateway {
         }
         best.map(|(_, s, t)| (s, t))
     }
+}
+
+fn is_hidden(
+    hidden: &HashMap<String, std::collections::BTreeSet<String>>,
+    server_id: &str,
+    tool: &str,
+) -> bool {
+    hidden.get(server_id).is_some_and(|set| set.contains(tool))
 }
 
 /// One MCP session. rmcp builds a fresh proxy per session, so the agent identity learned at
@@ -2146,6 +2204,44 @@ mod retained_history_tests {
                 via_prism: duplicate,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn hiding_a_tool_persists_and_keeps_it_from_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let gw = gateway(&dir.path().join("audit.jsonl"));
+        {
+            let mut config = gw.config.write().await;
+            config.servers.push(ServerConfig {
+                id: "srv".into(),
+                name: "files".into(),
+                command: "true".into(),
+                args: Vec::new(),
+                env: Default::default(),
+                credential_ref: None,
+                enabled: true,
+                url: None,
+                auth: HttpAuth::None,
+                headers: Default::default(),
+                oauth_ref: None,
+                hidden_tools: Default::default(),
+            });
+        }
+        assert!(gw.set_tool_exposed("missing", "x", false).await.is_err());
+        gw.set_tool_exposed("srv", "delete_file", false)
+            .await
+            .unwrap();
+        let hidden = gw.hidden_tools().await;
+        assert!(is_hidden(&hidden, "srv", "delete_file"));
+        assert!(!is_hidden(&hidden, "srv", "read_file"));
+        assert!(!is_hidden(&hidden, "other", "delete_file"));
+        let saved = PrismConfig::load(&gw.config_path).unwrap();
+        assert!(!saved.servers[0].exposes("delete_file"));
+        gw.set_tool_exposed("srv", "delete_file", true)
+            .await
+            .unwrap();
+        assert!(gw.hidden_tools().await.is_empty());
+        assert!(PrismConfig::load(&gw.config_path).unwrap().servers[0].exposes("delete_file"));
     }
 
     #[tokio::test]

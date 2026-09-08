@@ -449,6 +449,8 @@ pub struct ServerView {
     /// Endpoint of a remote server; `None` for a stdio one.
     pub url: Option<String>,
     pub auth: crate::config::HttpAuth,
+    /// Tools the panel hid from every agent, by name.
+    pub hidden_tools: Vec<String>,
 }
 
 impl ServerView {
@@ -464,6 +466,7 @@ impl ServerView {
             status,
             url: config.url,
             auth: config.auth,
+            hidden_tools: config.hidden_tools.into_iter().collect(),
         }
     }
 }
@@ -487,6 +490,7 @@ mod tests {
             auth: crate::config::HttpAuth::None,
             headers: Default::default(),
             oauth_ref: None,
+            hidden_tools: Default::default(),
         };
         let launch = crate::credentials::LaunchSettings {
             args: vec![
@@ -598,6 +602,7 @@ for line in sys.stdin:
                 auth: crate::config::HttpAuth::None,
                 headers: Default::default(),
                 oauth_ref: None,
+                hidden_tools: Default::default(),
             })
             .await
             .unwrap();
@@ -687,6 +692,7 @@ for line in sys.stdin:
             auth: crate::config::HttpAuth::None,
             headers: Default::default(),
             oauth_ref: None,
+            hidden_tools: Default::default(),
         };
         protect_server(store.as_ref(), &mut server).unwrap();
         let (events, _) = crate::events::channel();
