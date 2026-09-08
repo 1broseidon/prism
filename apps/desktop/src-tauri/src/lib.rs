@@ -420,6 +420,12 @@ fn remember_tray_rect(app: &AppHandle, rect: &tauri::Rect) {
     }
 }
 
+/// Development only: the panel stays on screen across focus changes so edits can be watched live.
+/// Set through the environment at launch; release builds never read it from anywhere else.
+fn panel_pinned() -> bool {
+    std::env::var_os("PRISM_PIN_PANEL").is_some()
+}
+
 fn show_panel(app: &AppHandle, reason: &'static str) {
     // Attention can arrive while the operator is reading or typing in the panel. In that case
     // the gateway event updates the waiting pill; remapping and focusing the window would steal
@@ -925,12 +931,22 @@ async fn configure_harness(
 ) -> Result<harness::Changes, String> {
     let url = state.gateway.connect_snippet().map_err(map_err)?.url;
     let hook_url = state.gateway.hook_url(&host);
-    tauri::async_runtime::spawn_blocking(move || {
+    let name = host.clone();
+    let changes = tauri::async_runtime::spawn_blocking(move || {
         let paths = harness::Paths::for_host(&host)?;
         harness::configure(&paths, &host, &url, &hook_url, remove, hooks_only)
     })
     .await
-    .map_err(|_| "Could not update client settings")?
+    .map_err(|_| "Could not update client settings")??;
+    if !remove {
+        // Setup succeeded on disk; list the harness now rather than after its first contact.
+        state
+            .gateway
+            .ensure_host_agent(&name)
+            .await
+            .map_err(map_err)?;
+    }
+    Ok(changes)
 }
 
 #[tauri::command]
@@ -1472,8 +1488,9 @@ pub fn run() {
             forward_events(app.handle().clone(), gateway);
             start_update_checks(app.handle().clone());
 
-            // Dev affordance: `PRISM_SHOW_PANEL=1 cargo tauri dev` opens the panel without a tray click.
-            if std::env::var_os("PRISM_SHOW_PANEL").is_some() {
+            // Dev affordances: `PRISM_SHOW_PANEL=1 cargo tauri dev` opens the panel without a tray
+            // click; `PRISM_PIN_PANEL=1` also keeps it open when focus moves to the editor.
+            if std::env::var_os("PRISM_SHOW_PANEL").is_some() || panel_pinned() {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -1523,7 +1540,8 @@ pub fn run() {
                     SEEN_FOCUS.store(true, Ordering::SeqCst);
                 }
                 WindowEvent::Focused(false) => {
-                    if IGNORE_FOCUS_LOSS.load(Ordering::SeqCst)
+                    if panel_pinned()
+                        || IGNORE_FOCUS_LOSS.load(Ordering::SeqCst)
                         || !SEEN_FOCUS.load(Ordering::SeqCst)
                     {
                         return;

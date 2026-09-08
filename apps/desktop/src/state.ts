@@ -1,5 +1,6 @@
 import { signal } from "@preact/signals";
-import { discardVolatile, preserveRecoverable, rememberVolatile } from "./lifecycle";
+import { hostSetup } from "./hosts";
+import { discardVolatile, harnessSetupPending, preserveRecoverable, rememberVolatile } from "./lifecycle";
 import type {
   ActivitySummary,
   AgentConfig,
@@ -173,6 +174,7 @@ export function isSetupScreen(screen: Screen): boolean {
 }
 
 function isRecoverableScreen(screen: Screen): boolean {
+  if (screen.kind === "harness-setup") return harnessSetupPending(hostSetup(native.value, screen.host));
   return isSetupScreen(screen) || (screen.kind === "agent-connections" &&
     (manualTokens.value[screen.agentId] !== undefined || issuingManualTokens.value[screen.agentId]));
 }

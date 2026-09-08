@@ -1,10 +1,10 @@
-import { harness } from "../hosts";
+import { harness, hostSetup } from "../hosts";
 import { loadActivity } from "../events";
 import { signal } from "@preact/signals";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as api from "../api";
-import { reconcileQueue } from "../lifecycle";
-import { activity, activityError, agents, connectAgentDraft, discardResumableNavigation, errorMessage, issuingManualTokens, manualTokens, pending, push, queueCursor, queuePosition, resumableNavigation, resumeNavigation, signins, status, tab } from "../state";
+import { harnessSetupPending, reconcileQueue } from "../lifecycle";
+import { activity, activityError, agents, connectAgentDraft, discardResumableNavigation, errorMessage, issuingManualTokens, manualTokens, native, pending, push, queueCursor, queuePosition, resumableNavigation, resumeNavigation, signins, status, tab } from "../state";
 import { mmss, now, relative, secondsUntil } from "../time";
 import type { ActivitySummary, AgentConfig, DayActivity, Decision, PendingCall, PendingSignIn } from "../types";
 import { Button, ChevronIcon, Chip, Empty, Label, Screen, describeError, useCopy } from "../ui";
@@ -374,6 +374,7 @@ function ResumeRow() {
   const saved = resumableNavigation.value;
   if (!saved) return null;
   const top = saved.stack[saved.stack.length - 1];
+  if (top?.kind === "harness-setup" && !harnessSetupPending(hostSetup(native.value, top.host))) return null;
   const token = (top?.kind === "agent-connections" && manualTokens.value[top.agentId] !== undefined)
     || (top?.kind === "connect-agent" && !!connectAgentDraft.value.issuedAgentId);
   const issuing = top?.kind === "agent-connections" && !!issuingManualTokens.value[top.agentId];

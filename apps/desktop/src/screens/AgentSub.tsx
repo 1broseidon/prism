@@ -10,12 +10,14 @@ import {
   issueManualToken,
   issuingManualTokens,
   manualTokens,
+  native,
   pop,
   push,
   rules,
   servers,
   status,
 } from "../state";
+import { hostOf, hostSetup, placeholderHost } from "../hosts";
 import { relative, remaining } from "../time";
 import type { AgentConfig, Rule, RuleDecision } from "../types";
 import { Button, ChevronIcon, Chip, ConfirmButton, Pager, Screen, Segmented, StatusText, describeError, usePage } from "../ui";
@@ -40,8 +42,12 @@ export async function act(fn: () => Promise<unknown>): Promise<void> {
 }
 
 /** The agent behind a screen. Leaves once the first load shows it is gone (forgotten elsewhere). */
+/** A known harness that is set up on disk but has not reported yet renders from a placeholder
+ *  rather than bouncing back to the list. Anything else without a record pops. */
 export function useAgent(agentId: string): AgentConfig | undefined {
-  const agent = agents.value.find((a) => a.id === agentId);
+  const known = hostOf(agentId);
+  const agent = agents.value.find((a) => a.id === agentId)
+    ?? (known && hostSetup(native.value, known.host)?.setup_present ? placeholderHost(known) : undefined);
   const loaded = status.value !== null;
   useEffect(() => {
     if (loaded && !agent) pop();

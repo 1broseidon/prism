@@ -48,3 +48,9 @@ export function hostStatus(st: NativeStatus | null, host: string) {
 export function hostSetup(st: NativeStatus | null, host: string) {
   return st?.setup.find((h) => h.host === host) ?? null;
 }
+
+/** A known harness belongs on the Agents list once it has a gateway record or a global setup on disk.
+ *  Nothing is detected from installed software: an installed but unconfigured client is not an agent. */
+export function hostPresent(st: NativeStatus | null, all: AgentConfig[], h: (typeof HOSTS)[number]): boolean {
+  return all.some((a) => a.id === h.id) || !!hostSetup(st, h.host)?.setup_present;
+}

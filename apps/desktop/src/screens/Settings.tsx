@@ -231,7 +231,7 @@ export function SettingsScreen() {
   };
 
   return (
-    <div class="screen pushed">
+    <div class="screen pushed settings-hub">
       <Screen>
         <section class="section">
           <Label>Interruptions</Label>

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   discardVolatile,
+  harnessSetupPending,
   panelTransition,
   preserveRecoverable,
   reconcileQueue,
@@ -51,4 +52,11 @@ test("external resolution advances an inspected request at the same queue positi
 test("removing the last inspected request selects the remaining queue or rests empty", () => {
   assert.deepEqual(reconcileQueue(["agent:a"], "call:one", 1), { index: 0, key: "agent:a" });
   assert.deepEqual(reconcileQueue([], "call:one", 1), { index: 0, key: null });
+});
+
+test("a finished harness setup is not offered as unfinished after the panel reopens", () => {
+  assert.equal(harnessSetupPending(null), true);
+  assert.equal(harnessSetupPending({ mcp_configured: true, hook_installed: false }), true);
+  assert.equal(harnessSetupPending({ mcp_configured: false, hook_installed: true }), true);
+  assert.equal(harnessSetupPending({ mcp_configured: true, hook_installed: true }), false);
 });

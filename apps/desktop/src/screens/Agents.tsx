@@ -1,6 +1,6 @@
 import * as api from "../api";
 import { agents, errorMessage, native, push, status } from "../state";
-import { HOSTS, hostSetup, hostStatus, placeholderHost } from "../hosts";
+import { HOSTS, hostPresent, hostSetup, hostStatus, placeholderHost } from "../hosts";
 import { postureLabel } from "../policy";
 import { relative } from "../time";
 import type { AgentConfig } from "../types";
@@ -87,27 +87,27 @@ function AgentRow({ agent }: { agent: AgentConfig }) {
 
 export function AgentsScreen() {
   const all = agents.value;
-  // Known harnesses first, in a fixed order, present or not; then any harness seen from
-  // elsewhere; then everything else that connected over MCP.
-  const known = HOSTS.map((h) => all.find((a) => a.id === h.id) ?? placeholderHost(h));
+  // Known harnesses first, in a fixed order, but only those set up here; then any harness seen
+  // from elsewhere; then everything else that connected over MCP.
+  const known = HOSTS.filter((h) => hostPresent(native.value, all, h)).map((h) => all.find((a) => a.id === h.id) ?? placeholderHost(h));
   const otherHosts = all.filter((a) => a.host && !HOSTS.some((h) => h.id === a.id));
   const rest = all.filter((a) => !a.host);
   const list = [...known, ...otherHosts, ...rest];
-  const { rows, offset, setOffset, total } = usePage(list, 5);
+  const { rows, offset, setOffset, total } = usePage(list, 6);
 
   return (
     <div class="screen">
       <Screen
         footer={
           <>
-            {total > 5 ? <Pager offset={offset} size={5} total={total} onOffset={setOffset} /> : undefined}
+            {total > 6 ? <Pager offset={offset} size={6} total={total} onOffset={setOffset} /> : undefined}
             <Button onClick={() => push({ kind: "connect-agent" })}>Connect an agent</Button>
           </>
         }
       >
         <Label right={<span>{list.length}</span>}>Agents</Label>
         {list.length === 0 ? (
-          <Empty title="No agents yet." />
+          <Empty title="No agents yet.">Connect one to set up MCP and observation.</Empty>
         ) : (
           <div class="list">
             {rows.map((agent) => (

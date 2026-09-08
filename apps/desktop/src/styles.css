@@ -1346,6 +1346,15 @@ button.status:hover {
   border-bottom: 1px solid var(--color-line);
 }
 
+/* The Settings hub is one bounded page: tighter rows keep it under the body height. */
+.settings-hub .section {
+  margin-top: var(--space-4);
+}
+
+.settings-hub .setting {
+  padding: 8px 0;
+}
+
 .setting:last-child {
   border-bottom: 0;
 }

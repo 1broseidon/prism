@@ -201,7 +201,7 @@ cargo tauri dev           # full app with the tray
 pnpm dev                  # panel only, in a browser, against a fixture backend
 ```
 
-The browser mode serves http://localhost:1420 with `src/mock.ts` as the backend. `#servers`, `#agents` and `#rules` pick a tab; `?scheme=light` or `?scheme=dark` overrides the colour scheme. `PRISM_SHOW_PANEL=1` opens the panel on launch of the real app.
+The browser mode serves http://localhost:1420 with `src/mock.ts` as the backend. `#servers`, `#agents` and `#rules` pick a tab; `?scheme=light` or `?scheme=dark` overrides the colour scheme. `PRISM_SHOW_PANEL=1` opens the panel on launch of the real app; `PRISM_PIN_PANEL=1` opens it and keeps it open while you edit, so changes show without a tray click.
 
 ```sh
 cargo test -p prism-core                                   # gateway, policy, OAuth, storage

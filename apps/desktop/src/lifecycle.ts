@@ -18,6 +18,11 @@ export function rememberVolatile<T>(values: Record<string, T>, key: string, valu
   return { ...values, [key]: value };
 }
 
+/** A harness setup is worth resuming only while MCP or observation still needs configuring. */
+export function harnessSetupPending(setup: { mcp_configured: boolean; hook_installed: boolean } | null | undefined): boolean {
+  return !(setup?.mcp_configured && setup?.hook_installed);
+}
+
 export function discardVolatile<T>(values: Record<string, T>, key: string): Record<string, T> {
   const next = { ...values };
   delete next[key];

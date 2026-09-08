@@ -1007,6 +1007,30 @@ impl Gateway {
         Ok(())
     }
 
+    /// A harness that was just set up gets its agent record now, so the panel lists it before
+    /// the first sign-in or hook event. A record you refused stays refused; nothing is revived.
+    pub async fn ensure_host_agent(&self, host: &str) -> Result<()> {
+        if !crate::native::HOSTS.contains(&host) {
+            return Err(Error::NotFound(format!("unknown host {host}")));
+        }
+        let agent_id = crate::native::harness_agent_id(host, None);
+        {
+            let mut config = self.config.write().await;
+            if config.agents.iter().any(|a| a.id == agent_id) {
+                return Ok(());
+            }
+            config.agents.push(AgentConfig::harness(
+                host,
+                None,
+                AgentStatus::Approved,
+                Utc::now(),
+            ));
+            config.save(&self.config_path)?;
+        }
+        let _ = self.events.send(GatewayEvent::AgentUpdated { agent_id });
+        Ok(())
+    }
+
     /// Coverage and seven local calendar days from retained history, matching drilldowns.
     pub async fn native_status(&self) -> Result<crate::native::NativeStatus> {
         let observe_native = self.config.read().await.observe_native;
@@ -2122,6 +2146,32 @@ mod retained_history_tests {
                 via_prism: duplicate,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn setup_lists_a_harness_once_and_never_revives_a_refused_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let gw = gateway(&dir.path().join("audit.jsonl"));
+        assert!(gw.ensure_host_agent("not-a-harness").await.is_err());
+        gw.ensure_host_agent("goose").await.unwrap();
+        gw.ensure_host_agent("goose").await.unwrap();
+        let listed: Vec<_> = gw
+            .agents()
+            .await
+            .into_iter()
+            .filter(|a| a.agent.id == "host:goose")
+            .collect();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].agent.status, AgentStatus::Approved);
+        gw.decide_agent("host:goose", false).await.unwrap();
+        gw.ensure_host_agent("goose").await.unwrap();
+        let agent = gw
+            .agents()
+            .await
+            .into_iter()
+            .find(|a| a.agent.id == "host:goose")
+            .unwrap();
+        assert_eq!(agent.agent.status, AgentStatus::Denied);
     }
 
     #[tokio::test]
