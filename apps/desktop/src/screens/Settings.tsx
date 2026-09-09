@@ -371,11 +371,6 @@ export function SettingsScreen() {
     }
   };
 
-  const number = (value: string, fallback: number) => {
-    const n = Number.parseInt(value, 10);
-    return Number.isFinite(n) ? n : fallback;
-  };
-
   return (
     <div class="screen pushed settings-hub">
       <Screen>
@@ -395,21 +390,6 @@ export function SettingsScreen() {
                 <option value="bottom-left">Bottom left</option>
               </select>
             </label>
-          </div>
-        </section>
-
-        <NetworkSection />
-
-        <section class="section">
-          <Label>Interruptions</Label>
-          <div class="list">
-            <div class="setting">
-              <div>
-                <div class="setting-title">Do not disturb</div>
-                <div class="hint">Held calls follow the rule below.</div>
-              </div>
-              <Switch label="Do not disturb" checked={settings.do_not_disturb} onChange={(v) => void save({ do_not_disturb: v })} />
-            </div>
             <div class="setting">
               <div>
                 <div class="setting-title">Open on hold</div>
@@ -420,67 +400,8 @@ export function SettingsScreen() {
           </div>
         </section>
 
-        <section class="section">
-          <Label>When nobody answers</Label>
-          <Segmented
-            label="Timeout behaviour"
-            value={settings.on_timeout}
-            options={[
-              { value: "deny", label: "Deny the call" },
-              { value: "allow_read_only", label: "Allow if read-only" },
-            ]}
-            onChange={(on_timeout) => void save({ on_timeout })}
-          />
-          <p class="hint">
-            {settings.on_timeout === "deny"
-              ? "Refused. The agent can retry."
-              : "Read-only tools pass. Writes are refused."}
-          </p>
-        </section>
+        <NetworkSection />
 
-        <section class="section">
-          <Label>Limits</Label>
-          <div class="list">
-            <label class="setting">
-              <div>
-                <div class="setting-title">Hold a call for</div>
-                <div class="hint">Before the rule above applies.</div>
-              </div>
-              <span class="num">
-                <input
-                  class="input mono"
-                  type="number"
-                  min={10}
-                  max={3600}
-                  value={settings.hold_timeout_secs}
-                  onChange={(e) => void save({ hold_timeout_secs: Math.max(10, number((e.currentTarget as HTMLInputElement).value, 120)) })}
-                />
-                <span>s</span>
-              </span>
-            </label>
-            <label class="setting">
-              <div>
-                <div class="setting-title">Rate tripwire</div>
-                <div class="hint">Allowed calls ask above this.</div>
-              </div>
-              <span class="num">
-                <input
-                  class="input mono"
-                  type="number"
-                  min={0}
-                  max={10000}
-                  placeholder="off"
-                  value={settings.rate_limit_per_minute ?? ""}
-                  onChange={(e) => {
-                    const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                    void save({ rate_limit_per_minute: raw === "" ? null : Math.max(0, number(raw, 0)) || null });
-                  }}
-                />
-                <span>/min</span>
-              </span>
-            </label>
-          </div>
-        </section>
         <section class="section hub">
           <HubRow
             label="Observation"

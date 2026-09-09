@@ -143,7 +143,7 @@ Each agent also has an **attention** level for calls that resolve without asking
 
 Every answer you give from a held-call card becomes one of these: allow once resolves the call, the other three write a rule. Tap an agent to see its posture, per-server access (All / Ask / None), per-tool overrides, and every remembered grant with its countdown.
 
-**Operator settings**, behind the sliders icon:
+**Operator settings** live on the **Rules** tab:
 
 - **Do not disturb.** Held calls resolve on their own; new agents still ask.
 - **When nobody answers.** Deny, or allow if the tool is read-only.

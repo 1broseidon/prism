@@ -10,6 +10,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 - **Reachable from** (Settings → Network) opens the listener to the local network so agents on other machines can connect. The Connect screen shows the address they use, the OAuth issuer follows whichever address a client dialed, and the setting carries the warning it deserves: plain HTTP, readable by anything on the network. Loopback only stays the default.
 
+### Changed
+- Policy settings moved from Settings to the Rules tab; Settings keeps panel, network, observation and updates.
+
 ### Fixed
 - Prism no longer starts with no listener when its port is taken. Before, the bind failure was one log line and the tray looked healthy while agents could not connect.
 

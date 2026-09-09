@@ -699,8 +699,12 @@ impl Gateway {
             if config.agents.len() == before {
                 return Err(Error::NotFound(format!("agent {agent_id}")));
             }
+            config
+                .rules
+                .retain(|r| r.agent_id.as_deref() != Some(agent_id));
             config.save(&self.config_path)?;
         }
+        let _ = self.events.send(GatewayEvent::RulesChanged);
         self.resolve_authorization(agent_id, false);
         let _ = self.events.send(GatewayEvent::AgentDecided {
             agent_id: agent_id.to_string(),
@@ -2318,6 +2322,73 @@ mod listener_tests;
 #[cfg(test)]
 #[path = "native/http_tests.rs"]
 mod native_http_tests;
+
+#[cfg(test)]
+mod agent_removal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn removing_an_agent_removes_only_its_rules_and_persists_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prism.json");
+        PrismConfig {
+            listen_port: 0,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let gateway = Gateway::start_with_credentials(
+            path.clone(),
+            dir.path().join("audit.jsonl"),
+            Arc::new(crate::credentials::tests::MemoryStore::default()),
+        )
+        .await
+        .unwrap();
+        gateway.ensure_host_agent("goose").await.unwrap();
+        gateway.ensure_host_agent("codex").await.unwrap();
+        let mut kept_ids = Vec::new();
+        for agent_id in [Some("host:goose"), Some("host:codex"), None] {
+            let rule = gateway
+                .add_rule(NewRule {
+                    agent_id: agent_id.map(str::to_string),
+                    server_id: None,
+                    tool: Some("read_file".into()),
+                    decision: RuleDecision::Allow,
+                    attention: None,
+                    scope: RuleScope::Always,
+                    minutes: None,
+                })
+                .await
+                .unwrap();
+            if agent_id != Some("host:goose") {
+                kept_ids.push(rule.id);
+            }
+        }
+        assert_eq!(gateway.rules().await.len(), 3);
+        assert_eq!(PrismConfig::load(&path).unwrap().rules.len(), 3);
+        let mut events = gateway.subscribe();
+
+        gateway.remove_agent("host:goose").await.unwrap();
+
+        let saved = PrismConfig::load(&path).unwrap();
+        assert!(saved.agents.iter().all(|a| a.id != "host:goose"));
+        for rules in [gateway.rules().await, saved.rules] {
+            assert!(rules
+                .iter()
+                .all(|r| r.agent_id.as_deref() != Some("host:goose")));
+            assert_eq!(
+                rules.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+                kept_ids
+            );
+        }
+        let mut rules_changed = false;
+        while let Ok(event) = events.try_recv() {
+            rules_changed |= matches!(event, GatewayEvent::RulesChanged);
+        }
+        assert!(rules_changed);
+        gateway.shutdown().await;
+    }
+}
 
 #[cfg(test)]
 mod retained_history_tests {
