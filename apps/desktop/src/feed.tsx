@@ -1,3 +1,5 @@
+import { explainAudit } from "./condition-display";
+import { rules, servers } from "./state";
 import { useState } from "preact/hooks";
 import { clock } from "./time";
 import type { AuditEntry } from "./types";
@@ -17,6 +19,8 @@ function verdictTone(entry: AuditEntry): string {
 
 function sourceText(entry: AuditEntry): string {
   switch (entry.source.kind) {
+    case "tripwire":
+      return "tripwire";
     case "human":
       return "you";
     case "cancelled":
@@ -60,7 +64,8 @@ function Details({ entry }: { entry: AuditEntry }) {
     : [
         ["tool", entry.tool],
         ["server", entry.server_id],
-        ["decided by", sourceText(entry)],
+        ["decided by", explainAudit(entry, rules.value, servers.value)],
+        ...(entry.facets ?? []).map((facet, i): [string, string] => [`facet ${i + 1}`, facet]),
         ["took", `${entry.duration_ms} ms`],
         ...(entry.error ? ([["error", entry.error]] as [string, string][]) : []),
       ];
@@ -80,7 +85,7 @@ function Details({ entry }: { entry: AuditEntry }) {
 export function FeedRow({ entry }: { entry: AuditEntry }) {
   const [open, setOpen] = useState(false);
   const n = entry.native;
-  const flagged = n ? !!n.would_hold : entry.verdict === "denied" || entry.source.kind === "human" || entry.source.kind === "timeout";
+  const flagged = n ? !!n.would_hold : entry.verdict === "denied" || entry.source.kind === "tripwire" || entry.source.kind === "human" || entry.source.kind === "timeout";
   return (
     <div class={`row ${n ? "native" : ""} ${flagged ? "would-hold" : ""} ${open ? "open" : ""}`}>
       <button type="button" class="row-main" aria-expanded={open} onClick={() => setOpen(!open)}>

@@ -1,3 +1,4 @@
+import { offerCondition, shortPath } from "../condition-display";
 import { harness, hostSetup } from "../hosts";
 import { loadActivity } from "../events";
 import { signal } from "@preact/signals";
@@ -22,10 +23,10 @@ function beginDecision(): boolean {
   return true;
 }
 
-export async function decide(call: PendingCall, verdict: Decision["verdict"], scope: Decision["scope"], target: Decision["target"] = "tool"): Promise<boolean> {
+export async function decide(call: PendingCall, verdict: Decision["verdict"], scope: Decision["scope"], target: Decision["target"] = "tool", condition?: Decision["condition"]): Promise<boolean> {
   if (!pending.value.some((p) => p.id === call.id) || !beginDecision()) return false;
   try {
-    await api.decide(call.id, { verdict, scope, target });
+    await api.decide(call.id, { verdict, scope, target, ...(condition === undefined ? {} : { condition }) });
     // Also advance in the browser mock, where there is no call_decided event.
     pending.value = pending.value.filter((p) => p.id !== call.id);
     return true;
@@ -260,7 +261,7 @@ function DecisionFooter({ item }: { item: QueueItem }) {
       <Button variant="danger" busy={decisionBusy.value} hint="D" onClick={() => void decide(call, "deny", "once")}>Deny</Button>
     </div>
     <div class="approval-caption">{remembers ? "Allow remembers this tool." : "Allow is this call only."}</div>
-    <div class="approval-secondary">
+    <div class={`approval-secondary ${(call.offers?.length ?? 0) > 0 ? "with-offers" : ""}`}>
       {remembers ? (
         <Button variant="quiet" busy={decisionBusy.value} onClick={() => void decide(call, "allow", "once")}>Once</Button>
       ) : (
@@ -268,6 +269,11 @@ function DecisionFooter({ item }: { item: QueueItem }) {
       )}
       <Button variant="quiet" busy={decisionBusy.value} onClick={() => void decide(call, "allow", { for: { minutes: 30 } })}>30 min</Button>
       <Button variant="quiet" busy={decisionBusy.value} title={`Allow all of ${call.server_name}`} onClick={() => void decide(call, "allow", "always", "server")}>All server</Button>
+      {(call.offers ?? []).slice(0, 2).map((offer) => (
+        <Button key={`${offer.kind}:${offer.value}`} variant="quiet" class="condition-offer" busy={decisionBusy.value} title={offer.label} onClick={() => void decide(call, "allow", "always", "tool", offerCondition(offer))}>
+          {offer.kind === "path_under" ? `Under ${shortPath(offer.value)}` : `For ${offer.value}`}
+        </Button>
+      ))}
     </div>
   </div>;
 }

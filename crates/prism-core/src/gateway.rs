@@ -797,10 +797,13 @@ impl Gateway {
     }
 
     pub async fn decide(&self, id: &str, decision: Decision) -> Result<()> {
-        let call = self.approval.decide(id, decision).await?;
+        if let Some(condition) = &decision.condition {
+            policy::Condition::parse(condition).map_err(Error::Invalid)?;
+        }
+        let call = self.approval.decide(id, decision.clone()).await?;
         let _ = self.events.send(GatewayEvent::CallDecided {
             id: id.to_string(),
-            decision,
+            decision: decision.clone(),
         });
         if decision.scope != DecisionScope::Once {
             self.append_rule_for(&call, decision).await?;
@@ -827,7 +830,20 @@ impl Gateway {
             drop(config);
             let _ = self.events.send(GatewayEvent::RulesChanged);
         }
-        self.config.read().await.rules.clone()
+        self.config
+            .read()
+            .await
+            .rules
+            .iter()
+            .cloned()
+            .map(|mut rule| {
+                rule.condition_error = rule
+                    .condition
+                    .as_ref()
+                    .and_then(|c| policy::Condition::parse(c).err());
+                rule
+            })
+            .collect()
     }
 
     /// Add a rule from the panel. A rule on the same agent, server, and tool is replaced.
@@ -850,6 +866,7 @@ impl Gateway {
                 .minutes
                 .map(|m| now + chrono::Duration::minutes(i64::from(m))),
             condition: None,
+            condition_error: None,
             created_at: now,
         };
         self.upsert_rule(rule.clone()).await?;
@@ -862,7 +879,8 @@ impl Gateway {
             config.rules.retain(|r| {
                 !(r.agent_id == rule.agent_id
                     && r.server_id == rule.server_id
-                    && r.tool == rule.tool)
+                    && r.tool == rule.tool
+                    && r.condition == rule.condition)
             });
             config.rules.push(rule);
             config.save(&self.config_path)?;
@@ -1314,6 +1332,7 @@ impl Gateway {
             duration_ms: 0,
             error: None,
             attention: Attention::Silent,
+            facets: Vec::new(),
             native: Some(crate::audit::NativeDetail {
                 host: host.to_string(),
                 session: event
@@ -1390,7 +1409,11 @@ impl Gateway {
                 Some(now + chrono::Duration::minutes(i64::from(minutes.max(1)))),
             ),
         };
-        let (server_id, tool) = match decision.target {
+        let (server_id, tool) = match if decision.condition.is_some() {
+            DecisionTarget::Tool
+        } else {
+            decision.target
+        } {
             DecisionTarget::Tool => (Some(call.server_id.clone()), Some(call.tool.clone())),
             DecisionTarget::Server => (Some(call.server_id.clone()), None),
             DecisionTarget::Agent => (None, None),
@@ -1407,7 +1430,8 @@ impl Gateway {
             attention: None,
             scope,
             expires_at,
-            condition: None,
+            condition: decision.condition,
+            condition_error: None,
             created_at: now,
         };
         self.upsert_rule(rule).await
@@ -1478,6 +1502,7 @@ impl Gateway {
                 error: Some(message.clone()),
                 attention: Attention::Silent,
                 native: None,
+                facets: Vec::new(),
             });
             return Ok(CallToolResult::error(vec![ContentBlock::text(message)]));
         }
@@ -1505,6 +1530,23 @@ impl Gateway {
         };
         let original_tool = tool.name.to_string();
 
+        let annotations = tool.annotations.map(|a| ToolAnnotations::from(&a));
+
+        let arguments = request
+            .arguments
+            .clone()
+            .map(serde_json::Value::Object)
+            .unwrap_or(serde_json::Value::Null);
+
+        let action = policy::Action::from_mcp(
+            &agent.id,
+            &server.id,
+            &original_tool,
+            arguments.clone(),
+            annotations,
+            Utc::now(),
+        );
+
         let mut cancellation = CallAuditGuard {
             audit: &self.audit,
             started,
@@ -1514,27 +1556,12 @@ impl Gateway {
                 server_id: server.id.clone(), tool: original_tool.clone(),
                 verdict: AuditVerdict::Error, source: AuditSource::Cancelled,
                 duration_ms: 0, error: Some("Client cancelled the request; an already-started backend operation may still finish".into()),
-                attention: Attention::Silent, native: None,
+                attention: Attention::Silent, native: None, facets: action.facets_summary(),
             }),
         };
-        let annotations = tool.annotations.map(|a| ToolAnnotations::from(&a));
-
-        let arguments = request
-            .arguments
-            .clone()
-            .map(serde_json::Value::Object)
-            .unwrap_or(serde_json::Value::Null);
-
-        let (eval, dnd, on_timeout, rate_limit) = {
+        let (mut eval, dnd, on_timeout, rate_limit) = {
             let config = self.config.read().await;
-            let eval = policy::evaluate(
-                &config.rules,
-                &agent,
-                &server.id,
-                &original_tool,
-                annotations.as_ref(),
-                Utc::now(),
-            );
+            let eval = policy::evaluate(&config.rules, &agent, &action, Utc::now());
             (
                 eval,
                 config.do_not_disturb,
@@ -1545,16 +1572,13 @@ impl Gateway {
 
         // The tripwire counts every attempt and turns an allow into an ask once an agent runs hot.
         let tripped = rate_limit.is_some_and(|limit| self.rate_tripped(&agent.id, limit));
-        let (verdict, reason) = match (eval.verdict, tripped) {
-            (Verdict::Allow, true) => (Verdict::Ask, HoldReason::RateLimit),
-            (v, _) => (v, HoldReason::Policy),
+        eval.apply_tripwire(tripped);
+        let reason = if eval.decider == Decider::Tripwire {
+            HoldReason::RateLimit
+        } else {
+            HoldReason::Policy
         };
-        let source = match &eval.decider {
-            Decider::Rule { rule_id } => AuditSource::Rule {
-                rule_id: rule_id.clone(),
-            },
-            Decider::Posture(posture) => AuditSource::Posture { posture: *posture },
-        };
+        let source = AuditSource::from(&eval.decider);
         // While do-not-disturb is on, nothing louder than a badge gets through.
         let attention = if dnd {
             eval.attention.min(Attention::Badge)
@@ -1562,7 +1586,7 @@ impl Gateway {
             eval.attention
         };
 
-        let result = match verdict {
+        let result = match eval.verdict {
             Verdict::Allow => {
                 self.forward_or_error(
                     &agent,
@@ -1573,6 +1597,7 @@ impl Gateway {
                     source,
                     AuditVerdict::Allowed,
                     attention,
+                    action.facets_summary(),
                 )
                 .await
             }
@@ -1588,6 +1613,9 @@ impl Gateway {
                             .unwrap_or_else(|| "deny".into())
                     }
                     Decider::Posture(p) => format!("{p:?} posture"),
+                    Decider::Tripwire => "rate tripwire".into(),
+                    Decider::DoNotDisturb => "do not disturb".into(),
+                    Decider::Timeout => "timeout".into(),
                 };
                 let message = format!("Denied by Prism policy: {summary}");
                 self.audit.record(AuditEntry {
@@ -1602,7 +1630,7 @@ impl Gateway {
                     duration_ms: started.elapsed().as_millis() as u64,
                     error: Some(message.clone()),
                     attention,
-                    native: None,
+                    native: None, facets: action.facets_summary(),
                 });
                 Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
             }
@@ -1613,9 +1641,9 @@ impl Gateway {
                     &original_tool,
                     arguments,
                     started,
-                    annotations.as_ref(),
+                    &action,
                     on_timeout,
-                    AuditSource::DoNotDisturb,
+                    AuditSource::from(&Decider::DoNotDisturb),
                     "Prism is in do-not-disturb and this call needed a human. Retry later or ask the operator.",
                 )
                 .await
@@ -1627,7 +1655,7 @@ impl Gateway {
                     original_tool,
                     arguments,
                     started,
-                    annotations.as_ref(),
+                    &action,
                     reason,
                 )
                 .await
@@ -1646,12 +1674,15 @@ impl Gateway {
         tool: &str,
         arguments: serde_json::Value,
         started: Instant,
-        annotations: Option<&ToolAnnotations>,
+        action: &policy::Action,
         behavior: TimeoutBehavior,
         source: AuditSource,
         message: &str,
     ) -> std::result::Result<CallToolResult, McpError> {
-        let read_only = annotations.is_some_and(ToolAnnotations::is_read_only);
+        let read_only = action
+            .annotations
+            .as_ref()
+            .is_some_and(ToolAnnotations::is_read_only);
         if behavior == TimeoutBehavior::AllowReadOnly && read_only {
             return self
                 .forward_or_error(
@@ -1663,6 +1694,7 @@ impl Gateway {
                     source,
                     AuditVerdict::Allowed,
                     Attention::Badge,
+                    action.facets_summary(),
                 )
                 .await;
         }
@@ -1684,6 +1716,7 @@ impl Gateway {
             error: Some(message.to_string()),
             attention: Attention::Badge,
             native: None,
+            facets: action.facets_summary(),
         });
         Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
     }
@@ -1696,7 +1729,7 @@ impl Gateway {
         tool: String,
         arguments: serde_json::Value,
         started: Instant,
-        annotations: Option<&ToolAnnotations>,
+        action: &policy::Action,
         reason: HoldReason,
     ) -> std::result::Result<CallToolResult, McpError> {
         let (hold, on_timeout) = {
@@ -1715,6 +1748,8 @@ impl Gateway {
             server_name: server.name.clone(),
             tool: tool.clone(),
             arguments: arguments.clone(),
+            facets: action.facets_summary(),
+            offers: action.offers(),
             requested_at: now,
             deadline: Some(now + chrono::Duration::from_std(hold).unwrap_or_default()),
             posture: agent.posture,
@@ -1735,9 +1770,9 @@ impl Gateway {
                     &tool,
                     arguments,
                     started,
-                    annotations,
+                    action,
                     on_timeout,
-                    AuditSource::Timeout,
+                    AuditSource::from(&Decider::Timeout),
                     TIMEOUT_MESSAGE,
                 )
                 .await
@@ -1752,11 +1787,16 @@ impl Gateway {
                         server_id: server.id,
                         tool,
                         verdict: AuditVerdict::Denied,
-                        source: AuditSource::Human,
+                        source: if reason == HoldReason::RateLimit {
+                            AuditSource::from(&Decider::Tripwire)
+                        } else {
+                            AuditSource::Human
+                        },
                         duration_ms: started.elapsed().as_millis() as u64,
                         error: Some("Denied by the user in Prism".into()),
                         attention: Attention::Silent,
                         native: None,
+                        facets: action.facets_summary(),
                     });
                     Ok(CallToolResult::error(vec![ContentBlock::text(
                         "Denied by the user in Prism",
@@ -1769,9 +1809,14 @@ impl Gateway {
                         &tool,
                         arguments,
                         started,
-                        AuditSource::Human,
+                        if reason == HoldReason::RateLimit {
+                            AuditSource::from(&Decider::Tripwire)
+                        } else {
+                            AuditSource::Human
+                        },
                         AuditVerdict::Allowed,
                         Attention::Silent,
+                        action.facets_summary(),
                     )
                     .await
                 }
@@ -1790,6 +1835,7 @@ impl Gateway {
         source: AuditSource,
         verdict: AuditVerdict,
         attention: Attention,
+        facets: Vec<String>,
     ) -> std::result::Result<CallToolResult, McpError> {
         match self.backends.call_tool(&server.id, tool, arguments).await {
             Ok(result) => {
@@ -1811,6 +1857,7 @@ impl Gateway {
                     },
                     attention,
                     native: None,
+                    facets,
                 });
                 Ok(result)
             }
@@ -1829,6 +1876,7 @@ impl Gateway {
                     error: Some(message.clone()),
                     attention,
                     native: None,
+                    facets,
                 });
                 Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
             }
@@ -2437,6 +2485,7 @@ mod retained_history_tests {
             duration_ms: 0,
             error: None,
             attention: Attention::Silent,
+            facets: Vec::new(),
             native: Some(NativeDetail {
                 host: host.into(),
                 session: None,

@@ -2127,3 +2127,32 @@ textarea.input {
 .hint.danger {
   color: var(--color-danger);
 }
+
+/* Keep condition offers within the compact approval footer. */
+.approval-secondary.with-offers {
+  display: flex;
+  gap: 2px;
+}
+.screen-footer .approval-secondary.with-offers .btn {
+  flex: 0 0 auto;
+  padding-inline: 3px;
+  font-size: var(--text-xs);
+}
+.screen-footer .approval-secondary.with-offers .condition-offer {
+  flex: 1 1 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+.call-facets {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.call-facets li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -43,6 +43,7 @@ pub enum AuditSource {
         rule_id: String,
     },
     Human,
+    Tripwire,
     /// The caller disconnected or cancelled the in-flight request.
     Cancelled,
     Timeout,
@@ -97,6 +98,8 @@ pub struct AuditEntry {
     /// Present for native actions observed through a host hook; absent for MCP calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<NativeDetail>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facets: Vec<String>,
 }
 
 /// Filters apply before pagination. Calendar days use the gateway's local timezone, exactly
@@ -474,6 +477,14 @@ fn sanitize(entry: &mut AuditEntry) {
         &mut entry.server_id,
     ] {
         *value = value.chars().take(512).collect();
+    }
+    entry.facets.truncate(4);
+    for facet in &mut entry.facets {
+        *facet = facet
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(512)
+            .collect();
     }
     if let AuditSource::Rule { rule_id } = &mut entry.source {
         *rule_id = rule_id.chars().take(512).collect();
@@ -906,6 +917,7 @@ mod tests {
             error: Some("Bearer secret-token password=hidden".into()),
             attention: Attention::Silent,
             native: None,
+            facets: Vec::new(),
         }
     }
 

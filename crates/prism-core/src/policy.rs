@@ -1,3 +1,8 @@
+mod action;
+mod condition;
+pub use action::*;
+pub use condition::{ArgCondition, CommandCondition, Condition, HostCondition, PathCondition};
+
 use chrono::{DateTime, Utc};
 
 use crate::config::{AgentConfig, Attention, Posture, Rule, RuleDecision};
@@ -44,6 +49,9 @@ impl From<&rmcp::model::ToolAnnotations> for ToolAnnotations {
 pub enum Decider {
     Rule { rule_id: String },
     Posture(Posture),
+    Tripwire,
+    DoNotDisturb,
+    Timeout,
 }
 
 /// The full result of evaluating one call: what to do, who said so, how loudly to tell the operator.
@@ -52,6 +60,8 @@ pub struct Evaluation {
     pub verdict: Verdict,
     pub decider: Decider,
     pub attention: Attention,
+    pub matched_condition: bool,
+    pub facets_summary: Vec<String>,
 }
 
 /// Rank of a matching rule. Lower is more specific.
@@ -59,7 +69,7 @@ pub struct Evaluation {
 /// agent+server+tool > agent+server > server+tool > server > agent > global
 /// An exact tool name beats a glob at the same rung.
 fn specificity(rule: &Rule) -> u8 {
-    let rung = match (
+    match (
         rule.agent_id.is_some(),
         rule.server_id.is_some(),
         rule.tool.is_some(),
@@ -73,8 +83,7 @@ fn specificity(rule: &Rule) -> u8 {
         // Not on the documented ladder; keep them less specific than server.
         (true, false, true) => 2,
         (false, false, true) => 4,
-    };
-    rung * 2 + u8::from(rule.tool_is_glob())
+    }
 }
 
 /// Deny beats Ask beats Allow when two rules tie on specificity.
@@ -91,32 +100,39 @@ pub fn glob_match(pattern: &str, name: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == name;
     }
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let (first, last) = (parts[0], parts[parts.len() - 1]);
-    if !name.starts_with(first) || !name.ends_with(last) {
-        return false;
-    }
-    if name.len() < first.len() + last.len() && parts.len() == 2 {
-        return false;
-    }
-    let mut rest = &name[first.len()..name.len() - last.len()];
-    for part in &parts[1..parts.len() - 1] {
-        match rest.find(part) {
-            Some(idx) => rest = &rest[idx + part.len()..],
-            None => return false,
-        }
-    }
-    true
-}
-
-fn matches(rule: &Rule, agent_id: &str, server_id: &str, tool_name: &str) -> bool {
-    if let Some(ref wanted) = rule.agent_id {
-        if wanted != agent_id {
+    let (pattern, name) = (pattern.as_bytes(), name.as_bytes());
+    let (mut p, mut n, mut star, mut retry) = (0, 0, None, 0);
+    while n < name.len() {
+        if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            retry = n;
+        } else if p < pattern.len() && pattern[p] == name[n] {
+            p += 1;
+            n += 1;
+        } else if let Some(previous) = star {
+            retry += 1;
+            n = retry;
+            p = previous + 1;
+        } else {
             return false;
         }
     }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+fn matches(rule: &Rule, agent_id: &str, server_id: &str, tool_name: &str) -> bool {
+    // Most rules belong to other servers; reject those before the agent/tool work.
     if let Some(ref wanted) = rule.server_id {
         if wanted != server_id {
+            return false;
+        }
+    }
+    if let Some(ref wanted) = rule.agent_id {
+        if wanted != agent_id {
             return false;
         }
     }
@@ -131,15 +147,36 @@ fn matches(rule: &Rule, agent_id: &str, server_id: &str, tool_name: &str) -> boo
 /// Find the rule that governs this call, if any. Expired rules never match.
 pub fn winning_rule<'a>(
     rules: &'a [Rule],
-    agent_id: &str,
-    server_id: &str,
-    tool_name: &str,
+    action: &Action,
     now: DateTime<Utc>,
 ) -> Option<&'a Rule> {
-    rules
-        .iter()
-        .filter(|rule| !rule.is_expired(now) && matches(rule, agent_id, server_id, tool_name))
-        .min_by_key(|rule| (specificity(rule), strictness(rule.decision)))
+    let mut winner = None;
+    let mut best = None;
+    for rule in rules {
+        if rule.is_expired(now) || !matches(rule, &action.agent_id, &action.server_id, &action.tool)
+        {
+            continue;
+        }
+        let rank = (
+            specificity(rule),
+            rule.condition.is_none(),
+            rule.tool_is_glob(),
+            strictness(rule.decision),
+        );
+        if best.is_some_and(|best| rank >= best) {
+            continue;
+        }
+        if rule
+            .condition
+            .as_ref()
+            .is_some_and(|c| !condition::condition_matches(c, action))
+        {
+            continue;
+        }
+        best = Some(rank);
+        winner = Some(rule);
+    }
+    winner
 }
 
 /// Evaluate one call. The most specific matching rule wins; with no rule, the agent's posture
@@ -147,12 +184,10 @@ pub fn winning_rule<'a>(
 pub fn evaluate(
     rules: &[Rule],
     agent: &AgentConfig,
-    server_id: &str,
-    tool_name: &str,
-    annotations: Option<&ToolAnnotations>,
+    action: &Action,
     now: DateTime<Utc>,
 ) -> Evaluation {
-    if let Some(rule) = winning_rule(rules, &agent.id, server_id, tool_name, now) {
+    if let Some(rule) = winning_rule(rules, action, now) {
         let verdict = match rule.decision {
             RuleDecision::Allow => Verdict::Allow,
             RuleDecision::Deny => Verdict::Deny,
@@ -164,13 +199,19 @@ pub fn evaluate(
                 rule_id: rule.id.clone(),
             },
             attention: rule.attention.unwrap_or(agent.attention),
+            matched_condition: rule.condition.is_some(),
+            facets_summary: action.facets_summary(),
         };
     }
 
     let verdict = match agent.posture {
         Posture::Supervised | Posture::FirstUse => Verdict::Ask,
         Posture::Guided => {
-            if annotations.is_some_and(ToolAnnotations::is_read_only) {
+            if action
+                .annotations
+                .as_ref()
+                .is_some_and(ToolAnnotations::is_read_only)
+            {
                 Verdict::Allow
             } else {
                 Verdict::Ask
@@ -182,6 +223,76 @@ pub fn evaluate(
         verdict,
         decider: Decider::Posture(agent.posture),
         attention: agent.attention,
+        matched_condition: false,
+        facets_summary: action.facets_summary(),
+    }
+}
+
+impl Evaluation {
+    pub fn apply_tripwire(&mut self, tripped: bool) {
+        if tripped && self.verdict == Verdict::Allow {
+            self.verdict = Verdict::Ask;
+            self.decider = Decider::Tripwire;
+        }
+    }
+}
+
+impl From<&Decider> for crate::audit::AuditSource {
+    fn from(decider: &Decider) -> Self {
+        match decider {
+            Decider::Rule { rule_id } => Self::Rule {
+                rule_id: rule_id.clone(),
+            },
+            Decider::Posture(posture) => Self::Posture { posture: *posture },
+            Decider::Tripwire => Self::Tripwire,
+            Decider::DoNotDisturb => Self::DoNotDisturb,
+            Decider::Timeout => Self::Timeout,
+        }
+    }
+}
+
+pub fn explain(entry: &crate::audit::AuditEntry, rules: &[Rule]) -> String {
+    use crate::audit::AuditSource;
+    match &entry.source {
+        AuditSource::Rule { rule_id } => {
+            if let Some(rule) = rules.iter().find(|r| &r.id == rule_id) {
+                let condition = rule
+                    .condition
+                    .as_ref()
+                    .and_then(|v| Condition::parse(v).ok())
+                    .map(|c| format!(" · when {}", c.clause()))
+                    .unwrap_or_default();
+                format!(
+                    "Rule: {} · {} · {}{} · {:?}",
+                    entry.agent_name,
+                    rule.server_id.as_deref().unwrap_or("any server"),
+                    rule.tool.as_deref().unwrap_or("any tool"),
+                    condition,
+                    rule.decision
+                )
+            } else {
+                format!(
+                    "Rule: {} · {} · {}",
+                    entry.agent_name, entry.server_id, entry.tool
+                )
+            }
+        }
+        AuditSource::Posture { posture } => format!(
+            "{} posture",
+            match posture {
+                Posture::FirstUse => "First-use",
+                Posture::Supervised => "Supervised",
+                Posture::Guided => "Guided",
+                Posture::Trusted => "Trusted",
+            }
+        ),
+        AuditSource::Tripwire => "Rate tripwire".into(),
+        AuditSource::DoNotDisturb => "Do not disturb".into(),
+        AuditSource::Timeout => "Nobody answered in time".into(),
+        AuditSource::Human => "You decided".into(),
+        AuditSource::Unapproved => "Agent awaiting approval".into(),
+        AuditSource::Cancelled => "Caller cancelled".into(),
+        AuditSource::Observed => "Native action observed".into(),
     }
 }
 
@@ -191,7 +302,7 @@ mod tests {
     use crate::config::{AgentStatus, RuleScope};
     use chrono::Duration;
 
-    fn agent(posture: Posture) -> AgentConfig {
+    pub(super) fn agent(posture: Posture) -> AgentConfig {
         AgentConfig {
             id: "agt".into(),
             name: "Agent".into(),
@@ -207,7 +318,7 @@ mod tests {
         }
     }
 
-    fn rule(
+    pub(super) fn rule(
         id: &str,
         agent_id: Option<&str>,
         server_id: Option<&str>,
@@ -224,23 +335,33 @@ mod tests {
             scope: RuleScope::Always,
             expires_at: None,
             condition: None,
+            condition_error: None,
             created_at: Utc::now(),
         }
+    }
+
+    fn action(annotations: Option<ToolAnnotations>) -> Action {
+        Action::from_mcp(
+            "agt",
+            "srv",
+            "tool",
+            serde_json::json!({}),
+            annotations,
+            Utc::now(),
+        )
     }
 
     fn ev(rules: &[Rule]) -> Verdict {
         evaluate(
             rules,
             &agent(Posture::Supervised),
-            "srv",
-            "tool",
-            None,
+            &action(None),
             Utc::now(),
         )
         .verdict
     }
 
-    fn read_only() -> ToolAnnotations {
+    pub(super) fn read_only() -> ToolAnnotations {
         ToolAnnotations {
             title: None,
             read_only_hint: Some(true),
@@ -258,23 +379,21 @@ mod tests {
     #[test]
     fn posture_decides_when_no_rule_matches() {
         let now = Utc::now();
-        let trusted = evaluate(&[], &agent(Posture::Trusted), "srv", "tool", None, now);
+        let trusted = evaluate(&[], &agent(Posture::Trusted), &action(None), now);
         assert_eq!(trusted.verdict, Verdict::Allow);
         assert_eq!(trusted.decider, Decider::Posture(Posture::Trusted));
 
         let guided_ro = evaluate(
             &[],
             &agent(Posture::Guided),
-            "srv",
-            "tool",
-            Some(&read_only()),
+            &action(Some(read_only())),
             now,
         );
         assert_eq!(guided_ro.verdict, Verdict::Allow);
-        let guided_unknown = evaluate(&[], &agent(Posture::Guided), "srv", "tool", None, now);
+        let guided_unknown = evaluate(&[], &agent(Posture::Guided), &action(None), now);
         assert_eq!(guided_unknown.verdict, Verdict::Ask);
 
-        let first_use = evaluate(&[], &agent(Posture::FirstUse), "srv", "tool", None, now);
+        let first_use = evaluate(&[], &agent(Posture::FirstUse), &action(None), now);
         assert_eq!(first_use.verdict, Verdict::Ask);
     }
 
@@ -282,14 +401,7 @@ mod tests {
     fn rule_beats_posture_and_carries_attention() {
         let mut r = rule("r", Some("agt"), None, None, RuleDecision::Deny);
         r.attention = Some(Attention::Open);
-        let out = evaluate(
-            &[r],
-            &agent(Posture::Trusted),
-            "srv",
-            "tool",
-            None,
-            Utc::now(),
-        );
+        let out = evaluate(&[r], &agent(Posture::Trusted), &action(None), Utc::now());
         assert_eq!(out.verdict, Verdict::Deny);
         assert_eq!(out.attention, Attention::Open);
         assert_eq!(
@@ -305,9 +417,9 @@ mod tests {
         let mut a = agent(Posture::Trusted);
         a.attention = Attention::Notify;
         let r = rule("r", Some("agt"), None, None, RuleDecision::Allow);
-        let out = evaluate(&[r], &a, "srv", "tool", None, Utc::now());
+        let out = evaluate(&[r], &a, &action(None), Utc::now());
         assert_eq!(out.attention, Attention::Notify);
-        let out = evaluate(&[], &a, "srv", "tool", None, Utc::now());
+        let out = evaluate(&[], &a, &action(None), Utc::now());
         assert_eq!(out.attention, Attention::Notify);
     }
 
@@ -468,3 +580,7 @@ mod tests {
         assert_eq!(ev(&rules), Verdict::Ask);
     }
 }
+
+#[cfg(test)]
+#[path = "policy/tests.rs"]
+mod action_tests;

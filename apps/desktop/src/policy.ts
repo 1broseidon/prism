@@ -28,7 +28,7 @@ export function postureLabel(p: Posture): string {
 
 /** The rule that sits exactly on this agent, server, and tool. `null` fields must match `null`. */
 export function findRule(list: Rule[], agentId: string | null, serverId: string | null, tool: string | null): Rule | undefined {
-  return list.find((r) => r.agent_id === agentId && r.server_id === serverId && r.tool === tool);
+  return list.find((r) => r.agent_id === agentId && r.server_id === serverId && r.tool === tool && r.condition == null);
 }
 
 /** Set or clear the rule on one triple. Clearing means "inherit from the level above". */

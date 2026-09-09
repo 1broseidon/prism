@@ -256,6 +256,239 @@ async fn downstream(port: u16, bearer: &str, modern: bool) -> McpClient {
 }
 
 #[tokio::test]
+async fn conditioned_mcp_calls_hold_outside_prefix_and_audit_facets() {
+    use crate::{
+        AuditSource, AuditVerdict, Decision, DecisionScope, DecisionTarget, DecisionVerdict,
+        Posture,
+    };
+    use serde_json::json;
+    let fixture = Fixture::new(ProtocolVersion::V_2026_07_28, true).await;
+    *fixture.server.tools.write().await = vec![tool("write_file")];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prism.json");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let config = PrismConfig {
+        listen_port: port,
+        servers: vec![fixture.config.clone()],
+        rules: vec![
+            serde_json::from_value(json!({
+                "id":"under-repo", "agent_id":null,"server_id":"fixture","tool":"write_file",
+                "decision":"allow","scope":"always","created_at":chrono::Utc::now(),
+                "condition":{"path":{"under":"/repo"}}
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "id":"inert", "agent_id":null,"server_id":"fixture","tool":"write_file",
+                "decision":"allow","scope":"always","created_at":chrono::Utc::now(),
+                "condition":{"not":{"unknown":true}}
+            }))
+            .unwrap(),
+        ],
+        ..Default::default()
+    };
+    config.save(&path).unwrap();
+    let gateway = Gateway::start_with_credentials(
+        path.clone(),
+        dir.path().join("audit.jsonl"),
+        Arc::new(MemoryStore::default()),
+    )
+    .await
+    .unwrap();
+    let token = gateway
+        .create_manual_agent("condition-client")
+        .await
+        .unwrap();
+    gateway
+        .set_agent_policy(&token.agent_id, Some(Posture::Supervised), None)
+        .await
+        .unwrap();
+    eventually(async || {
+        gateway
+            .handle_list_tools(Some(&token.agent_id))
+            .await
+            .tools
+            .len()
+            == 1
+    })
+    .await;
+    assert!(gateway
+        .rules()
+        .await
+        .iter()
+        .find(|r| r.id == "inert")
+        .unwrap()
+        .condition_error
+        .is_some());
+    let request = |path: &str| {
+        let mut request = CallToolRequestParams::new("fixture__write_file");
+        request.arguments = Some(
+            json!({"path":path,"url":"https://user:secret@api.github.com/secret?token=hidden"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        request
+    };
+    let allowed = gateway
+        .handle_call_tool(request("/repo/sub/../file"), Some(&token.agent_id))
+        .await
+        .unwrap();
+    assert!(!allowed.is_error.unwrap_or(false));
+    assert_eq!(fixture.server.calls.load(Ordering::SeqCst), 1);
+    let waiting_gateway = gateway.clone();
+    let id = token.agent_id.clone();
+    let outside = request("/elsewhere/sub/file");
+    let held =
+        tokio::spawn(async move { waiting_gateway.handle_call_tool(outside, Some(&id)).await });
+    eventually(async || !gateway.pending().await.is_empty()).await;
+    assert!(!held.is_finished());
+    assert_eq!(fixture.server.calls.load(Ordering::SeqCst), 1);
+    let pending = gateway.pending().await.remove(0);
+    assert_eq!(
+        pending.facets,
+        [
+            "path: /elsewhere/sub/file (write)",
+            "host: api.github.com (public)"
+        ]
+    );
+    assert_eq!(pending.offers.len(), 2);
+    assert_eq!(pending.offers[0].value, "/elsewhere/sub");
+    // Invalid decisions must leave the held call pending, never grant it.
+    let invalid = Decision {
+        verdict: DecisionVerdict::Allow,
+        scope: DecisionScope::Always,
+        target: DecisionTarget::Tool,
+        condition: Some(json!({"oops":true})),
+    };
+    assert!(gateway.decide(&pending.id, invalid).await.is_err());
+    assert_eq!(gateway.pending().await.len(), 1);
+    let condition = json!({"path":{"under":pending.offers[0].value}});
+    gateway
+        .decide(
+            &pending.id,
+            Decision {
+                verdict: DecisionVerdict::Allow,
+                scope: DecisionScope::Always,
+                target: DecisionTarget::Server,
+                condition: Some(condition.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!held.await.unwrap().unwrap().is_error.unwrap_or(false));
+    let remembered = gateway
+        .rules()
+        .await
+        .into_iter()
+        .find(|r| r.condition.as_ref() == Some(&condition))
+        .unwrap();
+    assert_eq!(remembered.tool.as_deref(), Some("write_file"));
+    assert_eq!(
+        remembered.agent_id.as_deref(),
+        Some(token.agent_id.as_str())
+    );
+    assert_eq!(gateway.rules().await.len(), 3);
+    assert!(PrismConfig::load(&path)
+        .unwrap()
+        .rules
+        .iter()
+        .any(|r| r.condition.as_ref() == Some(&condition)));
+    assert!(!gateway
+        .handle_call_tool(request("/elsewhere/sub/next"), Some(&token.agent_id))
+        .await
+        .unwrap()
+        .is_error
+        .unwrap_or(false));
+    let entries = gateway.audit(10).await;
+    assert_eq!(entries.len(), 3);
+    assert!(entries
+        .iter()
+        .all(|e| e.verdict == AuditVerdict::Allowed && e.facets.len() == 2));
+    assert!(entries.iter().any(|e| e.source
+        == AuditSource::Rule {
+            rule_id: "under-repo".into()
+        }));
+    assert!(entries.iter().any(|e| e.source == AuditSource::Human));
+    assert!(entries.iter().any(|e| e.source
+        == AuditSource::Rule {
+            rule_id: remembered.id.clone()
+        }));
+    let serialized = serde_json::to_string(&entries).unwrap();
+    for secret in ["secret", "hidden", "user:"] {
+        assert!(!serialized.contains(secret));
+    }
+
+    // Modifiers keep facets and take attribution from the rule/posture they override.
+    let mut settings = gateway.settings().await;
+    settings.do_not_disturb = true;
+    gateway.set_settings(settings.clone()).await.unwrap();
+    assert!(gateway
+        .handle_call_tool(request("/other/file"), Some(&token.agent_id))
+        .await
+        .unwrap()
+        .is_error
+        .unwrap_or(false));
+    assert!(gateway.pending().await.is_empty());
+    settings.do_not_disturb = false;
+    settings.hold_timeout_secs = 10;
+    gateway.set_settings(settings.clone()).await.unwrap();
+    assert!(gateway
+        .handle_call_tool(request("/other/file"), Some(&token.agent_id))
+        .await
+        .unwrap()
+        .is_error
+        .unwrap_or(false));
+    settings.rate_limit_per_minute = Some(1);
+    gateway.set_settings(settings).await.unwrap();
+    gateway
+        .set_agent_policy(&token.agent_id, Some(Posture::Trusted), None)
+        .await
+        .unwrap();
+    gateway
+        .handle_call_tool(request("/hot/first"), Some(&token.agent_id))
+        .await
+        .unwrap();
+    let waiting_gateway = gateway.clone();
+    let id = token.agent_id.clone();
+    let hot = request("/hot/second");
+    let held = tokio::spawn(async move { waiting_gateway.handle_call_tool(hot, Some(&id)).await });
+    eventually(async || !gateway.pending().await.is_empty()).await;
+    let pending = gateway.pending().await.remove(0);
+    assert_eq!(pending.reason, crate::HoldReason::RateLimit);
+    gateway
+        .decide(
+            &pending.id,
+            Decision {
+                verdict: DecisionVerdict::Deny,
+                scope: DecisionScope::Once,
+                target: DecisionTarget::Tool,
+                condition: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(held.await.unwrap().unwrap().is_error.unwrap_or(false));
+    let entries = gateway.audit(20).await;
+    for source in [
+        AuditSource::DoNotDisturb,
+        AuditSource::Timeout,
+        AuditSource::Tripwire,
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.source == source && e.facets.len() == 2),
+            "{source:?}"
+        );
+    }
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn upstream_changes_reach_legacy_and_modern_agents_and_exposure_is_enforced() {
     for modern_upstream in [false, true] {
         let version = if modern_upstream {

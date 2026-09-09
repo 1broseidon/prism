@@ -263,9 +263,11 @@ pub struct Rule {
     /// Time-boxed grants expire on their own and are pruned when seen.
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
-    /// Reserved for argument-level conditions (path prefixes, host allowlists). Unused today.
+    /// Argument-level conditions, retained as JSON even when invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<serde_json::Value>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub condition_error: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -710,6 +712,7 @@ mod tests {
                     scope: RuleScope::Always,
                     expires_at: None,
                     condition: None,
+                    condition_error: None,
                     created_at: created,
                 },
                 Rule {
@@ -722,6 +725,7 @@ mod tests {
                     scope: RuleScope::Session,
                     expires_at: None,
                     condition: None,
+                    condition_error: None,
                     created_at: created,
                 },
                 Rule {
@@ -734,6 +738,7 @@ mod tests {
                     scope: RuleScope::Always,
                     expires_at: Some(created - chrono::Duration::minutes(1)),
                     condition: None,
+                    condition_error: None,
                     created_at: created,
                 },
             ],
@@ -865,6 +870,7 @@ mod agent_tests {
             scope: RuleScope::Always,
             expires_at: None,
             condition: None,
+            condition_error: None,
             created_at: Utc::now(),
         });
 

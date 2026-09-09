@@ -13,14 +13,14 @@ mod http_security;
 mod listener;
 pub mod native;
 mod oauth;
-mod policy;
+pub mod policy;
 mod remote;
 mod shell_path;
 mod storage;
 
 pub use approval::{
     ApprovalRegistry, Decision, DecisionScope, DecisionTarget, DecisionVerdict, HoldOutcome,
-    HoldReason, PendingCall, DEFAULT_HOLD_TIMEOUT, TIMEOUT_MESSAGE,
+    HoldReason, Offer, OfferKind, PendingCall, DEFAULT_HOLD_TIMEOUT, TIMEOUT_MESSAGE,
 };
 pub use audit::{
     AuditEntry, AuditExport, AuditLog, AuditPage, AuditQuery, AuditSource, AuditVerdict,

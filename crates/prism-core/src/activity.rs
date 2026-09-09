@@ -58,8 +58,10 @@ pub fn needs_attention(entry: &AuditEntry) -> bool {
     if let Some(native) = &entry.native {
         return native.would_hold.is_some();
     }
-    matches!(entry.source, AuditSource::Human | AuditSource::Timeout)
-        || matches!(entry.verdict, AuditVerdict::Denied)
+    matches!(
+        entry.source,
+        AuditSource::Human | AuditSource::Timeout | AuditSource::Tripwire
+    ) || matches!(entry.verdict, AuditVerdict::Denied)
 }
 
 /// Sum the entries that fall in the last `days` local calendar days, today included.
@@ -124,7 +126,10 @@ pub(crate) fn summarize_with_exclusions<'a>(
                 AuditVerdict::Timeout => {}
                 AuditVerdict::Error => mcp.errors += 1,
             }
-            if matches!(entry.source, AuditSource::Human | AuditSource::Timeout) {
+            if matches!(
+                entry.source,
+                AuditSource::Human | AuditSource::Timeout | AuditSource::Tripwire
+            ) {
                 mcp.asked += 1;
             }
         }

@@ -39,10 +39,11 @@ const agents: AgentConfig[] = [
   { id: "a4", name: "some-random-script", client_name: "some-random-script", client_version: null, status: "denied", created_at: iso(3600 * 50), decided_at: iso(3600 * 50), posture: "supervised", attention: "silent", client_id: null, connected: false, tokens: [], clients: [] },
 ];
 let pending: PendingCall[] = [
-  { id: "p1", agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", server_name: "filesystem", tool: "write_file", arguments: { path: "/home/george/Projects/prism/README.md", content: "# Prism\n\nA local MCP gateway…" }, requested_at: iso(23), deadline: iso(-97), posture: "guided", reason: "policy" },
+  { id: "p1", agent_id: "host:claude-code", agent_name: "Claude Code", server_id: "s1", server_name: "filesystem", tool: "write_file", arguments: { path: "/home/george/Projects/prism/README.md", content: "# Prism\n\nA local MCP gateway…" }, requested_at: iso(23), deadline: iso(-97), posture: "guided", reason: "policy", facets: ["path: ~/Projects/prism/README.md (write)"], offers: [{ kind: "path_under", value: "/home/george/Projects/prism", label: "Under ~/Projects/prism" }] },
 ];
 let rules: Rule[] = [
   { id: "r1", agent_id: "host:claude-code", server_id: "s1", tool: "read_file", decision: "allow", attention: null, scope: "always", expires_at: null, created_at: iso(3600 * 5) },
+  { id: "r9", agent_id: "host:claude-code", server_id: "s1", tool: "write_file", decision: "allow", attention: null, scope: "always", expires_at: null, created_at: iso(60 * 40), condition: { path: { under: "/home/george/Projects/prism" } } },
   { id: "r2", agent_id: "host:cursor", server_id: "s2", tool: "create_issue", decision: "allow", attention: null, scope: "session", expires_at: null, created_at: iso(300) },
   { id: "r3", agent_id: null, server_id: "s3", tool: null, decision: "deny", attention: "notify", scope: "always", expires_at: null, created_at: iso(3600 * 30) },
   { id: "r4", agent_id: "host:claude-code", server_id: "s2", tool: null, decision: "allow", attention: null, scope: "always", expires_at: iso(-60 * 24), created_at: iso(360) },
@@ -93,7 +94,7 @@ for (const h of HOSTS.slice(2)) {
 }
 const nat = (host: string, subject: string, extra: Partial<import("./types").NativeDetail> = {}) => ({ host, subject, cwd: "/home/george/Projects/prism", session: "s-1", via_prism: false, ...extra });
 /** Mirrors prism_core::activity::needs_attention. */
-const needsAttention = (e: AuditEntry) => (e.native ? !!e.native.would_hold : e.source.kind === "human" || e.source.kind === "timeout" || e.verdict === "denied");
+const needsAttention = (e: AuditEntry) => (e.native ? !!e.native.would_hold : e.source.kind === "tripwire" || e.source.kind === "human" || e.source.kind === "timeout" || e.verdict === "denied");
 function localDay(at: string) {
   const d = new Date(at);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -134,7 +135,7 @@ function activitySummary(): ActivitySummary {
   const mcp = seen.filter(e => !e.native);
   return {window, days:7, total:seen.length, attention:seen.filter(needsAttention).length,
     mcp:{allowed:mcp.filter(e=>e.verdict==="allowed").length, denied:mcp.filter(e=>e.verdict==="denied").length,
-      asked:mcp.filter(e=>["human","timeout"].includes(e.source.kind)).length, errors:mcp.filter(e=>e.verdict==="error").length},
+      asked:mcp.filter(e=>["human","timeout","tripwire"].includes(e.source.kind)).length, errors:mcp.filter(e=>e.verdict==="error").length},
     agents:[...byAgent.values()].sort((a,b)=>b.total-a.total), daily};
 }
 
@@ -245,11 +246,11 @@ export const mock = {
   decide: (a: { id: string; decision: Decision }) => {
     const call = pending.find((p) => p.id === a.id);
     pending = pending.filter((p) => p.id !== a.id);
-    if (call) audit = [{ id: `e${Date.now()}`, at: iso(0), agent_id: call.agent_id, agent_name: call.agent_name, server_id: call.server_id, tool: call.tool, verdict: a.decision.verdict === "allow" ? "allowed" : "denied", source: { kind: "human" }, duration_ms: 400, error: null, attention: "silent" }, ...audit];
+    if (call) audit = [{ id: `e${Date.now()}`, at: iso(0), agent_id: call.agent_id, agent_name: call.agent_name, server_id: call.server_id, tool: call.tool, facets: call.facets, verdict: a.decision.verdict === "allow" ? "allowed" : "denied", source: { kind: "human" }, duration_ms: 400, error: null, attention: "silent" }, ...audit];
     if (call && a.decision.scope !== "once") {
-      const target = a.decision.target ?? "tool";
+      const target = a.decision.condition ? "tool" : a.decision.target ?? "tool";
       const minutes = typeof a.decision.scope === "object" ? a.decision.scope.for.minutes : null;
-      rules = [...rules, { id: `r${Date.now()}`, agent_id: call.agent_id, server_id: target === "agent" ? null : call.server_id, tool: target === "tool" ? call.tool : null, decision: a.decision.verdict, attention: null, scope: a.decision.scope === "session" ? "session" : "always", expires_at: minutes ? iso(-60 * minutes) : null, created_at: iso(0) }];
+      rules = [...rules, { id: `r${Date.now()}`, agent_id: call.agent_id, server_id: target === "agent" ? null : call.server_id, tool: target === "tool" ? call.tool : null, condition: a.decision.condition, decision: a.decision.verdict, attention: null, scope: a.decision.scope === "session" ? "session" : "always", expires_at: minutes ? iso(-60 * minutes) : null, created_at: iso(0) }];
     }
     return delay(undefined);
   },
@@ -257,7 +258,7 @@ export const mock = {
   delete_rule: (a: { ruleId: string }) => { rules = rules.filter((r) => r.id !== a.ruleId); return delay(undefined); },
   add_rule: (a: { rule: NewRule }) => {
     const n = a.rule;
-    rules = rules.filter((r) => !(r.agent_id === n.agent_id && r.server_id === n.server_id && r.tool === n.tool));
+    rules = rules.filter((r) => !(r.agent_id === n.agent_id && r.server_id === n.server_id && r.tool === n.tool && r.condition == null));
     const rule: Rule = { id: `r${Date.now()}`, agent_id: n.agent_id, server_id: n.server_id, tool: n.tool, decision: n.decision, attention: n.attention ?? null, scope: n.scope ?? "always", expires_at: n.minutes ? iso(-60 * n.minutes) : null, created_at: iso(0) };
     rules = [...rules, rule];
     return delay(rule);

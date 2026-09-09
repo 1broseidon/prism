@@ -144,6 +144,14 @@ export interface PendingSignIn {
   new_client: boolean;
 }
 
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export interface Offer {
+  kind: "path_under" | "host";
+  value: string;
+  label: string;
+}
+
 export interface PendingCall {
   id: string;
   agent_id: string;
@@ -152,6 +160,8 @@ export interface PendingCall {
   server_name: string;
   tool: string;
   arguments: unknown;
+  facets?: string[];
+  offers?: Offer[];
   requested_at: string;
   /** When the hold times out. */
   deadline: string | null;
@@ -166,6 +176,7 @@ export interface Decision {
   scope: DecisionScope;
   /** How wide the remembered rule reaches. Defaults to this tool. */
   target?: "tool" | "server" | "agent";
+  condition?: JsonValue;
 }
 
 export type RuleDecision = "allow" | "deny" | "ask";
@@ -182,6 +193,8 @@ export interface Rule {
   scope: "session" | "always";
   expires_at: string | null;
   created_at: string;
+  condition?: JsonValue;
+  condition_error?: string | null;
 }
 
 export interface NewRule {
@@ -205,6 +218,7 @@ export interface AuditEntry {
   source:
     | { kind: "rule"; rule_id: string }
     | { kind: "human" }
+    | { kind: "tripwire" }
     | { kind: "timeout" }
     | { kind: "unapproved" }
     | { kind: "posture"; posture: Posture }
@@ -216,6 +230,7 @@ export interface AuditEntry {
   attention: Attention;
   /** Present for a native action seen through a host hook. */
   native?: NativeDetail | null;
+  facets?: string[];
 }
 
 /** What the record keeps about a native action. `subject` is one redacted line, never the raw input. */

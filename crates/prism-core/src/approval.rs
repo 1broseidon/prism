@@ -36,6 +36,10 @@ pub struct PendingCall {
     pub server_name: String,
     pub tool: String,
     pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub facets: Vec<String>,
+    #[serde(default)]
+    pub offers: Vec<Offer>,
     pub requested_at: DateTime<Utc>,
     /// When the hold times out; the panel counts down to this.
     #[serde(default)]
@@ -74,13 +78,29 @@ pub enum DecisionTarget {
     Agent,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OfferKind {
+    PathUnder,
+    Host,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Offer {
+    pub kind: OfferKind,
+    pub value: String,
+    pub label: String,
+}
+
 /// Human decision for a pending call.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Decision {
     pub verdict: DecisionVerdict,
     pub scope: DecisionScope,
     #[serde(default)]
     pub target: DecisionTarget,
+    #[serde(default)]
+    pub condition: Option<serde_json::Value>,
 }
 
 /// Result of waiting on a held call.
@@ -197,6 +217,8 @@ mod tests {
             server_name: "files".into(),
             tool: "read".into(),
             arguments: serde_json::json!({"path": "/tmp"}),
+            facets: Vec::new(),
+            offers: Vec::new(),
             requested_at: Utc::now(),
             deadline: None,
             posture: Posture::default(),
@@ -216,8 +238,12 @@ mod tests {
             verdict: DecisionVerdict::Allow,
             scope: DecisionScope::Once,
             target: DecisionTarget::Tool,
+            condition: None,
         };
-        registry.decide("p1", decision).await.expect("decide");
+        registry
+            .decide("p1", decision.clone())
+            .await
+            .expect("decide");
         let outcome = handle.await.expect("join");
         assert_eq!(outcome, HoldOutcome::Decided(decision));
         assert!(registry.list().await.is_empty());
@@ -236,6 +262,7 @@ mod tests {
                     verdict: DecisionVerdict::Allow,
                     scope: DecisionScope::Once,
                     target: DecisionTarget::Tool,
+                    condition: None,
                 },
             )
             .await;
@@ -252,6 +279,7 @@ mod tests {
                     verdict: DecisionVerdict::Deny,
                     scope: DecisionScope::Once,
                     target: DecisionTarget::Tool,
+                    condition: None,
                 },
             )
             .await

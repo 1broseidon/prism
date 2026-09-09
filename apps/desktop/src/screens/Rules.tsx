@@ -1,3 +1,4 @@
+import { conditionClause } from "../condition-display";
 import * as api from "../api";
 import { PolicySection } from "./Policy";
 import { agents, errorMessage, rules, servers } from "../state";
@@ -50,6 +51,7 @@ export function RulesScreen() {
                   <div class="title">
                     <Chip tone={decisionTone(rule)}>{sentence(rule.decision)}</Chip>
                     {scopeChip(rule)}
+                    {rule.condition_error ? <Chip tone="danger">Inert</Chip> : null}
                     {rule.attention ? <Chip tone="accent">{sentence(rule.attention)}</Chip> : null}
                   </div>
                   <div class="side">
@@ -60,6 +62,7 @@ export function RulesScreen() {
                   <div class="sub truncate">
                     {nameOf(agents.value, rule.agent_id, "Removed agent")} · {nameOf(servers.value, rule.server_id)} · {rule.tool ?? "any tool"} · {relative(rule.created_at)}
                   </div>
+                  {rule.condition != null ? <div class="sub truncate">{conditionClause(rule.condition)}</div> : null}
                 </div>
               ))}
               <ShowMore shown={rows.length} total={total} size={REVEAL} onMore={more} />

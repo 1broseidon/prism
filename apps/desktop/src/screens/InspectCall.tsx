@@ -34,6 +34,7 @@ export function InspectCallScreen({ callId }: { callId: string }) {
           <div class="muted small">
             {call.agent_name} → <code>{call.tool}</code> on {call.server_name} · {mmss(callSecondsLeft(call))} left
           </div>
+          {call.facets?.length ? <ul class="call-facets">{call.facets.map((facet, i) => <li key={i}>{facet}</li>)}</ul> : null}
           <pre class="code full">{JSON.stringify(call.arguments, null, 2)}</pre>
         </>
       ) : <div class="muted">This request is no longer waiting.</div>}
