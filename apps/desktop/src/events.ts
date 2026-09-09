@@ -174,6 +174,9 @@ export async function subscribeEvents(): Promise<() => void> {
         status.value = await api.getStatus();
         loadNativeStatus();
         break;
+      case "listener_changed":
+        status.value = await api.getStatus();
+        break;
       default:
         break;
     }

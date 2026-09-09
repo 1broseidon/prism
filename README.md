@@ -58,7 +58,7 @@ pnpm tauri build          # bundles land in target/release/bundle
 
 Prism starts in the tray and stays there. Click the icon on macOS and Windows, or pick **Open Prism** from the menu on Linux. `Ctrl+Alt+P` toggles the panel from anywhere; set `panel_shortcut` in `prism.json` to change it (`"Super+Shift+P"`, say) or to `""` to turn it off.
 
-The gateway listens on `127.0.0.1:9086`. Change it with `listen_port` in `prism.json`, which is written on first launch. After restarting, repair known-harness setup or update other clients’ URLs:
+The gateway listens on `127.0.0.1:9086`, this machine only. **Settings → Network → Reachable from** can open it to the local network, which is described under *What Prism protects*. Change the port under **Settings → Network**; the listener moves at once, without a restart, and every connected agent then needs the new address (repair known-harness setup from the Agents tab, or update other clients’ URLs). If the port is already taken when Prism starts, the panel says so and offers **Retry**. Prism never moves off your port on its own: a free port is suggested, and choosing it is up to you.
 
 | OS | Configuration | Audit log |
 | --- | --- | --- |
@@ -176,7 +176,9 @@ Agent, tool, timestamp, verdict and what decided it (you, a rule, the posture, d
 
 ## What Prism protects, and what it does not
 
-Everything binds to loopback. Every request must carry a loopback `Host`, and MCP and OAuth POSTs reject foreign or `null` browser origins, so a web page cannot drive the gateway from a tab. Registration is open to anything on the machine but grants nothing on its own. Pending sign-ins are limited (one per agent, sixteen overall, ten-minute expiry), request bodies are capped, and the OAuth routes are rate limited with `429` and `Retry-After`.
+By default everything binds to loopback. Every request must carry a loopback `Host`, and MCP and OAuth POSTs reject foreign or `null` browser origins, so a web page cannot drive the gateway from a tab.
+
+**Reachable from: Local network** (Settings → Network) binds every interface instead, so agents on other machines can use the same server list and approvals. The Host check then accepts IP-literal hosts as well, still never names, so a rebinding page still fails; the OAuth issuer follows the address the client dialed, so local agents keep `127.0.0.1` and remote ones use the machine's address, which the Connect screen shows. What changes is the wire: tokens and tool traffic cross your network as plain HTTP, readable by anything on it, and anything on it can start a sign-in that you would then be asked to approve. Approval never leaves this machine. Use it on a network you trust, or put a TLS proxy or tunnel in front of the port; TLS in Prism itself is planned. Registration is open to anything on the machine but grants nothing on its own. Pending sign-ins are limited (one per agent, sixteen overall, ten-minute expiry), request bodies are capped, and the OAuth routes are rate limited with `429` and `Retry-After`.
 
 Prism does not sandbox the servers it launches. A server necessarily receives its own credentials, and any process running as your user can read what your user can read. The boundary Prism draws is between *agents* and *tools*: which agent may call what, when, and with your say-so.
 

@@ -3,7 +3,7 @@ import { signal } from "@preact/signals";
 import { useEffect, useState } from "preact/hooks";
 import * as api from "../api";
 import { errorMessage, push, status, update, updateProgress } from "../state";
-import type { PanelAnchor, Settings, UpdateStatus } from "../types";
+import type { ListenAddress, ListenerState, PanelAnchor, Settings, UpdateStatus } from "../types";
 import { Button, HubRow, Label, Screen, Segmented, StatusText, Switch, describeError } from "../ui";
 import { native } from "../state";
 import { loadNativeStatus } from "../events";
@@ -199,6 +199,152 @@ function NativeSection() {
   );
 }
 
+/** One line on what holds the port. A second Prism is the common case: a dev build next to the installed one. */
+function holderText(state: Extract<ListenerState, { kind: "port_in_use" }>): string {
+  return state.holder === "prism" ? "Another Prism is using it." : "Another program is using it.";
+}
+
+/** Shown above every root tab while agents cannot connect. Retry keeps the port; switching is
+ * offered second, because every connected agent dials the port that is configured now. */
+export function ListenerNotice({ state }: { state: ListenerState }) {
+  const [busy, setBusy] = useState(false);
+  if (state.kind === "listening") return null;
+  const retry = async () => {
+    setBusy(true);
+    try {
+      await api.retryListener();
+      status.value = await api.getStatus();
+    } catch (err) {
+      errorMessage.value = describeError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const title =
+    state.kind === "port_in_use" ? `Port ${state.port} is in use.` :
+    state.kind === "failed" ? `Port ${state.port} could not be opened.` :
+    "The gateway is stopped.";
+  const detail =
+    state.kind === "port_in_use" ? holderText(state) :
+    state.kind === "failed" ? state.error :
+    "Agents cannot connect.";
+  return (
+    <div class="listener-notice" role="alert">
+      <div>
+        <div class="listener-title">{title}</div>
+        <div class="hint">{detail}</div>
+      </div>
+      {state.kind === "stopped" ? null : (
+        <div class="actions">
+          <Button variant="primary" busy={busy} onClick={() => void retry()}>Retry</Button>
+          <Button variant="quiet" onClick={() => push({ kind: "settings" })}>Use another port</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The port agents dial. Prism never moves off it on its own: a clash offers a free port, the operator decides. */
+function NetworkSection() {
+  const st = status.value;
+  const [draft, setDraft] = useState<string | null>(null);
+  const [suggested, setSuggested] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const clash = st?.listener.kind === "port_in_use" || st?.listener.kind === "failed";
+
+  useEffect(() => {
+    if (!clash) { setSuggested(null); return; }
+    api.suggestPort().then(setSuggested).catch(() => setSuggested(null));
+  }, [clash, st?.listen_port]);
+
+  const reach = async (address: ListenAddress) => {
+    if (address === st?.listen_address) return;
+    setBusy(true);
+    try {
+      await api.setListenAddress(address);
+      status.value = await api.getStatus();
+    } catch (err) {
+      errorMessage.value = describeError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const move = async (port: number) => {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      errorMessage.value = "Choose a port between 1 and 65535.";
+      setDraft(null);
+      return;
+    }
+    if (port === st?.listen_port && st?.listening) { setDraft(null); return; }
+    setBusy(true);
+    try {
+      await api.setListenPort(port);
+      status.value = await api.getStatus();
+      setDraft(null);
+    } catch (err) {
+      errorMessage.value = describeError(err);
+      setDraft(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section class="section">
+      <Label right={st ? <StatusText tone={st.listening ? "ok" : "danger"}>{st.listening ? "Listening" : clash ? "Port in use" : "Stopped"}</StatusText> : null}>Network</Label>
+      <div class="list">
+        <label class="setting">
+          <div>
+            <div class="setting-title">Port</div>
+            <div class="hint">
+              {clash && st?.listener.kind === "port_in_use"
+                ? holderText(st.listener)
+                : "Changing it means updating every agent."}
+            </div>
+          </div>
+          <span class="num">
+            <input
+              class="input mono"
+              type="number"
+              min={1}
+              max={65535}
+              aria-label="Listen port"
+              disabled={busy}
+              value={draft ?? st?.listen_port ?? ""}
+              onInput={(e) => setDraft((e.currentTarget as HTMLInputElement).value)}
+              onChange={(e) => void move(Number.parseInt((e.currentTarget as HTMLInputElement).value, 10))}
+            />
+          </span>
+        </label>
+      </div>
+      <div class="reach">
+        <Segmented
+          label="Reachable from"
+          value={st?.listen_address ?? "loopback"}
+          options={[
+            { value: "loopback", label: "This machine" },
+            { value: "network", label: "Local network" },
+          ]}
+          onChange={(address) => void reach(address)}
+        />
+        {st?.listen_address === "network" ? (
+          <p class="hint">
+            {st.network_url ? <><span class="mono">{st.network_url}</span><br /></> : <>No route out; nothing can reach it.<br /></>}
+            Plain HTTP: anything on the network can read it. Approval stays here.
+          </p>
+        ) : null}
+      </div>
+      {clash ? (
+        <div class="actions secondary">
+          {suggested ? <Button variant="quiet" busy={busy} onClick={() => void move(suggested)}>Use {suggested} instead</Button> : null}
+          <Button variant="quiet" busy={busy} onClick={() => { void api.retryListener().then(async () => { status.value = await api.getStatus(); }).catch((err) => { errorMessage.value = describeError(err); }); }}>Retry {st?.listen_port}</Button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 /** The installed version, learned once from the updater for the Updates row. */
 const currentVersion = signal<string | null>(null);
 
@@ -251,6 +397,8 @@ export function SettingsScreen() {
             </label>
           </div>
         </section>
+
+        <NetworkSection />
 
         <section class="section">
           <Label>Interruptions</Label>

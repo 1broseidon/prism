@@ -111,6 +111,7 @@ static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::Once
 struct ConnectSnippetDto {
     url: String,
     mcp_json: String,
+    network_url: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -581,8 +582,13 @@ fn set_tray_icon(app: &AppHandle, pending: bool) {
     }
 }
 
+/// The panel shows this verbatim. An invalid argument is already a sentence for the operator;
+/// the other kinds keep their prefix so a backend or gateway failure reads as one.
 fn map_err(err: prism_core::Error) -> String {
-    err.to_string()
+    match err {
+        prism_core::Error::Invalid(message) => message,
+        other => other.to_string(),
+    }
 }
 
 #[tauri::command]
@@ -819,6 +825,36 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
     state.gateway.set_settings(settings).await.map_err(map_err)
 }
 
+/// Try the configured port again after a clash.
+#[tauri::command]
+async fn retry_listener(state: State<'_, AppState>) -> Result<(), String> {
+    state.gateway.retry_listener().await.map_err(map_err)
+}
+
+/// A free port near the configured one. Offered, never chosen: agents dial the configured port.
+#[tauri::command]
+async fn suggest_port(state: State<'_, AppState>) -> Result<Option<u16>, String> {
+    Ok(state.gateway.suggest_port().await)
+}
+
+#[tauri::command]
+async fn set_listen_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
+    state.gateway.set_listen_port(port).await.map_err(map_err)
+}
+
+/// Loopback only, or every interface so agents on other machines can connect.
+#[tauri::command]
+async fn set_listen_address(
+    state: State<'_, AppState>,
+    address: prism_core::ListenAddress,
+) -> Result<(), String> {
+    state
+        .gateway
+        .set_listen_address(address)
+        .await
+        .map_err(map_err)
+}
+
 #[tauri::command]
 async fn list_server_tools(
     state: State<'_, AppState>,
@@ -901,6 +937,7 @@ async fn get_connect_snippet(state: State<'_, AppState>) -> Result<ConnectSnippe
     Ok(ConnectSnippetDto {
         url: snippet.url,
         mcp_json: snippet.mcp_json,
+        network_url: snippet.network_url,
     })
 }
 
@@ -1640,6 +1677,10 @@ pub fn run() {
             set_agent_policy,
             get_settings,
             set_settings,
+            retry_listener,
+            suggest_port,
+            set_listen_port,
+            set_listen_address,
             list_server_tools,
             set_tool_exposed,
             list_audit,

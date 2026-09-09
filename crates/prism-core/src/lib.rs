@@ -10,6 +10,7 @@ mod error;
 mod events;
 mod gateway;
 mod http_security;
+mod listener;
 pub mod native;
 mod oauth;
 mod policy;
@@ -27,13 +28,14 @@ pub use audit::{
 };
 pub use backend::{BackendStatus, ServerView};
 pub use config::{
-    AgentConfig, AgentStatus, Attention, HttpAuth, PanelAnchor, Posture, PrismConfig, Rule,
-    RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
+    AgentConfig, AgentStatus, Attention, HttpAuth, ListenAddress, PanelAnchor, Posture,
+    PrismConfig, Rule, RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
 };
 pub use config::{OAuthClient, TokenKind, TokenRecord};
 pub use error::{Error, Result};
 pub use events::{EventReceiver, GatewayEvent};
 pub use gateway::{AgentView, ConnectSnippet, Gateway, GatewayStatus, NewRule, Settings, ToolInfo};
+pub use listener::{ListenerState, PortHolder};
 pub use native::{NativeStatus, ReasonCount, ShadowRule};
 pub use oauth::{
     hash_token, pkce_matches, redirect_uri_allowed, AuthenticatedAgent, AuthorizeOutcome,

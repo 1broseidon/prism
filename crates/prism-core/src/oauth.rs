@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{DefaultBodyLimit, Form, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Form, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -23,10 +23,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::config::{AgentConfig, AgentStatus, OAuthClient, TokenKind, TokenRecord};
+use crate::config::{AgentConfig, AgentStatus, ListenAddress, OAuthClient, TokenKind, TokenRecord};
 use crate::error::{Error, Result};
 use crate::events::GatewayEvent;
 use crate::gateway::Gateway;
+use crate::http_security::RequestOrigin;
 
 const ACCESS_TTL_SECS: i64 = 60 * 60;
 const REFRESH_TTL_SECS: i64 = 30 * 24 * 60 * 60;
@@ -418,11 +419,15 @@ fn with_query(uri: &str, params: &[(&str, &str)]) -> String {
     out
 }
 
-/// `issuer` is `http://127.0.0.1:PORT` with no trailing slash. Accepts that origin
-/// (with or without a slash) and the `/mcp` endpoint, which is what clients dial.
-fn resource_matches(issuer: &str, resource: &str) -> bool {
-    let got = resource.trim_end_matches('/');
-    got == issuer || got == format!("{issuer}/mcp")
+/// A resource indicator names this gateway when it is an origin the Host check would accept,
+/// with or without a slash, or that origin's `/mcp` endpoint, which is what clients dial.
+fn resource_allowed(resource: &str, port: u16, address: ListenAddress) -> bool {
+    let Some(rest) = resource.strip_prefix("http://") else {
+        return false;
+    };
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    matches!(path, "" | "mcp" | "mcp/")
+        && crate::http_security::authority_allowed(authority, port, address)
 }
 
 fn error_redirect(
@@ -442,8 +447,12 @@ fn error_redirect(
 // Gateway operations
 
 impl Gateway {
-    fn issuer(&self) -> String {
-        format!("http://127.0.0.1:{}", self.listen_port)
+    /// The issuer as seen from one request: the origin the client dialed. Metadata built
+    /// without a request (tests, the panel) uses the loopback origin.
+    fn issuer(&self, origin: Option<&RequestOrigin>) -> String {
+        origin
+            .map(|o| o.0.clone())
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}", self.listen_port()))
     }
 
     /// RFC 8707 resource indicator: the origin, with a trailing slash.
@@ -453,26 +462,32 @@ impl Gateway {
     /// path under the advertised resource. Advertising `/mcp` fails when the
     /// client treats the server as `http://127.0.0.1:PORT/` (the origin). The
     /// origin accepts both that and `…/mcp`.
-    fn resource(&self) -> String {
-        format!("{}/", self.issuer())
+    fn resource(&self, origin: Option<&RequestOrigin>) -> String {
+        format!("{}/", self.issuer(origin))
     }
 
     fn accepts_resource(&self, resource: &str) -> bool {
-        resource_matches(&self.issuer(), resource)
+        resource_allowed(resource, self.listen_port(), self.listen_address())
     }
 
-    pub fn protected_resource_metadata(&self) -> serde_json::Value {
+    pub(crate) fn protected_resource_metadata(
+        &self,
+        origin: Option<&RequestOrigin>,
+    ) -> serde_json::Value {
         serde_json::json!({
-            "resource": self.resource(),
-            "authorization_servers": [self.issuer()],
+            "resource": self.resource(origin),
+            "authorization_servers": [self.issuer(origin)],
             "bearer_methods_supported": ["header"],
             "scopes_supported": [SCOPE],
             "resource_name": "Prism",
         })
     }
 
-    pub fn authorization_server_metadata(&self) -> serde_json::Value {
-        let issuer = self.issuer();
+    pub(crate) fn authorization_server_metadata(
+        &self,
+        origin: Option<&RequestOrigin>,
+    ) -> serde_json::Value {
+        let issuer = self.issuer(origin);
         serde_json::json!({
             "issuer": issuer,
             "authorization_endpoint": format!("{issuer}/authorize"),
@@ -1254,12 +1269,13 @@ pub(crate) async fn require_bearer(
         .filter(|t| !t.is_empty())
         .map(str::to_string);
     let token_hash = presented.as_deref().map(hash_token);
+    let origin = req.extensions().get::<RequestOrigin>().cloned();
     let identity = match token_hash.as_deref() {
         Some(hash) => match gateway.authenticate_hash(hash).await {
             Some(agent_id) => agent_id,
-            None => return challenge(&gateway, Some("invalid_token")),
+            None => return challenge(&gateway, origin.as_ref(), Some("invalid_token")),
         },
-        None => return challenge(&gateway, None),
+        None => return challenge(&gateway, origin.as_ref(), None),
     };
     req.extensions_mut().insert(AuthenticatedAgent {
         agent_id: identity.clone(),
@@ -1311,8 +1327,15 @@ pub(crate) async fn require_bearer(
     response
 }
 
-fn challenge(gateway: &Gateway, error: Option<&'static str>) -> Response {
-    let metadata = format!("{}/.well-known/oauth-protected-resource", gateway.issuer());
+fn challenge(
+    gateway: &Gateway,
+    origin: Option<&RequestOrigin>,
+    error: Option<&'static str>,
+) -> Response {
+    let metadata = format!(
+        "{}/.well-known/oauth-protected-resource",
+        gateway.issuer(origin)
+    );
     let value = match error {
         Some(e) => format!("Bearer error=\"{e}\", resource_metadata=\"{metadata}\""),
         None => format!("Bearer resource_metadata=\"{metadata}\""),
@@ -1329,12 +1352,18 @@ fn challenge(gateway: &Gateway, error: Option<&'static str>) -> Response {
         .into_response()
 }
 
-async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Json<serde_json::Value> {
-    Json(gateway.protected_resource_metadata())
+async fn protected_resource(
+    State(gateway): State<Arc<Gateway>>,
+    origin: Option<Extension<RequestOrigin>>,
+) -> Json<serde_json::Value> {
+    Json(gateway.protected_resource_metadata(origin.as_deref()))
 }
 
-async fn authorization_server(State(gateway): State<Arc<Gateway>>) -> Json<serde_json::Value> {
-    Json(gateway.authorization_server_metadata())
+async fn authorization_server(
+    State(gateway): State<Arc<Gateway>>,
+    origin: Option<Extension<RequestOrigin>>,
+) -> Json<serde_json::Value> {
+    Json(gateway.authorization_server_metadata(origin.as_deref()))
 }
 
 async fn register(
@@ -2019,13 +2048,25 @@ mod tests {
 
     #[test]
     fn resource_matches_origin_or_mcp() {
-        let issuer = "http://127.0.0.1:9086";
-        assert!(resource_matches(issuer, "http://127.0.0.1:9086"));
-        assert!(resource_matches(issuer, "http://127.0.0.1:9086/"));
-        assert!(resource_matches(issuer, "http://127.0.0.1:9086/mcp"));
-        assert!(resource_matches(issuer, "http://127.0.0.1:9086/mcp/"));
-        assert!(!resource_matches(issuer, "http://127.0.0.1:9086/hooks"));
-        assert!(!resource_matches(issuer, "http://127.0.0.1:1/"));
-        assert!(!resource_matches(issuer, "http://localhost:9086/"));
+        let local = |r: &str| resource_allowed(r, 9086, ListenAddress::Loopback);
+        assert!(local("http://127.0.0.1:9086"));
+        assert!(local("http://127.0.0.1:9086/"));
+        assert!(local("http://127.0.0.1:9086/mcp"));
+        assert!(local("http://127.0.0.1:9086/mcp/"));
+        assert!(local("http://localhost:9086/"));
+        assert!(!local("http://127.0.0.1:9086/hooks"));
+        assert!(!local("http://127.0.0.1:1/"));
+        assert!(!local("https://127.0.0.1:9086/"));
+        assert!(!local("http://192.168.1.20:9086/mcp"));
+        assert!(resource_allowed(
+            "http://192.168.1.20:9086/mcp",
+            9086,
+            ListenAddress::Network
+        ));
+        assert!(!resource_allowed(
+            "http://prism.example:9086/mcp",
+            9086,
+            ListenAddress::Network
+        ));
     }
 }

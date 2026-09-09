@@ -23,6 +23,7 @@ import type {
   HookInstallResult,
   HarnessChanges,
   HttpAuth,
+  ListenAddress,
   NativeStatus,
   NewRule,
   PendingCall,
@@ -136,6 +137,26 @@ export function getSettings() {
 
 export function setSettings(settings: Settings) {
   return invoke<void>("set_settings", { settings });
+}
+
+/** Try the configured port again after a clash. */
+export function retryListener() {
+  return invoke<void>("retry_listener");
+}
+
+/** A free port near the configured one, offered when the configured one is taken. */
+export function suggestPort() {
+  return invoke<number | null>("suggest_port");
+}
+
+/** Move the listener. Agents keep their tokens but need the new address. */
+export function setListenPort(port: number) {
+  return invoke<void>("set_listen_port", { port });
+}
+
+/** Loopback only, or every interface so agents on other machines can connect. */
+export function setListenAddress(address: ListenAddress) {
+  return invoke<void>("set_listen_address", { address });
 }
 
 export function listServerTools(serverId: string) {

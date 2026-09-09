@@ -300,6 +300,9 @@ pub struct PrismConfig {
     pub rules: Vec<Rule>,
     #[serde(default = "default_listen_port")]
     pub listen_port: u16,
+    /// Where the listener binds. Loopback is this machine only; network is every interface.
+    #[serde(default)]
+    pub listen_address: ListenAddress,
     #[serde(default = "default_true")]
     pub auto_open_on_pending: bool,
     /// Where the panel opens. `auto` infers the tray edge from the monitor's work area.
@@ -352,6 +355,7 @@ impl Default for PrismConfig {
             agents: Vec::new(),
             rules: Vec::new(),
             listen_port: default_listen_port(),
+            listen_address: ListenAddress::Loopback,
             auto_open_on_pending: true,
             panel_anchor: PanelAnchor::Auto,
             panel_shortcut: None,
@@ -626,6 +630,26 @@ fn default_listen_port() -> u16 {
     9086
 }
 
+/// Which interfaces the gateway listens on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenAddress {
+    /// 127.0.0.1: agents on this machine only.
+    #[default]
+    Loopback,
+    /// 0.0.0.0: every interface, so agents elsewhere on the network can connect too.
+    Network,
+}
+
+impl ListenAddress {
+    pub fn ip(self) -> std::net::IpAddr {
+        match self {
+            Self::Loopback => std::net::Ipv4Addr::LOCALHOST.into(),
+            Self::Network => std::net::Ipv4Addr::UNSPECIFIED.into(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -643,6 +667,7 @@ mod tests {
 
         let original = PrismConfig {
             listen_port: 9099,
+            listen_address: ListenAddress::Network,
             auto_open_on_pending: false,
             observe_native: true,
             panel_anchor: PanelAnchor::BottomLeft,
@@ -724,6 +749,7 @@ mod tests {
         let loaded = PrismConfig::load(&path).expect("load");
 
         assert_eq!(loaded.listen_port, 9099);
+        assert_eq!(loaded.listen_address, ListenAddress::Network);
         assert!(!loaded.auto_open_on_pending);
         assert_eq!(loaded.panel_anchor, PanelAnchor::BottomLeft);
         assert_eq!(loaded.servers, original.servers);
@@ -763,6 +789,12 @@ mod tests {
     #[test]
     fn default_listen_port_is_9086() {
         assert_eq!(PrismConfig::default().listen_port, 9086);
+        assert_eq!(
+            PrismConfig::default().listen_address,
+            ListenAddress::Loopback
+        );
+        let bare: PrismConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare.listen_address, ListenAddress::Loopback);
     }
 }
 

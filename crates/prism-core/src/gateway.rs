@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,19 +30,27 @@ use crate::approval::{
 use crate::audit::{AuditEntry, AuditLog, AuditSource, AuditVerdict};
 use crate::backend::{BackendManager, BackendStatus, ServerView};
 use crate::config::{
-    AgentConfig, AgentStatus, Attention, HttpAuth, PanelAnchor, Posture, PrismConfig, Rule,
-    RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
+    AgentConfig, AgentStatus, Attention, HttpAuth, ListenAddress, PanelAnchor, Posture,
+    PrismConfig, Rule, RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
 };
 use crate::error::{Error, Result};
 use crate::events::{channel, EventReceiver, EventSender, GatewayEvent};
+use crate::listener::{socket, BindFailure, Listener, ListenerState, Serving};
 use crate::oauth::{self, AuthenticatedAgent, OAuthState, TokenView};
 use crate::policy::{self, Decider, ToolAnnotations, Verdict};
 
 /// Live gateway status for the desktop UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayStatus {
+    /// The port agents dial: the bound one while listening, otherwise the configured one.
     pub listen_port: u16,
     pub listening: bool,
+    /// Why agents cannot connect, when they cannot.
+    pub listener: ListenerState,
+    pub listen_address: ListenAddress,
+    /// The MCP URL for agents on other machines, while the listener is on the network and
+    /// this machine has a route out.
+    pub network_url: Option<String>,
     pub servers_running: usize,
     pub servers_total: usize,
     pub agent_count: usize,
@@ -106,6 +113,8 @@ pub struct ToolInfo {
 pub struct ConnectSnippet {
     pub url: String,
     pub mcp_json: String,
+    /// The URL for agents on other machines; `None` while the listener is loopback only.
+    pub network_url: Option<String>,
 }
 
 /// An agent as the panel sees it: its config plus whether a session is open right now.
@@ -179,7 +188,7 @@ pub struct Gateway {
     audit: AuditLog,
     pub(crate) events: EventSender,
     shutdown: CancellationToken,
-    pub(crate) listen_port: u16,
+    listener: Listener,
     pub(crate) oauth: OAuthState,
     sessions: std::sync::Mutex<HashMap<String, SessionEntry>>,
     /// Call timestamps per agent for the rate tripwire; trimmed to the last minute on each check.
@@ -192,7 +201,9 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    /// Load config, start backends, bind Streamable HTTP on 127.0.0.1:{port}.
+    /// Load config, start backends, bind Streamable HTTP on the loopback port. A port that
+    /// cannot be bound does not stop the app: the gateway comes up with the clash in its
+    /// status so the panel can show it, and `retry_listener` tries again.
     pub async fn start(
         config_path: impl AsRef<Path>,
         audit_path: impl AsRef<Path>,
@@ -249,6 +260,7 @@ impl Gateway {
         .await
         .map_err(|_| Error::Gateway("credential migration could not complete".into()))??;
         let listen_port = config.listen_port;
+        let listen_address = config.listen_address;
         let backends = BackendManager::new(events.clone(), credentials.clone());
         let shutdown = CancellationToken::new();
 
@@ -261,7 +273,7 @@ impl Gateway {
             audit,
             events,
             shutdown: shutdown.clone(),
-            listen_port,
+            listener: Listener::idle(listen_port),
             sessions: std::sync::Mutex::new(HashMap::new()),
             calls: std::sync::Mutex::new(HashMap::new()),
             oauth: OAuthState::default(),
@@ -275,7 +287,10 @@ impl Gateway {
             gateway.backends.start(server).await;
         }
 
-        spawn_http(gateway.clone(), listen_port, shutdown)?;
+        if let Err(failure) = gateway.bind(listen_address, listen_port).await {
+            warn!(port = listen_port, "{}", failure.message(listen_port));
+            gateway.listener.set_state(failure.state(listen_port));
+        }
         // Modern streams observe the same backend events in `listen`; legacy
         // peers need the corresponding unsolicited session notification.
         let mut backend_events = gateway.subscribe();
@@ -332,15 +347,28 @@ impl Gateway {
                 }
             }
         });
-        info!(listen_port, "prism gateway listening on 127.0.0.1");
+        if gateway.listener.is_listening() {
+            info!(
+                port = gateway.listen_port(),
+                address = %listen_address.ip(),
+                "prism gateway listening"
+            );
+        }
         Ok(gateway)
     }
 
     pub async fn status(&self) -> GatewayStatus {
         let config = self.config.read().await;
         GatewayStatus {
-            listen_port: self.listen_port,
-            listening: !self.shutdown.is_cancelled(),
+            listen_port: self.listen_port(),
+            listening: !self.shutdown.is_cancelled() && self.listener.is_listening(),
+            listener: if self.shutdown.is_cancelled() {
+                ListenerState::Stopped
+            } else {
+                self.listener.state()
+            },
+            listen_address: config.listen_address,
+            network_url: self.network_url(),
             servers_running: self.backends.running_count().await,
             servers_total: config.servers.len(),
             agent_count: config.agents.len(),
@@ -1032,7 +1060,10 @@ impl Gateway {
             .read()
             .map(|t| t.clone())
             .unwrap_or_default();
-        format!("http://127.0.0.1:{}/hooks/{host}/{token}", self.listen_port)
+        format!(
+            "http://127.0.0.1:{}/hooks/{host}/{token}",
+            self.listen_port()
+        )
     }
 
     /// Replace the hook secret. The old URL stops working at once; hosts need the new one.
@@ -1332,7 +1363,7 @@ impl Gateway {
     }
 
     pub fn connect_snippet(&self) -> Result<ConnectSnippet> {
-        let port = self.listen_port;
+        let port = self.listen_port();
         let url = format!("http://127.0.0.1:{port}/mcp");
         let mcp = serde_json::json!({
             "mcpServers": { "prism": { "url": url } }
@@ -1340,6 +1371,7 @@ impl Gateway {
         Ok(ConnectSnippet {
             url,
             mcp_json: serde_json::to_string_pretty(&mcp)?,
+            network_url: self.network_url(),
         })
     }
 
@@ -2036,11 +2068,13 @@ impl ServerHandler for PrismProxy {
     }
 }
 
-fn spawn_http(gateway: Arc<Gateway>, port: u16, shutdown: CancellationToken) -> Result<()> {
+/// Everything served on the loopback port. `stop` ends this server's sessions when the
+/// listener moves; the gateway's own shutdown cancels it too.
+fn router(gateway: Arc<Gateway>, stop: CancellationToken) -> Router {
     let gw = gateway.clone();
     let transport_config = StreamableHttpServerConfig::default()
         .disable_allowed_hosts()
-        .with_cancellation_token(shutdown.clone());
+        .with_cancellation_token(stop);
     let service: StreamableHttpService<PrismProxy, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -2055,7 +2089,7 @@ fn spawn_http(gateway: Arc<Gateway>, port: u16, shutdown: CancellationToken) -> 
             transport_config,
         );
 
-    let app = Router::new()
+    Router::new()
         .nest_service("/mcp", service)
         .layer(axum::middleware::from_fn_with_state(
             gateway.clone(),
@@ -2064,29 +2098,175 @@ fn spawn_http(gateway: Arc<Gateway>, port: u16, shutdown: CancellationToken) -> 
         .merge(oauth::router(gateway.clone()))
         .merge(crate::native::router(gateway.clone()))
         .layer(axum::middleware::from_fn_with_state(
-            gateway.clone(),
+            gateway,
             crate::http_security::guard,
-        ));
+        ))
+}
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(err) => {
-                warn!(%err, %addr, "failed to bind gateway");
-                return;
-            }
-        };
-        if let Err(err) = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                shutdown.cancelled().await;
-            })
-            .await
-        {
-            warn!(%err, "gateway http server exited");
+impl Gateway {
+    /// The port agents dial right now.
+    pub fn listen_port(&self) -> u16 {
+        self.listener.port()
+    }
+
+    /// Where the live server is bound.
+    pub fn listen_address(&self) -> ListenAddress {
+        self.listener.address()
+    }
+
+    /// The MCP URL other machines dial, while exposed and while there is a route out.
+    pub fn network_url(&self) -> Option<String> {
+        if !self.listener.is_listening() || self.listen_address() != ListenAddress::Network {
+            return None;
         }
-    });
-    Ok(())
+        let ip = crate::listener::host_ip()?;
+        let host = match ip {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        };
+        Some(format!("http://{host}:{}/mcp", self.listen_port()))
+    }
+
+    /// Bind `port` on `address` and serve on it. On success the previous server, if any, is
+    /// stopped and its sessions end; on failure nothing changes, so a move to a busy port
+    /// leaves the current one serving.
+    async fn bind(
+        self: &Arc<Self>,
+        address: ListenAddress,
+        port: u16,
+    ) -> std::result::Result<u16, BindFailure> {
+        match self.try_bind(address, port).await {
+            Ok(bound) => Ok(bound),
+            Err(err) => Err(BindFailure::from_io(port, err).await),
+        }
+    }
+
+    async fn try_bind(self: &Arc<Self>, address: ListenAddress, port: u16) -> std::io::Result<u16> {
+        let listener = tokio::net::TcpListener::bind(socket(address, port)).await?;
+        let bound = listener.local_addr()?.port();
+        let stop = self.shutdown.child_token();
+        let app = router(self.clone(), stop.clone());
+        let shutdown = stop.clone();
+        let task = tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    shutdown.cancelled().await;
+                })
+                .await
+            {
+                warn!(%err, "gateway http server exited");
+            }
+        });
+        self.listener.adopt(address, bound, Serving { stop, task });
+        Ok(bound)
+    }
+
+    /// Bind once the previous server on the same port has let go of it. The OS refuses
+    /// `0.0.0.0:P` while `127.0.0.1:P` is bound and the other way round, so an address change
+    /// cannot bind first; it stops, then binds, and waits for the port to come free.
+    async fn bind_after_release(
+        self: &Arc<Self>,
+        address: ListenAddress,
+        port: u16,
+    ) -> std::result::Result<u16, BindFailure> {
+        if let Some(previous) = self.listener.release() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), previous.task).await;
+        }
+        let mut attempt = 0;
+        loop {
+            match self.try_bind(address, port).await {
+                Ok(bound) => return Ok(bound),
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse && attempt < 20 => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(err) => return Err(BindFailure::from_io(port, err).await),
+            }
+        }
+    }
+
+    /// Try the configured port again after a clash. A no-op while listening.
+    pub async fn retry_listener(self: &Arc<Self>) -> Result<()> {
+        if self.listener.is_listening() {
+            return Ok(());
+        }
+        let (address, port) = {
+            let config = self.config.read().await;
+            (config.listen_address, config.listen_port)
+        };
+        let outcome = self.bind(address, port).await;
+        if let Err(failure) = &outcome {
+            self.listener.set_state(failure.state(port));
+        }
+        let _ = self.events.send(GatewayEvent::ListenerChanged);
+        outcome
+            .map(|_| ())
+            .map_err(|failure| Error::Invalid(failure.message(port)))
+    }
+
+    /// A free port near the configured one, for the panel to offer. Never chosen on Prism's
+    /// own: every connected agent dials the configured port, so moving is the operator's call.
+    pub async fn suggest_port(&self) -> Option<u16> {
+        let from = self.config.read().await.listen_port;
+        tokio::task::spawn_blocking(move || crate::listener::suggest_port(from))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Move the listener to `port` and remember it. The new port is bound before the old one
+    /// stops, so a refused port changes nothing. Agents keep their tokens; they need the new
+    /// address.
+    pub async fn set_listen_port(self: &Arc<Self>, port: u16) -> Result<()> {
+        if port == 0 {
+            return Err(Error::Invalid("Choose a port between 1 and 65535".into()));
+        }
+        let address = {
+            let config = self.config.read().await;
+            if port == config.listen_port && self.listener.is_listening() {
+                return Ok(());
+            }
+            config.listen_address
+        };
+        self.bind(address, port)
+            .await
+            .map_err(|failure| Error::Invalid(failure.message(port)))?;
+        {
+            let mut config = self.config.write().await;
+            config.listen_port = port;
+            config.save(&self.config_path)?;
+        }
+        info!(port, "gateway listener moved");
+        let _ = self.events.send(GatewayEvent::ListenerChanged);
+        Ok(())
+    }
+
+    /// Bind the configured port on loopback only or on every interface, and remember it.
+    /// Same rule as a port move: the new server is up before the old one stops.
+    pub async fn set_listen_address(self: &Arc<Self>, address: ListenAddress) -> Result<()> {
+        let previous = self.config.read().await.listen_address;
+        if address == previous && self.listener.is_listening() {
+            return Ok(());
+        }
+        // The port agents dial today, which is the configured one except when the OS chose it.
+        let port = self.listen_port();
+        if let Err(failure) = self.bind_after_release(address, port).await {
+            // Put the old server back so a refused change leaves things as they were.
+            if let Err(back) = self.bind_after_release(previous, port).await {
+                self.listener.set_state(back.state(port));
+            }
+            let _ = self.events.send(GatewayEvent::ListenerChanged);
+            return Err(Error::Invalid(failure.message(port)));
+        }
+        {
+            let mut config = self.config.write().await;
+            config.listen_address = address;
+            config.save(&self.config_path)?;
+        }
+        info!(address = %address.ip(), port, "gateway listener rebound");
+        let _ = self.events.send(GatewayEvent::ListenerChanged);
+        Ok(())
+    }
 }
 
 fn aggregate_tool(server_name: &str, mut tool: Tool) -> Tool {
@@ -2132,6 +2312,10 @@ fn load_or_create_hook_token(path: &Path) -> Result<String> {
 }
 
 #[cfg(test)]
+#[path = "listener_tests.rs"]
+mod listener_tests;
+
+#[cfg(test)]
 #[path = "native/http_tests.rs"]
 mod native_http_tests;
 
@@ -2152,7 +2336,7 @@ mod retained_history_tests {
             audit: AuditLog::new(path, events.clone()).unwrap(),
             events,
             shutdown: CancellationToken::new(),
-            listen_port: 0,
+            listener: Listener::idle(0),
             oauth: OAuthState::default(),
             sessions: std::sync::Mutex::new(HashMap::new()),
             calls: std::sync::Mutex::new(HashMap::new()),

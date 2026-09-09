@@ -18,6 +18,7 @@ import { ServersScreen } from "./screens/Servers";
 import { ObserveScreen, SettingsScreen, UpdatesScreen } from "./screens/Settings";
 import { agents, errorMessage, pending, pop, push, resetNavigation, servers, signins, stack, status, tab, update } from "./state";
 import type { Screen } from "./state";
+import { ListenerNotice } from "./screens/Settings";
 import { BackIcon, Button, CloseIcon, Notice, SettingsIcon } from "./ui";
 
 const TABS = [
@@ -131,9 +132,9 @@ export function App() {
               <button
                 type="button"
                 class={`status ${st ? "danger" : ""}`}
-                aria-label="Gateway unavailable, open connection help"
+                aria-label="Gateway unavailable, open settings"
                 title="Gateway unavailable"
-                onClick={() => push({ kind: "connect-agent" })}
+                onClick={() => push({ kind: "settings" })}
               >
                 {st ? "Offline" : "Checking"}
               </button>
@@ -175,6 +176,7 @@ export function App() {
           ))}
         </nav>
       )}
+      {!top && st && st.listener.kind !== "listening" ? <ListenerNotice state={st.listener} /> : null}
       {errorMessage.value ? (
         <Notice
           text={errorMessage.value}

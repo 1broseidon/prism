@@ -8,9 +8,24 @@ export type BackendStatus =
 /** How a remote server is authenticated. Secrets live in the keyring, never in prism.json. */
 export type HttpAuth = "none" | "header" | "oauth";
 
+/** Why agents cannot connect, when they cannot. `holder` names the other program when Prism can tell. */
+export type ListenerState =
+  | { kind: "listening" }
+  | { kind: "port_in_use"; port: number; holder: "prism" | null }
+  | { kind: "failed"; port: number; error: string }
+  | { kind: "stopped" };
+
+/** Loopback is this machine only; network is every interface. */
+export type ListenAddress = "loopback" | "network";
+
 export interface GatewayStatus {
+  /** The port agents dial: the bound one while listening, otherwise the configured one. */
   listen_port: number;
   listening: boolean;
+  listener: ListenerState;
+  listen_address: ListenAddress;
+  /** The MCP URL for agents on other machines, while on the network and there is a route out. */
+  network_url: string | null;
   servers_running: number;
   servers_total: number;
   agent_count: number;
@@ -267,6 +282,8 @@ export interface HookInstallResult {
 export interface ConnectSnippet {
   url: string;
   mcp_json: string;
+  /** For agents on other machines; null while the listener is loopback only. */
+  network_url: string | null;
 }
 
 export type GatewayEvent =
@@ -281,6 +298,7 @@ export type GatewayEvent =
   | { type: "agent_disconnected"; data: { agent_id: string } }
   | { type: "agent_updated"; data: { agent_id: string } }
   | { type: "settings_changed" }
+  | { type: "listener_changed" }
   | { type: "server_status"; data: { server_id: string; status: BackendStatus } }
   | { type: "tools_changed"; data: { server_id: string } }
   | { type: "audit"; data: AuditEntry }

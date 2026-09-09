@@ -65,8 +65,14 @@ export function ConnectAgentScreen() {
       <Label right={<StatusText tone={status.value?.listening ? "ok" : "danger"}>{status.value?.listening ? "Ready" : "Unavailable"}</StatusText>}>Local gateway</Label>
       <div class="gateway-address">
         <span class="mono">127.0.0.1:{status.value?.listen_port ?? "…"}</span>
-        <span>{status.value?.listening ? "Agents connect through this machine." : "Connection setup is unavailable."}</span>
+        <span>{status.value?.listening ? "Agents connect through this machine." : status.value?.listener.kind === "port_in_use" ? "The port is in use. See Settings." : "Connection setup is unavailable."}</span>
       </div>
+      {status.value?.network_url ? (
+        <div class="gateway-address">
+          <span class="mono">{status.value.network_url.replace(/^http:\/\//, "").replace(/\/mcp$/, "")}</span>
+          <span>Other machines.</span>
+        </div>
+      ) : null}
     </section>
     <Label>Choose your agent</Label>
     {available.length === 0 ? <Empty title="Every known agent is set up.">Use Other agent for anything else.</Empty> : <div class="list harness-picker">
@@ -90,6 +96,7 @@ export function ConnectAgentScreen() {
           {snippet ? <>
             <section class="section"><Label>URL</Label><CodeBlock text={snippet.url} copyable /></section>
             <section class="section"><Label>mcp.json</Label><CodeBlock text={snippet.mcp_json} copyable /></section>
+            {snippet.network_url ? <section class="section"><Label>From other machines</Label><CodeBlock text={snippet.network_url} copyable /></section> : null}
           </> : null}
         </> : <form id="manual-client" onSubmit={create}>
           <label class="field"><span>Client name</span><input class="input" required maxLength={80} name="name" value={draft.name} onInput={(event) => updateConnectAgentDraft({ name: event.currentTarget.value })} placeholder="My script" /></label>

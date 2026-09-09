@@ -43,6 +43,8 @@ pub enum GatewayEvent {
     },
     /// Do-not-disturb, timeout behaviour, or another operator setting changed.
     SettingsChanged,
+    /// The loopback listener came up, moved to another port, or reported a clash.
+    ListenerChanged,
     /// A server's exposure settings changed without a lifecycle transition.
     ToolsChanged {
         server_id: String,

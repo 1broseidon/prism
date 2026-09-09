@@ -11,6 +11,8 @@ import type {
   ConnectSnippet,
   Decision,
   GatewayStatus,
+  ListenAddress,
+  ListenerState,
   NewRule,
   PendingCall,
   PendingSignIn,
@@ -184,9 +186,16 @@ const tools: Record<string, ToolInfo[]> = {
 
 const delay = <T,>(v: T) => new Promise<T>((r) => setTimeout(() => r(v), 60));
 
+/** `?port=busy` in the browser shows the clash notice; `?port=prism` names the other copy. */
+const portScenario = new URLSearchParams(location.search).get("port");
+let listenPort = 9086;
+let listenAddress: ListenAddress = "loopback";
+const networkUrl = () => (listenAddress === "network" && listener.kind === "listening" ? `http://192.168.1.20:${listenPort}/mcp` : null);
+let listener: ListenerState = portScenario ? { kind: "port_in_use", port: 9086, holder: portScenario === "prism" ? "prism" : null } : { kind: "listening" };
+
 export const mock = {
   get_status: (): Promise<GatewayStatus> =>
-    delay({ listen_port: 9086, listening: true, servers_running: servers.filter((s) => s.status.kind === "running").length, servers_total: servers.length, agent_count: agents.length, pending_count: pending.length, pending_agents: agents.filter((a) => a.status === "pending").length, pending_signins: signins.length, auto_open_on_pending: settings.auto_open_on_pending, do_not_disturb: settings.do_not_disturb }),
+    delay({ listen_port: listenPort, listening: listener.kind === "listening", listener, listen_address: listenAddress, network_url: networkUrl(), servers_running: servers.filter((s) => s.status.kind === "running").length, servers_total: servers.length, agent_count: agents.length, pending_count: pending.length, pending_agents: agents.filter((a) => a.status === "pending").length, pending_signins: signins.length, auto_open_on_pending: settings.auto_open_on_pending, do_not_disturb: settings.do_not_disturb }),
   list_servers: () => delay(servers),
   add_server: (a: { args: { name: string; command?: string; args?: string[]; env?: Record<string, string>; url?: string; auth?: HttpAuth; headers?: Record<string, string> } }) => {
     const remote = !!a.args.url;
@@ -261,6 +270,13 @@ export const mock = {
     return delay(ag);
   },
   get_settings: () => delay(settings),
+  retry_listener: () => { listener = { kind: "listening" }; return delay(undefined); },
+  suggest_port: () => delay(listenPort + 1),
+  set_listen_address: (a: { address: ListenAddress }) => { listenAddress = a.address; return delay(undefined); },
+  set_listen_port: (a: { port: number }) => {
+    if (a.port === 9090) return Promise.reject(new Error(`port ${a.port} is in use`));
+    listenPort = a.port; listener = { kind: "listening" }; return delay(undefined);
+  },
   set_settings: (a: { settings: Settings }) => { settings = { ...a.settings }; return delay(undefined); },
   list_server_tools: (a: { serverId: string }) => delay(tools[a.serverId] ?? []),
   set_tool_exposed: (a: { serverId: string; tool: string; exposed: boolean }) => {
@@ -314,5 +330,6 @@ export const mock = {
     delay({
       url: "http://127.0.0.1:9086/mcp",
       mcp_json: JSON.stringify({ mcpServers: { prism: { url: "http://127.0.0.1:9086/mcp" } } }, null, 2),
+      network_url: networkUrl(),
     }),
 };
