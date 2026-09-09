@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -105,58 +105,65 @@ fn windows_drive(value: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
 }
 
-/// Lexical only: neither symlinks nor file existence are consulted.
+/// The home directory with forward slashes, resolved like any other path.
+pub(super) fn home_str() -> Option<String> {
+    home().map(|h| resolve_path(&h.to_string_lossy(), None))
+}
+
+/// A `/`-rooted or drive-rooted path, whatever the host OS thinks.
+fn rooted(value: &str) -> bool {
+    value.starts_with('/') || windows_drive(value)
+}
+
+/// Lexical only: neither symlinks nor file existence are consulted. Pure string work, so a
+/// facet reads the same on every host: `/`-rooted paths stay `/`-rooted, drive paths keep
+/// their drive with forward slashes, `.` and `..` are collapsed.
 pub fn resolve_path(value: &str, cwd: Option<&Path>) -> String {
-    let expanded = if value == "~" || value.starts_with("~/") {
-        home()
-            .map(|h| h.join(value.strip_prefix("~/").unwrap_or("")))
-            .unwrap_or_else(|| PathBuf::from(value))
+    let mut path = if value == "~" || value.starts_with("~/") {
+        match home() {
+            Some(home) => {
+                let rest = value.strip_prefix('~').unwrap_or("");
+                format!("{}{rest}", home.to_string_lossy())
+            }
+            None => value.to_string(),
+        }
     } else {
-        PathBuf::from(value)
+        value.to_string()
     };
-    let value = expanded.to_string_lossy();
-    // Recognize Windows paths even when the gateway runs on Unix.
-    let windows = windows_drive(&value);
-    let portable = if windows {
-        value.replace('\\', "/")
+    if windows_drive(&path) {
+        path = path.replace('\\', "/");
+    }
+    if !rooted(&path) {
+        if let Some(cwd) = cwd {
+            let cwd = resolve_path(&cwd.to_string_lossy(), None);
+            path = format!("{cwd}/{path}");
+            if windows_drive(&path) {
+                path = path.replace('\\', "/");
+            }
+        }
+    }
+    let (root, rest) = if windows_drive(&path) {
+        (format!("{}/", path[..2].to_ascii_uppercase()), &path[3..])
+    } else if let Some(rest) = path.strip_prefix('/') {
+        ("/".to_string(), rest)
     } else {
-        value.into_owned()
+        (String::new(), path.as_str())
     };
-    let joined = if !windows && Path::new(&portable).is_relative() {
-        cwd.map(|c| PathBuf::from(resolve_path(&c.to_string_lossy(), None)).join(&portable))
-            .unwrap_or_else(|| PathBuf::from(&portable))
-    } else {
-        PathBuf::from(&portable)
-    };
-    let windows = windows_drive(&joined.to_string_lossy());
-    let joined = if windows {
-        PathBuf::from(joined.to_string_lossy().replace('\\', "/"))
-    } else {
-        joined
-    };
-    let mut normalized = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let last = normalized.components().next_back();
-                if matches!(last, Some(Component::Normal(s)) if s != ".." && !(windows && normalized.components().count() == 1))
-                {
-                    normalized.pop();
-                } else if !joined.has_root() && !windows {
-                    normalized.push("..");
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in rest.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if matches!(parts.last(), Some(last) if *last != "..") {
+                    parts.pop();
+                } else if root.is_empty() {
+                    parts.push("..");
                 }
             }
-            other => normalized.push(other.as_os_str()),
+            other => parts.push(other),
         }
     }
-    let mut result = normalized.to_string_lossy().into_owned();
-    if windows {
-        result[..1].make_ascii_uppercase();
-        if result.len() == 2 {
-            result.push('/');
-        }
-    }
+    let result = format!("{root}{}", parts.join("/"));
     if result.is_empty() {
         ".".into()
     } else {
@@ -165,9 +172,11 @@ pub fn resolve_path(value: &str, cwd: Option<&Path>) -> String {
 }
 
 pub(super) fn resolved_path<'a>(value: &'a str, cwd: Option<&Path>) -> std::borrow::Cow<'a, str> {
-    if (Path::new(value).is_absolute() || windows_drive(value))
+    if rooted(value)
         && !value.contains('\\')
-        && !value.split('/').any(|part| part == "..")
+        && !value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
         std::borrow::Cow::Borrowed(value)
     } else {
@@ -176,17 +185,45 @@ pub(super) fn resolved_path<'a>(value: &'a str, cwd: Option<&Path>) -> std::borr
 }
 
 pub(super) fn under(path: &str, prefix: &str) -> bool {
-    Path::new(path).starts_with(prefix)
+    let prefix = prefix
+        .strip_suffix('/')
+        .filter(|p| !p.is_empty())
+        .unwrap_or(prefix);
+    path == prefix
+        || prefix.ends_with('/') && path.starts_with(prefix)
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The parent directory, or `None` at a root.
+pub(super) fn parent(path: &str) -> Option<String> {
+    let (root, rest) = if windows_drive(path) {
+        (&path[..3], &path[3..])
+    } else if let Some(rest) = path.strip_prefix('/') {
+        ("/", rest)
+    } else {
+        ("", path)
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return None;
+    }
+    let parent = match rest.rfind('/') {
+        Some(i) => format!("{root}{}", &rest[..i]),
+        None if root.is_empty() => return None,
+        None => root.to_string(),
+    };
+    Some(parent)
 }
 
 pub fn short_path(path: &str) -> String {
-    if let Some(home) = home() {
-        if let Ok(rest) = Path::new(path).strip_prefix(home) {
-            return if rest.as_os_str().is_empty() {
-                "~".into()
-            } else {
-                format!("~/{}", rest.display())
-            };
+    if let Some(home) = home_str() {
+        if path == home {
+            return "~".into();
+        }
+        if let Some(rest) = path.strip_prefix(&home).and_then(|r| r.strip_prefix('/')) {
+            return format!("~/{rest}");
         }
     }
     path.into()
@@ -309,12 +346,9 @@ impl Action {
                 .cwd
                 .as_deref()
                 .map(|p| resolve_path(&p.to_string_lossy(), None));
-            let parent = cwd.filter(|cwd| under(&path.path, cwd)).or_else(|| {
-                Path::new(&path.path)
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map(|p| p.to_string_lossy().into_owned())
-            });
+            let parent = cwd
+                .filter(|cwd| under(&path.path, cwd))
+                .or_else(|| parent(&path.path));
             if let Some(parent) = parent.filter(|p| {
                 p != "/" && p != "." && p != ".." && !(windows_drive(p) && p.len() == 3)
             }) {

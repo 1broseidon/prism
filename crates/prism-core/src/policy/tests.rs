@@ -35,7 +35,7 @@ fn paths_by_shape_name_resolution_and_access() {
     ] {
         assert!(paths.contains(&expected), "missing {expected}: {paths:?}");
     }
-    assert!(paths.contains(&action::home().unwrap().join("Projects/x").to_str().unwrap()));
+    assert!(paths.contains(&format!("{}/Projects/x", action::home_str().unwrap()).as_str()));
     assert_eq!(
         a.facets
             .paths
