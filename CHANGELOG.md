@@ -4,10 +4,11 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-09
+
 ### Added
 - The listen port is a setting (**Settings → Network**). Changing it moves the listener at once; agents keep their tokens but need the new address, and the field says so.
 - A port that is already taken is reported instead of hidden. The panel says which port, names another copy of Prism when that is what holds it, and offers **Retry**. A free port is suggested but never chosen for you: your agents dial the port you configured.
-
 - **Reachable from** (Settings → Network) opens the listener to the local network so agents on other machines can connect. The Connect screen shows the address they use, the OAuth issuer follows whichever address a client dialed, and the setting carries the warning it deserves: plain HTTP, readable by anything on the network. Loopback only stays the default.
 
 - Rules can carry a condition on the call's arguments: a path prefix, a host list or scope, an argument value, or a program name. A held write or delete offers **Under ~/that/folder** next to Allow, and a call that names a host offers **For that.host**; either one writes an allow rule for exactly that. A rule whose condition Prism cannot read is marked **Inert** and never matches.
