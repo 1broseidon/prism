@@ -117,7 +117,7 @@ async fn signed_in_agent(
     let parked = tokio::spawn(async move { http(port, "GET", &path, &[], "").await });
     let signin = wait_for_signin(gateway).await;
     if signin.needs_consent {
-        gateway.decide_signin(&signin.id, true).unwrap();
+        gateway.decide_signin(&signin.id, true).await.unwrap();
     } else {
         gateway.decide_agent(&signin.agent_id, true).await.unwrap();
     }
@@ -298,7 +298,7 @@ async fn authorize_accepts_origin_resource_and_rejects_a_foreign_one() {
 
     let parked = tokio::spawn(authorize(format!("http://127.0.0.1:{port}/")));
     let signin = wait_for_signin(&gateway).await;
-    gateway.decide_signin(&signin.id, false).unwrap();
+    gateway.decide_signin(&signin.id, false).await.unwrap();
     let denied = tokio::time::timeout(Duration::from_secs(5), parked)
         .await
         .expect("authorize returned")
@@ -577,7 +577,7 @@ async fn register_authorize_token_and_call() {
     assert_eq!(signin.agent_id, agent_id);
     assert!(signin.needs_consent);
     assert_eq!(gateway.status().await.pending_signins, 1);
-    gateway.decide_signin(&signin.id, false).unwrap();
+    gateway.decide_signin(&signin.id, false).await.unwrap();
     let denied = tokio::time::timeout(Duration::from_secs(5), parked)
         .await
         .unwrap()
@@ -597,7 +597,7 @@ async fn register_authorize_token_and_call() {
         async move { http(port, "GET", &path, &[], "").await }
     });
     let signin = wait_for_signin(&gateway).await;
-    gateway.decide_signin(&signin.id, true).unwrap();
+    gateway.decide_signin(&signin.id, true).await.unwrap();
     let redirect = tokio::time::timeout(Duration::from_secs(5), parked)
         .await
         .unwrap()
@@ -741,7 +741,7 @@ async fn every_registration_of_a_harness_is_one_agent() {
     );
     assert!(signin.new_client, "this client never held a token");
     assert_eq!(signin.client_id, second);
-    gateway.decide_signin(&signin.id, true).unwrap();
+    gateway.decide_signin(&signin.id, true).await.unwrap();
     let redirect = tokio::time::timeout(Duration::from_secs(5), parked)
         .await
         .unwrap()

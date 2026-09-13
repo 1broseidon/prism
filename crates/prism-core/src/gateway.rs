@@ -915,7 +915,8 @@ impl Gateway {
         };
         {
             let mut config = self.config.write().await;
-            let agent = config
+            let mut updated = config.clone();
+            let agent = updated
                 .agents
                 .iter_mut()
                 .find(|a| a.id == agent_id)
@@ -924,11 +925,12 @@ impl Gateway {
             agent.decided_at = Some(Utc::now());
             if !approve {
                 // Deny is a sign-out too: nothing it holds keeps working.
-                config.tokens.retain(|t| t.agent_id != agent_id);
+                updated.tokens.retain(|t| t.agent_id != agent_id);
             }
-            config.save(&self.config_path)?;
+            updated.save(&self.config_path)?;
+            *config = updated;
         }
-        self.resolve_authorization(agent_id, approve);
+        self.resolve_authorization(agent_id, approve).await;
         let _ = self.events.send(GatewayEvent::AgentDecided {
             agent_id: agent_id.to_string(),
             status,
@@ -952,7 +954,7 @@ impl Gateway {
             config.save(&self.config_path)?;
         }
         let _ = self.events.send(GatewayEvent::RulesChanged);
-        self.resolve_authorization(agent_id, false);
+        self.resolve_authorization(agent_id, false).await;
         let _ = self.events.send(GatewayEvent::AgentDecided {
             agent_id: agent_id.to_string(),
             status: AgentStatus::Denied,
@@ -1017,7 +1019,19 @@ impl Gateway {
         Some(agent)
     }
 
-    fn unregister_session(&self, session_id: &str) {
+    pub(crate) fn active_agent_ids(&self) -> std::collections::HashSet<String> {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .map(|entry| entry.agent_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn unregister_session(&self, session_id: &str) {
         let removed = self.sessions.lock().ok().and_then(|mut s| {
             let entry = s.remove(session_id)?;
             (!s.values().any(|other| other.agent_id == entry.agent_id)).then_some(entry)
@@ -2448,11 +2462,14 @@ impl Gateway {
         let app = router(self.clone(), stop.clone());
         let shutdown = stop.clone();
         let task = tokio::spawn(async move {
-            if let Err(err) = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    shutdown.cancelled().await;
-                })
-                .await
+            if let Err(err) = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                shutdown.cancelled().await;
+            })
+            .await
             {
                 warn!(%err, "gateway http server exited");
             }

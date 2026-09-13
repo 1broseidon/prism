@@ -169,6 +169,18 @@ for (let day = 1; day <= 6; day++) {
 let signins: PendingSignIn[] = [
   { id: "si1", agent_id: "host:claude-code", agent_name: "Claude Code", client_name: "claude-code", client_id: "c-claude-recoil", requested_at: iso(8), needs_consent: true, new_client: true },
 ];
+/** Consent fixture for the tray-sized grouping/replacement flow. */
+if (new URLSearchParams(location.search).get("signin") === "group") {
+  const connections = [
+    { client_id: "old-connection-one", client_name: "Workbench", created_at: iso(3600 * 24), origin: null, signed_in: true },
+    { client_id: "old-connection-two", client_name: "Workbench", created_at: iso(3600), origin: null, signed_in: true },
+  ];
+  agents.push({ id: "group-agent", name: "Workbench", client_name: "Workbench", client_version: "1", status: "approved", created_at: iso(86400), decided_at: iso(86400), posture: "trusted", attention: "silent", client_id: connections[0].client_id, host: null, connected: true, tokens: [], clients: connections });
+  agents.filter(a => a.status === "pending").forEach(a => { a.status = "denied"; });
+  pending = [];
+  signins = [{ id: "group-signin", agent_id: "group-agent", agent_name: "Workbench", client_name: "Workbench", client_id: "new-registration", requested_at: iso(8), needs_consent: true, new_client: true,
+    suggested_group: { posture: "trusted", origin: null, connections } }];
+}
 let settings: Settings = { on_timeout: "deny", do_not_disturb: false, rate_limit_per_minute: null, hold_timeout_secs: 120, auto_open_on_pending: true, panel_anchor: "auto", panel_shortcut: null };
 const tools: Record<string, ToolInfo[]> = {
   s1: [
@@ -266,7 +278,23 @@ export const mock = {
   remove_agent: (a: { agentId: string }) => { agents.splice(agents.findIndex((x) => x.id === a.agentId), 1); return delay(undefined); },
   list_pending: () => delay(pending),
   list_signins: () => delay(signins),
-  decide_signin: (a: { id: string }) => { signins = signins.filter((s) => s.id !== a.id); return delay(undefined); },
+  decide_signin: (a: { id: string; approve: boolean; choice?: import("./types").SignInChoice }) => {
+    const signin = signins.find(s => s.id === a.id);
+    if (a.approve && signin?.suggested_group) {
+      let agent = agents.find(agent => agent.id === signin.agent_id)!;
+      if (a.choice?.kind === "separate") {
+        agent = { ...agent, id: "separate-agent", name: `${agent.name} (2)`, posture: "first_use", attention: "silent", client_id: signin.client_id, clients: [], tokens: [] };
+        agents.push(agent);
+      } else if (a.choice?.kind === "replace") {
+        const clientId = a.choice.client_id;
+        agent.clients = agent.clients.filter(client => client.client_id !== clientId);
+        if (agent.client_id === clientId) agent.client_id = signin.client_id;
+      }
+      agent.clients.push({ client_id: signin.client_id, client_name: signin.client_name, created_at: iso(0), origin: null, signed_in: true });
+    }
+    signins = signins.filter(s => s.id !== a.id);
+    return delay(undefined);
+  },
   decide: (a: { id: string; decision: Decision }) => {
     const call = pending.find((p) => p.id === a.id);
     pending = pending.filter((p) => p.id !== a.id);

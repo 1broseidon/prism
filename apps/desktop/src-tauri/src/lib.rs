@@ -814,8 +814,13 @@ async fn decide_signin(
     state: State<'_, AppState>,
     id: String,
     approve: bool,
+    choice: Option<prism_core::SignInChoice>,
 ) -> Result<(), String> {
-    state.gateway.decide_signin(&id, approve).map_err(map_err)
+    state
+        .gateway
+        .decide_signin_with_choice(&id, approve, choice.unwrap_or_default())
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]

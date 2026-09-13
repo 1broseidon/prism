@@ -143,6 +143,9 @@ pub struct AgentConfig {
 /// nothing until the operator approves the agent that signs in with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthClient {
+    /// Last token issuance, retained after token expiry so cleanup preserves prior consent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_authorized_at: Option<DateTime<Utc>>,
     pub client_id: String,
     pub client_name: String,
     pub redirect_uris: Vec<String>,
@@ -373,6 +376,24 @@ impl Default for PrismConfig {
 }
 
 impl PrismConfig {
+    /// Migrate existing token history before expired tokens leave the persisted config.
+    pub(crate) fn record_authorizations(&mut self) {
+        for token in &self.tokens {
+            if let Some(client) = self
+                .clients
+                .iter_mut()
+                .find(|c| Some(c.client_id.as_str()) == token.client_id.as_deref())
+            {
+                if client
+                    .last_authorized_at
+                    .is_none_or(|at| at < token.created_at)
+                {
+                    client.last_authorized_at = Some(token.created_at);
+                }
+            }
+        }
+    }
+
     /// Load pretty JSON from `path`.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let mut config: Self = serde_json::from_reader(crate::storage::read(path.as_ref())?)
@@ -389,6 +410,7 @@ impl PrismConfig {
             }
         }
         config.merge_harness_agents();
+        config.record_authorizations();
         Ok(config)
     }
 
@@ -404,6 +426,7 @@ impl PrismConfig {
             ));
         }
         let mut to_save = self.clone();
+        to_save.record_authorizations();
         let now = Utc::now();
         to_save
             .rules
@@ -825,6 +848,7 @@ mod agent_tests {
 
     fn client(id: &str, name: &str) -> OAuthClient {
         OAuthClient {
+            last_authorized_at: None,
             client_id: id.into(),
             client_name: name.into(),
             redirect_uris: vec![],

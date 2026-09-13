@@ -1,3 +1,4 @@
+import { signinAction, signinChoice } from "../signin-choice";
 import { offerCondition, shortPath } from "../condition-display";
 import { harness, hostSetup } from "../hosts";
 import { loadActivity } from "../events";
@@ -14,6 +15,7 @@ import { Button, ChevronIcon, Chip, Label, Screen, describeError, useCopy } from
 const HOLD_SECONDS = 120;
 let lastDecisionAt = -Infinity;
 export const decisionBusy = signal(false);
+const signinSelections = signal<Record<string, string>>({});
 
 function beginDecision(): boolean {
   const at = performance.now();
@@ -59,7 +61,12 @@ async function decideAgent(agent: AgentConfig, approve: boolean) {
 async function decideSignin(signin: PendingSignIn, approve: boolean) {
   if (!signins.value.some((s) => s.id === signin.id && s.needs_consent) || !beginDecision()) return;
   try {
-    await api.decideSignin(signin.id, approve);
+    const choice = approve ? signinChoice(signin, signinSelections.value[signin.id]) : { kind: "add" as const };
+    await api.decideSignin(signin.id, approve, choice);
+    // A committed decision must not be repeated if refreshing the panel fails.
+    signins.value = signins.value.filter(s => s.id !== signin.id);
+    const selections = { ...signinSelections.value }; delete selections[signin.id]; signinSelections.value = selections;
+    agents.value = await api.listAgents();
     signins.value = (await api.listSignins()).filter((s) => s.needs_consent);
     status.value = await api.getStatus();
   } catch (err) {
@@ -166,6 +173,8 @@ function AgentCard({ agent }: { agent: AgentConfig }) {
 
 /** An approved agent's client is signing in again. A public client id proves nothing, so this asks. */
 function SignInCard({ signin }: { signin: PendingSignIn }) {
+  const group = signin.suggested_group;
+  const selection = signinSelections.value[signin.id] ?? "add";
   return (
     <section class="hold" aria-live="polite">
       <div class="top">
@@ -173,12 +182,25 @@ function SignInCard({ signin }: { signin: PendingSignIn }) {
         <span class="when">{relative(signin.requested_at)}</span>
       </div>
       <div class="ask">
-        <b>{signin.agent_name}</b> {signin.new_client ? "wants to connect from a new place" : "wants to sign in again"}
+        <b>{signin.agent_name}</b> {group ? "has a possible new connection" : signin.new_client ? "wants to connect from a new place" : "wants to sign in again"}
       </div>
       <div class="via">
         client <code>{signin.client_name}</code> · a browser is waiting
       </div>
-      <p class="note">{signin.new_client ? "A new install or project scope. If you didn't start this, refuse." : "If you didn't start this, refuse."}</p>
+      {group ? <>
+        <p class="note">The name and callback match this agent. That does not prove it is the same installation. If you didn't start this, refuse.</p>
+        <p class="note">From {group.origin ?? "this computer"} · registration <code title={signin.client_id}>{signin.client_id.slice(0, 8)}</code></p>
+        <label class="field"><span>Connect as</span>
+          <select class="input" disabled={decisionBusy.value} value={selection} onChange={event => { signinSelections.value = { ...signinSelections.value, [signin.id]: event.currentTarget.value }; }}>
+            <option value="add">Add to {signin.agent_name}</option>
+            <option value="separate">Keep as a separate agent</option>
+            {group.connections.map(connection => <option key={connection.client_id} value={`replace:${connection.client_id}`}>Replace {connection.client_id.slice(0, 8)} · {new Date(connection.created_at).toLocaleString()}</option>)}
+          </select>
+        </label>
+        <p class="note">{selection === "separate" ? "Starts with First use and no inherited rules. Existing connections stay signed in."
+          : selection.startsWith("replace:") ? `Uses ${signin.agent_name}'s ${group.posture.replaceAll("_", " ")} posture and rules. The selected connection will be signed out and removed.`
+          : `Uses ${signin.agent_name}'s ${group.posture.replaceAll("_", " ")} posture and rules. Existing connections stay signed in.`}</p>
+      </> : <p class="note">{signin.new_client ? "A new install or project scope. If you didn't start this, refuse." : "If you didn't start this, refuse."}</p>}
     </section>
   );
 }
@@ -247,7 +269,7 @@ function DecisionFooter({ item }: { item: QueueItem }) {
   if (item.kind === "signin") {
     return <div class="approval-footer primary-only">
       <div class="approval-primary">
-        <Button variant="primary" busy={decisionBusy.value} hint="A" autoFocus onClick={() => void decideSignin(item.signin, true)}>Allow</Button>
+        <Button variant="primary" busy={decisionBusy.value} hint="A" autoFocus onClick={() => void decideSignin(item.signin, true)}>{signinAction(item.signin, signinSelections.value[item.signin.id])}</Button>
         <Button variant="danger" busy={decisionBusy.value} hint="D" onClick={() => void decideSignin(item.signin, false)}>Refuse</Button>
       </div>
     </div>;
@@ -423,6 +445,12 @@ export function NowScreen() {
   const st = status.value;
   const { items, index, current, move } = useRequestQueue();
   const summary = activity.value;
+  const activeSignins = signins.value;
+  useLayoutEffect(() => {
+    const selections = signinSelections.peek();
+    const kept = Object.fromEntries(Object.entries(selections).filter(([id]) => activeSignins.some(signin => signin.id === id)));
+    if (Object.keys(kept).length !== Object.keys(selections).length) signinSelections.value = kept;
+  }, [activeSignins]);
 
   useDecisionKeys((approve) => {
     if (current?.kind === "agent") void decideAgent(current.agent, approve);

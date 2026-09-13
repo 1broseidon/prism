@@ -29,6 +29,10 @@ use crate::events::GatewayEvent;
 use crate::gateway::Gateway;
 use crate::http_security::RequestOrigin;
 
+#[path = "oauth_reconcile.rs"]
+mod reconcile;
+pub use reconcile::{SignInChoice, SignInConnection, SignInGroup};
+
 const ACCESS_TTL_SECS: i64 = 60 * 60;
 const REFRESH_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 const CODE_TTL_SECS: i64 = 5 * 60;
@@ -105,11 +109,13 @@ pub struct PendingSignIn {
     /// install rather than the same one signing in again.
     #[serde(default)]
     pub new_client: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_group: Option<SignInGroup>,
 }
 
 struct SignInEntry {
     view: PendingSignIn,
-    tx: oneshot::Sender<bool>,
+    tx: oneshot::Sender<Option<String>>,
 }
 
 struct AuthorizationWait {
@@ -117,7 +123,7 @@ struct AuthorizationWait {
     redirect_uri: String,
     code_challenge: String,
     state: Option<String>,
-    rx: oneshot::Receiver<bool>,
+    rx: oneshot::Receiver<Option<String>>,
 }
 
 #[derive(Default)]
@@ -190,44 +196,7 @@ fn decided_clients(config: &crate::config::PrismConfig) -> HashSet<String> {
 
 /// Expire abandoned registrations and their pending agent records, preserving decisions.
 pub(crate) fn prune_unused_clients(config: &mut crate::config::PrismConfig, now: DateTime<Utc>) {
-    let decided = decided_clients(config);
-    let cutoff = now - chrono::Duration::hours(UNUSED_CLIENT_HOURS);
-    let removed: HashSet<String> = config
-        .clients
-        .iter()
-        .filter(|client| client.created_at <= cutoff && !decided.contains(&client.client_id))
-        .map(|client| client.client_id.clone())
-        .collect();
-    config
-        .clients
-        .retain(|client| !removed.contains(&client.client_id));
-    // An agent goes with its clients only when every client it had is gone and it is not a
-    // harness record, which outlives any one registration.
-    let removed_agents: HashSet<String> = config
-        .agents
-        .iter()
-        .filter(|agent| agent.host.is_none())
-        .filter(|agent| {
-            let ids = config.agent_client_ids(&agent.id);
-            !ids.is_empty() && ids.iter().all(|id| removed.contains(id))
-        })
-        .map(|agent| agent.id.clone())
-        .collect();
-    config
-        .agents
-        .retain(|agent| !removed_agents.contains(&agent.id));
-    config.rules.retain(|rule| {
-        !rule
-            .agent_id
-            .as_ref()
-            .is_some_and(|id| removed_agents.contains(id))
-    });
-    config.tokens.retain(|token| {
-        !token
-            .client_id
-            .as_ref()
-            .is_some_and(|id| removed.contains(id))
-    });
+    reconcile::prune_with_live(config, now, &HashSet::new(), &HashSet::new());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -566,6 +535,14 @@ impl Gateway {
     /// Open dynamic registration. Anyone on the machine can register; nobody gets a tool
     /// until the operator approves the agent that signs in with the client.
     pub async fn register_client(&self, req: RegisterRequest) -> Result<OAuthClient> {
+        self.register_client_from(req, None).await
+    }
+
+    async fn register_client_from(
+        &self,
+        req: RegisterRequest,
+        origin: Option<String>,
+    ) -> Result<OAuthClient> {
         if req.redirect_uris.is_empty() {
             return Err(Error::Invalid("redirect_uris is required".into()));
         }
@@ -607,16 +584,17 @@ impl Gateway {
             .take(80)
             .collect::<String>();
         let client = OAuthClient {
+            last_authorized_at: None,
             client_id: uuid::Uuid::new_v4().to_string(),
             client_name: name,
             redirect_uris: req.redirect_uris,
             created_at: Utc::now(),
             agent_id: None,
-            origin: None,
+            origin,
         };
         let mut config = self.config.write().await;
         let mut updated = config.clone();
-        prune_unused_clients(&mut updated, Utc::now());
+        self.prune_registration_state(&mut updated, Utc::now());
         let decided = decided_clients(&updated);
         if updated
             .clients
@@ -723,13 +701,31 @@ impl Gateway {
                     "a sign-in is already pending or Prism is busy; retry later",
                 );
             }
-            let (agent, is_new) = config.find_or_request_agent_for_client(&client);
+            let Some(client) = config
+                .clients
+                .iter()
+                .find(|c| c.client_id == client_id)
+                .cloned()
+            else {
+                return fail("access_denied", "the registration was removed");
+            };
+            let mut updated = config.clone();
+            let suggestion = reconcile::suggested_agent(&updated, &client);
+            let (agent, is_new) = suggestion
+                .clone()
+                .map(|agent| (agent, false))
+                .unwrap_or_else(|| updated.find_or_request_agent_for_client(&client));
+            let suggested_group = suggestion
+                .as_ref()
+                .map(|agent| reconcile::group_view(&updated, agent, &client));
             if agent.status == AgentStatus::Denied {
                 return fail("access_denied", "the operator denied this agent in Prism");
             }
-            if is_new && config.save(&self.config_path).is_err() {
-                config.agents.retain(|a| a.id != agent.id);
-                return fail("server_error", "could not save the agent request");
+            if suggested_group.is_none() {
+                if updated.save(&self.config_path).is_err() {
+                    return fail("server_error", "could not save the agent request");
+                }
+                *config = updated;
             }
             let (tx, rx) = oneshot::channel();
             let new_client = !config
@@ -745,6 +741,7 @@ impl Gateway {
                 requested_at: Utc::now(),
                 needs_consent: agent.status == AgentStatus::Approved,
                 new_client,
+                suggested_group,
             };
             signins.insert(
                 signin.id.clone(),
@@ -797,7 +794,7 @@ impl Gateway {
         }
         let approved = match answer {
             Ok(Ok(answer)) => answer,
-            Ok(Err(_)) => false,
+            Ok(Err(_)) => None,
             Err(_) => {
                 let _ = self.events.send(GatewayEvent::SignInDecided {
                     id: signin.id.clone(),
@@ -806,9 +803,9 @@ impl Gateway {
                 return fail("access_denied", "nobody answered in Prism in time");
             }
         };
-        if !approved {
+        let Some(agent_id) = approved else {
             return fail("access_denied", "the operator denied this sign-in in Prism");
-        }
+        };
 
         let code = random_token();
         if let Ok(mut codes) = self.oauth.codes.lock() {
@@ -818,7 +815,7 @@ impl Gateway {
                 code.clone(),
                 AuthCode {
                     client_id: signin.client_id.clone(),
-                    agent_id: signin.agent_id.clone(),
+                    agent_id,
                     redirect_uri: redirect_uri.clone(),
                     code_challenge,
                     expires_at: now + chrono::Duration::seconds(CODE_TTL_SECS),
@@ -833,16 +830,23 @@ impl Gateway {
     }
 
     /// Answer the single pending sign-in when the operator decides its agent.
-    pub(crate) fn resolve_authorization(&self, agent_id: &str, approved: bool) {
-        let id = self.oauth.signins.lock().ok().and_then(|signins| {
-            signins
-                .values()
-                .find(|entry| entry.view.agent_id == agent_id)
-                .map(|entry| entry.view.id.clone())
-        });
-        if let Some(id) = id {
-            // If it ended meanwhile, its unique request ID cannot match a later sign-in.
-            let _ = self.decide_signin(&id, approved);
+    pub(crate) async fn resolve_authorization(&self, agent_id: &str, approved: bool) {
+        let ids: Vec<_> = self
+            .oauth
+            .signins
+            .lock()
+            .map(|signins| {
+                signins
+                    .values()
+                    .filter(|entry| {
+                        entry.view.agent_id == agent_id && (!approved || !entry.view.needs_consent)
+                    })
+                    .map(|entry| entry.view.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in ids {
+            let _ = self.decide_signin(&id, approved).await;
         }
     }
 
@@ -876,20 +880,9 @@ impl Gateway {
     }
 
     /// Answer one sign-in. Only the browser that asked gets the code.
-    pub fn decide_signin(&self, id: &str, approve: bool) -> Result<()> {
-        let entry = self
-            .oauth
-            .signins
-            .lock()
-            .ok()
-            .and_then(|mut s| s.remove(id))
-            .ok_or_else(|| Error::NotFound(format!("sign-in {id}")))?;
-        let _ = entry.tx.send(approve);
-        let _ = self.events.send(GatewayEvent::SignInDecided {
-            id: id.to_string(),
-            approved: approve,
-        });
-        Ok(())
+    pub async fn decide_signin(&self, id: &str, approve: bool) -> Result<()> {
+        self.decide_signin_with_choice(id, approve, SignInChoice::Add)
+            .await
     }
 
     /// Who opened an MCP session, once known.
@@ -1036,14 +1029,19 @@ impl Gateway {
             .agents
             .iter()
             .any(|a| a.id == agent_id && a.status == AgentStatus::Approved);
-        if !approved {
+        if !approved
+            || config.client_agent_id(client_id).as_deref() != Some(agent_id)
+            || !config.clients.iter().any(|c| c.client_id == client_id)
+        {
             return Err(OAuthError::new(
                 "access_denied",
                 "this agent is not approved in Prism",
             ));
         }
-        config.tokens.retain(|t| !t.is_expired(now));
-        config.tokens.push(TokenRecord {
+        let mut updated = config.clone();
+        updated.record_authorizations();
+        updated.tokens.retain(|t| !t.is_expired(now));
+        updated.tokens.push(TokenRecord {
             hash: hash_token(&access),
             kind: TokenKind::Access,
             agent_id: agent_id.to_string(),
@@ -1051,7 +1049,7 @@ impl Gateway {
             created_at: now,
             expires_at: Some(now + chrono::Duration::seconds(ACCESS_TTL_SECS)),
         });
-        config.tokens.push(TokenRecord {
+        updated.tokens.push(TokenRecord {
             hash: hash_token(&refresh),
             kind: TokenKind::Refresh,
             agent_id: agent_id.to_string(),
@@ -1059,9 +1057,11 @@ impl Gateway {
             created_at: now,
             expires_at: Some(now + chrono::Duration::seconds(REFRESH_TTL_SECS)),
         });
-        config
+        updated.record_authorizations();
+        updated
             .save(&self.config_path)
             .map_err(|err| OAuthError::new("server_error", err.to_string()))?;
+        *config = updated;
         drop(config);
         let _ = self.events.send(GatewayEvent::AgentUpdated {
             agent_id: agent_id.to_string(),
@@ -1368,9 +1368,16 @@ async fn authorization_server(
 
 async fn register(
     State(gateway): State<Arc<Gateway>>,
+    peer: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
-    match gateway.register_client(req).await {
+    let origin = peer.map(|Extension(axum::extract::ConnectInfo(peer))| peer.ip());
+    let origin = match origin {
+        Some(ip) if ip.is_loopback() => None,
+        Some(ip) => Some(ip.to_string()),
+        None => Some("unknown".into()),
+    };
+    match gateway.register_client_from(req, origin).await {
         Ok(client) => (
             StatusCode::CREATED,
             Json(RegisterResponse {
@@ -1853,6 +1860,7 @@ mod tests {
         };
         for i in 0..MAX_UNUSED_CLIENTS {
             config.clients.push(OAuthClient {
+                last_authorized_at: None,
                 client_id: format!("client-{i}"),
                 client_name: format!("Client {i}"),
                 redirect_uris: vec!["http://localhost/cb".into()],

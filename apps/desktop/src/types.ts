@@ -154,6 +154,11 @@ export interface PendingSignIn {
   needs_consent: boolean;
   /** This client never held a token: the harness is connecting from a new scope or install. */
   new_client: boolean;
+  suggested_group?: {
+    posture: Posture;
+    origin: string | null;
+    connections: { client_id: string; created_at: string }[];
+  };
 }
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -406,3 +411,5 @@ export interface AuditPage {
   window: AuditWindow;
 }
 export interface ExportReport { path: string; metadata_path: string; total: number; }
+
+export type SignInChoice = { kind: "add" } | { kind: "separate" } | { kind: "replace"; client_id: string };

@@ -43,8 +43,8 @@ pub use listener::{ListenerState, PortHolder};
 pub use native::{NativeStatus, ReasonCount, ShadowRule};
 pub use oauth::{
     hash_token, pkce_matches, redirect_uri_allowed, AuthenticatedAgent, AuthorizeOutcome,
-    AuthorizeParams, ManualToken, OAuthError, PendingSignIn, RegisterRequest, TokenRequest,
-    TokenResponse, TokenView,
+    AuthorizeParams, ManualToken, OAuthError, PendingSignIn, RegisterRequest, SignInChoice,
+    SignInConnection, SignInGroup, TokenRequest, TokenResponse, TokenView,
 };
 pub use policy::{evaluate, glob_match, Decider, Evaluation, ToolAnnotations, Verdict};
 pub use shell_path::adopt_login_shell_path;

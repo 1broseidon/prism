@@ -32,6 +32,7 @@ import type {
   Rule,
   ServerView,
   RemoteProbe,
+  SignInChoice,
   Settings,
   ToolInfo,
   UpdateInfo,
@@ -104,8 +105,8 @@ export function listSignins() {
   return invoke<PendingSignIn[]>("list_signins");
 }
 
-export function decideSignin(id: string, approve: boolean) {
-  return invoke<void>("decide_signin", { id, approve });
+export function decideSignin(id: string, approve: boolean, choice: SignInChoice = { kind: "add" }) {
+  return invoke<void>("decide_signin", { id, approve, choice });
 }
 
 /** Sign an agent out everywhere: every token it holds stops working at once. */
