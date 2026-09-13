@@ -5,6 +5,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 ## [Unreleased]
 
 ### Added
+- `prism-provision apply` imports versioned server manifests into a stopped profile, resolves credential environment references into the OS store, and updates stable server IDs without losing rules or hidden tools. A shared profile lock prevents concurrent gateway/import writes. Explicit header auth connects on startup even when OAuth metadata is advertised.
 - Generic OAuth clients whose name, registration origin and loopback callback match can join an existing agent after fresh consent. The panel offers adding a connection, keeping a separate agent, or explicitly replacing one old connection. Replacement takes effect only after a successful save; matching metadata grants no access by itself.
 - URL servers suggest an authentication method after checking the endpoint. Explicit choices are preserved, and unreachable endpoints or broken OAuth discovery leave the method undecided.
 - **Edit** updates a server in place, including its authentication or command settings, while preserving rules and hidden tools. Unfinished edits can be resumed after closing the panel. Stored keys remain private; changing a key's header or destination origin requires entering it again.

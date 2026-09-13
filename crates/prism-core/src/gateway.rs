@@ -56,7 +56,7 @@ pub struct ServerUpdate {
 }
 
 /// Validate resolved launch settings for both additions and edits.
-fn validate_server(
+pub(crate) fn validate_server(
     server: &mut ServerConfig,
     servers: &[ServerConfig],
     replacing: Option<&str>,
@@ -243,6 +243,7 @@ impl Drop for HoldEventGuard {
 
 /// The MCP gateway agents connect to.
 pub struct Gateway {
+    _profile_lock: crate::profile::ProfileLock,
     pub(crate) config_path: PathBuf,
     pub(crate) config: RwLock<PrismConfig>,
     backends: BackendManager,
@@ -286,6 +287,7 @@ impl Gateway {
         audit_path: PathBuf,
         credentials: Arc<dyn crate::credentials::CredentialStore>,
     ) -> Result<Arc<Self>> {
+        let profile_lock = crate::profile::ProfileLock::acquire(&config_path)?;
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -330,6 +332,7 @@ impl Gateway {
         let shutdown = CancellationToken::new();
 
         let gateway = Arc::new(Self {
+            _profile_lock: profile_lock,
             config_path,
             config: RwLock::new(config.clone()),
             backends,
@@ -2712,6 +2715,8 @@ mod retained_history_tests {
         let (events, _) = channel();
         let credentials = Arc::new(crate::credentials::NativeStore::default());
         Gateway {
+            _profile_lock: crate::profile::ProfileLock::acquire(&path.with_extension("config"))
+                .unwrap(),
             config_path: path.with_extension("config"),
             config: RwLock::new(PrismConfig::default()),
             backends: BackendManager::new(events.clone(), credentials.clone()),

@@ -1132,6 +1132,15 @@ async fn old_anonymous_settings_are_ignored_and_existing_grants_survive_provisio
     assert!(!json.contains("obsolete-key"));
     assert!(!json.contains(&token.token));
     gateway.shutdown().await;
+    let weak = std::sync::Arc::downgrade(&gateway);
+    drop(gateway);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while weak.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     // Reopen the actual persisted file on another listener; tokens survive app restarts.
     let mut saved = saved;
     saved.listen_port = 0;

@@ -298,6 +298,7 @@ async fn explicit_replacement_revokes_only_selected_tokens_sessions_codes_and_pe
     assert_eq!(config.agent_client_ids(&agent).len(), 2);
     assert!(!config.clients.iter().any(|c| c.client_id == old.client_id));
     gateway.shutdown().await;
+    release_gateway(gateway).await;
     let reopened = Gateway::start_with_credentials(
         dir.path().join("prism.json"),
         dir.path().join("audit.jsonl"),
@@ -634,6 +635,7 @@ async fn cleanup_preserves_decisions_rules_tokens_harnesses_manual_agents_and_pe
     // After restart there are no sessions or browser waiters, but owned decisions survive.
     config.save(dir.path().join("prism.json")).unwrap();
     gateway.shutdown().await;
+    release_gateway(gateway).await;
     let reopened = Gateway::start_with_credentials(
         dir.path().join("prism.json"),
         dir.path().join("audit.jsonl"),
@@ -660,4 +662,16 @@ async fn cleanup_preserves_decisions_rules_tokens_harnesses_manual_agents_and_pe
     }
     assert_eq!(persisted.rules.len(), 1);
     reopened.shutdown().await;
+}
+
+async fn release_gateway(gateway: Arc<Gateway>) {
+    let weak = Arc::downgrade(&gateway);
+    drop(gateway);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while weak.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }

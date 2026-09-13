@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use prism_core::{
     AgentConfig, AgentView, Attention, Decision, Gateway, GatewayEvent, NewRule, PanelAnchor,
-    PendingCall, Posture, PrismConfig, Rule, ServerConfig, ServerView, Settings, ToolInfo,
+    PendingCall, Posture, Rule, ServerConfig, ServerView, Settings, ToolInfo,
 };
 use serde::Serialize;
 use tauri::image::Image;
@@ -1264,15 +1264,6 @@ fn config_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     Ok((config_dir.join("prism.json"), data_dir.join("audit.jsonl")))
 }
 
-fn ensure_auto_open_default(path: &PathBuf) {
-    if !path.exists() {
-        let config = PrismConfig::default();
-        if let Err(err) = config.save(path) {
-            warn!(%err, "failed to write default prism.json");
-        }
-    }
-}
-
 fn forward_events(app: AppHandle, gateway: Arc<Gateway>) {
     tauri::async_runtime::spawn(async move {
         let mut rx = gateway.subscribe();
@@ -1624,7 +1615,6 @@ pub fn run() {
             }
 
             let (config_path, audit_path) = config_paths(app.handle())?;
-            ensure_auto_open_default(&config_path);
 
             let gateway = tauri::async_runtime::block_on(Gateway::start(config_path, audit_path))
                 .map_err(|err| {

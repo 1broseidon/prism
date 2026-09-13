@@ -92,11 +92,46 @@ If Save reports that the server was saved but old credentials could not be remov
 
 Open a server to hide or expose individual tools. Connected agents are told whenever the list changes, whether you hid a tool or the server itself added or changed one, so clients that follow tool-list updates refetch on their own. Prism re-reads only the server that changed and keeps the last good list if the read fails. A server that cannot announce changes needs a restart before new tools appear. Two tools that would share one `{server}__{tool}` name are kept off the list until the clash is resolved.
 
-Arguments, headers, environment values and OAuth tokens go straight into the OS credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. Prism protects *all* of them rather than guessing which ones are secrets, since tokens have a way of ending up in URLs and positional arguments. `prism.json` keeps only the name, executable or URL, auth mode, enabled flag and an opaque credential reference. Copying `prism.json` to another machine does not copy credentials; add the servers again there.
+Arguments, headers, environment values and OAuth tokens go straight into the OS credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. Prism protects *all* of them rather than guessing which ones are secrets, since tokens have a way of ending up in URLs and positional arguments. `prism.json` keeps only the name, executable or URL, auth mode, enabled flag and an opaque credential reference. Copying `prism.json` to another machine does not copy credentials; provision or add the servers again there.
 
 Servers receive a small environment allowlist (PATH, HOME, locale, temp and XDG directories, the platform's display and profile variables) plus what you configured. Your shell's other tokens are not inherited. Server stderr is discarded so a chatty server cannot echo a credential into a log.
 
 If the credential store is locked when Prism starts, affected servers show as failed and the panel stays usable. Unlock the store and restart the server.
+
+### Provision servers from a manifest
+
+`prism-provision` applies a version 1 JSON manifest to a **stopped** profile. Build the command with `cargo build -p prism-core --bin prism-provision --release`, or install it with `cargo install --path crates/prism-core --bin prism-provision --locked`. It uses the same OS credential store as the desktop app and requires that store to be available in the applying user's session.
+
+```json
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "github",
+      "name": "GitHub",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "auth": "header",
+      "headers": {
+        "Authorization": { "env": "PRISM_GITHUB_TOKEN", "prefix": "Bearer " }
+      }
+    }
+  ]
+}
+```
+
+Quit Prism, supply `PRISM_GITHUB_TOKEN` through your secret manager or process environment, then apply:
+
+```sh
+prism-provision apply servers.json --config "$HOME/.config/dev.prism.gateway/prism.json"
+```
+
+Use the configuration path for your OS from the table above. In PowerShell, for example: `prism-provision.exe apply servers.json --config "$env:APPDATA\dev.prism.gateway\prism.json"`. The config's parent must be a dedicated Prism directory: Prism makes its storage private. The profile lock prevents another current gateway or importer from using that profile simultaneously. Older Prism builds do not understand this lock and must be quit before applying.
+
+Start Prism normally afterward. Enabled servers connect from the saved configuration without **Add server**. Every remote entry requires explicit `auth`: `none`, `header`, or `oauth`. Header auth takes precedence over advertised OAuth metadata. OAuth still requires interactive sign-in; apply does not grant consent or open a browser.
+
+IDs are stable across applies (1–80 ASCII letters, digits, hyphens or underscores). Entries update in place; omitted servers, rules, hidden tools and agent permissions are preserved. `enabled` defaults to true. A command entry uses `command`, optional `args` and `env` in place of `url`; environment values use the same `{ "env": "VARIABLE", "prefix": "" }` references. Arguments are literal strings; use environment references for secrets. Changing between command and URL requires a new ID. Unspecified launch values are cleared, so each entry describes its complete desired connection. URLs and executable names must not contain credentials.
+
+Credential variables resolve **at apply time**, and their values go into the OS store. They are not interpolated into `prism.json`, logged or printed. Environment references are the supported source in version 1; file and executable sources are rejected. Missing/empty variables, malformed manifests and unavailable credentials fail before config replacement. Reapplying unchanged values preserves credential references. Apply prints only added/updated/unchanged counts and `cleanup_pending`; if that flag is true, the config committed but old store entries could not be removed. If a disk replacement fails, verified old and new credential entries are retained for recovery. This offline command forgets obsolete local OAuth credentials; revoke a remote provider grant separately when required.
 
 ## Connect an agent
 
