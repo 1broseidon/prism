@@ -39,6 +39,69 @@ use crate::listener::{socket, BindFailure, Listener, ListenerState, Serving};
 use crate::oauth::{self, AuthenticatedAgent, OAuthState, TokenView};
 use crate::policy::{self, Decider, ToolAnnotations, Verdict};
 
+#[cfg(test)]
+#[path = "server_edit_tests.rs"]
+mod server_edit_tests;
+
+/// Fields supplied by an in-place server edit. Secret values are plaintext only until saved.
+#[derive(Default)]
+pub struct ServerUpdate {
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub auth: Option<HttpAuth>,
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Validate resolved launch settings for both additions and edits.
+fn validate_server(
+    server: &mut ServerConfig,
+    servers: &[ServerConfig],
+    replacing: Option<&str>,
+) -> Result<()> {
+    server.name = server.name.trim().to_string();
+    if server.name.trim().is_empty() {
+        return Err(Error::Invalid("server name is required".into()));
+    }
+    match server.url.as_deref() {
+        Some(url) => {
+            server.url = Some(crate::remote::validate_url(url)?);
+            if !server.command.trim().is_empty()
+                || !server.args.is_empty()
+                || !server.env.is_empty()
+            {
+                return Err(Error::Invalid(
+                    "a remote server has a URL, not a command".into(),
+                ));
+            }
+            server.command.clear();
+            if server.auth == HttpAuth::Header && server.headers.is_empty() {
+                return Err(Error::Invalid("header auth needs a header".into()));
+            }
+            crate::remote::transport_config(server.url.as_deref().unwrap(), &server.headers)?;
+        }
+        None => {
+            if server.command.trim().is_empty() {
+                return Err(Error::Invalid("server command is required".into()));
+            }
+            if !server.headers.is_empty() || server.auth != HttpAuth::None {
+                return Err(Error::Invalid(
+                    "headers and auth apply to remote servers only".into(),
+                ));
+            }
+        }
+    }
+    if servers.iter().any(|existing| {
+        Some(existing.id.as_str()) != replacing
+            && (existing.id == server.id || existing.name == server.name)
+    }) {
+        return Err(Error::AlreadyExists(format!("server {}", server.name)));
+    }
+    Ok(())
+}
+
 /// Live gateway status for the desktop UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayStatus {
@@ -198,6 +261,8 @@ pub struct Gateway {
     hook_token_path: PathBuf,
     native_budget: std::sync::Mutex<crate::native::EventBudget>,
     native_last: std::sync::Mutex<HashMap<String, chrono::DateTime<Utc>>>,
+    /// Serialize configuration, credentials and activation for each server together.
+    server_mutations: std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl Gateway {
@@ -281,6 +346,7 @@ impl Gateway {
             hook_token_path,
             native_budget: std::sync::Mutex::new(Default::default()),
             native_last: std::sync::Mutex::new(HashMap::new()),
+            server_mutations: Default::default(),
         });
 
         for server in config.servers.into_iter().filter(|s| s.enabled) {
@@ -405,6 +471,30 @@ impl Gateway {
             .collect()
     }
 
+    async fn server_mutation(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.server_mutations.lock().expect("server mutation locks");
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            match locks.get(id).and_then(std::sync::Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(id.to_string(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+
+    /// Called while holding this server's mutation lock. Shutdown never starts a backend.
+    async fn activate_server(&self, server: ServerConfig) {
+        self.backends.stop(&server.id).await;
+        if !self.shutdown.is_cancelled() {
+            self.backends.start(server).await;
+        }
+    }
+
     pub async fn add_server(&self, mut server: ServerConfig) -> Result<ServerConfig> {
         if server.credential_ref.is_some() {
             return Err(Error::Invalid(
@@ -414,53 +504,17 @@ impl Gateway {
         if server.id.is_empty() {
             server.id = uuid::Uuid::new_v4().to_string();
         }
-        if server.name.trim().is_empty() {
-            return Err(Error::Invalid("server name is required".into()));
-        }
+        let _mutation = self.server_mutation(&server.id).await;
         if server.oauth_ref.is_some() {
             return Err(Error::Invalid(
                 "new servers must not carry an OAuth credential reference".into(),
             ));
         }
-        match server.url.as_deref() {
-            Some(url) => {
-                server.url = Some(crate::remote::validate_url(url)?);
-                if !server.command.trim().is_empty()
-                    || !server.args.is_empty()
-                    || !server.env.is_empty()
-                {
-                    return Err(Error::Invalid(
-                        "a remote server has a URL, not a command".into(),
-                    ));
-                }
-                server.command.clear();
-                match server.auth {
-                    HttpAuth::Header if server.headers.is_empty() => {
-                        return Err(Error::Invalid("header auth needs a header".into()));
-                    }
-                    HttpAuth::Oauth => server.oauth_ref = Some(uuid::Uuid::new_v4().to_string()),
-                    _ => {}
-                }
-            }
-            None => {
-                if server.command.trim().is_empty() {
-                    return Err(Error::Invalid("server command is required".into()));
-                }
-                if !server.headers.is_empty() || server.auth != HttpAuth::None {
-                    return Err(Error::Invalid(
-                        "headers and auth apply to remote servers only".into(),
-                    ));
-                }
-            }
-        }
         {
             let mut config = self.config.write().await;
-            if config
-                .servers
-                .iter()
-                .any(|s| s.id == server.id || s.name == server.name)
-            {
-                return Err(Error::AlreadyExists(format!("server {}", server.name)));
+            validate_server(&mut server, &config.servers, None)?;
+            if server.auth == HttpAuth::Oauth {
+                server.oauth_ref = Some(uuid::Uuid::new_v4().to_string());
             }
             let store = self.credentials.clone();
             server = tokio::task::spawn_blocking(move || {
@@ -475,11 +529,164 @@ impl Gateway {
             updated.save(&self.config_path)?;
             *config = updated;
         }
-        self.backends.start(server.clone()).await;
+        self.activate_server(server.clone()).await;
+        Ok(server)
+    }
+
+    /// Probe with a saved registration when this URL already belongs to an OAuth server.
+    pub async fn probe_server_url(&self, url: &str) -> Result<crate::remote::RemoteProbe> {
+        let url = crate::remote::validate_url(url)?;
+        let server = self
+            .config
+            .read()
+            .await
+            .servers
+            .iter()
+            .find(|server| server.url.as_deref() == Some(&url) && server.oauth_ref.is_some())
+            .cloned();
+        crate::remote::probe_configured(&url, server.as_ref(), self.credentials.clone()).await
+    }
+
+    /// Replace selected fields without changing server identity, exposure, or rules.
+    pub async fn update_server(
+        &self,
+        server_id: &str,
+        update: ServerUpdate,
+    ) -> Result<ServerConfig> {
+        let _mutation = self.server_mutation(server_id).await;
+        let (previous, server) = {
+            let mut config = self.config.write().await;
+            let index = config
+                .servers
+                .iter()
+                .position(|server| server.id == server_id)
+                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
+            let previous = config.servers[index].clone();
+            if !previous.is_remote() && update.url.is_some() {
+                return Err(Error::Invalid(
+                    "a command server cannot be changed to a remote server".into(),
+                ));
+            }
+            let next_url = update
+                .url
+                .as_deref()
+                .map(crate::remote::validate_url)
+                .transpose()?;
+            let url_changed = next_url
+                .as_ref()
+                .is_some_and(|url| Some(url) != previous.url.as_ref());
+            let origin_changed = match (previous.url.as_deref(), next_url.as_deref()) {
+                (Some(old), Some(new)) => {
+                    reqwest::Url::parse(old).map(|u| u.origin()).ok()
+                        != reqwest::Url::parse(new).map(|u| u.origin()).ok()
+                }
+                _ => false,
+            };
+            let next_auth = update.auth.unwrap_or(previous.auth);
+            if origin_changed && next_auth == HttpAuth::Header && update.headers.is_none() {
+                return Err(Error::Invalid(
+                    "enter the API key again when changing the server's origin".into(),
+                ));
+            }
+            let clear_headers = previous.is_remote()
+                && (next_auth == HttpAuth::None
+                    || (update.headers.is_none()
+                        && (origin_changed || next_auth != previous.auth)));
+            let replacing_secrets = update.headers.is_some()
+                || update.args.is_some()
+                || update.env.is_some()
+                || (clear_headers && previous.credential_ref.is_some());
+            let store = self.credentials.clone();
+            let original = previous.clone();
+            let mut server = tokio::task::spawn_blocking(move || {
+                let launch = crate::credentials::resolve(store.as_ref(), &original)?;
+                let mut server = original;
+                server.args = update.args.unwrap_or(launch.args);
+                server.env = update.env.unwrap_or(launch.env);
+                server.headers = update.headers.unwrap_or(launch.headers);
+                if let Some(name) = update.name {
+                    server.name = name;
+                }
+                if let Some(url) = next_url {
+                    server.url = Some(url);
+                }
+                if let Some(command) = update.command {
+                    server.command = command;
+                }
+                if let Some(auth) = update.auth {
+                    server.auth = auth;
+                }
+                if clear_headers {
+                    server.headers.clear();
+                }
+                Ok::<_, Error>(server)
+            })
+            .await
+            .map_err(|_| Error::Gateway("could not read server credentials".into()))??;
+            validate_server(&mut server, &config.servers, Some(server_id))?;
+            if server.auth == HttpAuth::Oauth {
+                // A different resource requires a fresh registration/sign-in, even
+                // when it shares the origin. Never retarget saved OAuth tokens.
+                if server.oauth_ref.is_none() || url_changed {
+                    server.oauth_ref = Some(uuid::Uuid::new_v4().to_string());
+                }
+            } else {
+                server.oauth_ref = None;
+            }
+            if replacing_secrets {
+                server.credential_ref = None;
+                let store = self.credentials.clone();
+                server = tokio::task::spawn_blocking(move || {
+                    crate::credentials::protect_server(store.as_ref(), &mut server)?;
+                    Ok::<_, Error>(server)
+                })
+                .await
+                .map_err(|_| Error::Gateway("could not store server credentials".into()))??;
+            } else {
+                // The resolved values are for validation only; preserve the original blob.
+                server.args = previous.args.clone();
+                server.env = previous.env.clone();
+                server.headers = previous.headers.clone();
+            }
+            let mut updated = config.clone();
+            updated.servers[index] = server.clone();
+            // Keep both blobs if the disk outcome is uncertain, so either config is recoverable.
+            updated.save(&self.config_path)?;
+            *config = updated;
+            (previous, server)
+        };
+        self.backends.stop(server_id).await;
+        let store = self.credentials.clone();
+        let old_reference = previous
+            .credential_ref
+            .clone()
+            .filter(|id| Some(id) != server.credential_ref.as_ref());
+        let cleanup = tokio::task::spawn_blocking(move || {
+            old_reference
+                .map(|id| crate::credentials::delete(store.as_ref(), &id))
+                .transpose()
+                .map(|_| ())
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(Error::Gateway(
+                "could not clean up server credentials".into(),
+            ))
+        });
+        let sign_out = if previous.oauth_ref.is_some() && previous.oauth_ref != server.oauth_ref {
+            crate::remote::sign_out(&previous, self.credentials.clone()).await
+        } else {
+            Ok(())
+        };
+        self.activate_server(server.clone()).await;
+        if cleanup.and(sign_out).is_err() {
+            return Err(Error::ServerUpdatedCleanupFailed);
+        }
         Ok(server)
     }
 
     pub async fn remove_server(&self, server_id: &str) -> Result<()> {
+        let _mutation = self.server_mutation(server_id).await;
         let removed = {
             let mut config = self.config.write().await;
             let server = config
@@ -515,7 +722,10 @@ impl Gateway {
     }
 
     pub async fn restart_server(&self, server_id: &str) -> Result<()> {
-        self.backends.restart(server_id).await
+        let _mutation = self.server_mutation(server_id).await;
+        let server = self.server_config(server_id).await?;
+        self.activate_server(server).await;
+        Ok(())
     }
 
     /// Show or hide one tool of a server for every agent. Saved to config; the next list or call sees it.
@@ -571,6 +781,7 @@ impl Gateway {
     /// Start a browser sign-in for an OAuth server and return the URL to open. The server
     /// reconnects on its own once the browser comes back; a failure lands in its status.
     pub async fn sign_in_server(self: &Arc<Self>, server_id: &str) -> Result<String> {
+        let _mutation = self.server_mutation(server_id).await;
         let config = self.server_config(server_id).await?;
         if config.auth != HttpAuth::Oauth {
             return Err(Error::Invalid("this server does not use OAuth".into()));
@@ -583,32 +794,68 @@ impl Gateway {
                 .done
                 .await
                 .unwrap_or_else(|_| Err(Error::Gateway("sign-in was cancelled".into())));
-            match outcome {
-                Ok(()) => {
-                    gateway.backends.stop(&config.id).await;
-                    gateway.backends.start(config).await;
-                }
-                Err(err) => {
-                    gateway
-                        .backends
-                        .mark_failed(&config.id, err.to_string())
-                        .await
-                }
-            }
+            gateway.finish_server_sign_in(config, outcome).await;
         });
         Ok(url)
     }
 
+    async fn finish_server_sign_in(&self, previous: ServerConfig, outcome: Result<()>) {
+        let _mutation = self.server_mutation(&previous.id).await;
+        let current = self
+            .server_config(&previous.id)
+            .await
+            .ok()
+            .filter(|server| {
+                server.auth == HttpAuth::Oauth
+                    && server.oauth_ref == previous.oauth_ref
+                    && server.url == previous.url
+            });
+        let Some(current) = current else {
+            // An edit/remove/sign-out superseded the browser while it was open.
+            // Its late credential save must not resurrect the old server or tokens.
+            let _ = crate::remote::sign_out(&previous, self.credentials.clone()).await;
+            return;
+        };
+        if self.shutdown.is_cancelled() {
+            return;
+        }
+        match outcome {
+            Ok(()) => self.activate_server(current).await,
+            Err(err) => {
+                self.backends
+                    .mark_failed(&current.id, err.to_string())
+                    .await
+            }
+        }
+    }
+
     /// Forget an OAuth server's tokens and registration. It shows as needing a sign-in.
     pub async fn sign_out_server(&self, server_id: &str) -> Result<()> {
+        let _mutation = self.server_mutation(server_id).await;
         let config = self.server_config(server_id).await?;
         if config.auth != HttpAuth::Oauth {
             return Err(Error::Invalid("this server does not use OAuth".into()));
         }
+        let mut signed_out = config.clone();
+        signed_out.oauth_ref = Some(uuid::Uuid::new_v4().to_string());
+        {
+            let mut live = self.config.write().await;
+            let mut updated = live.clone();
+            let server = updated
+                .servers
+                .iter_mut()
+                .find(|server| server.id == server_id)
+                .ok_or_else(|| Error::NotFound(format!("server {server_id}")))?;
+            server.oauth_ref = signed_out.oauth_ref.clone();
+            updated.save(&self.config_path)?;
+            *live = updated;
+        }
         self.backends.stop(server_id).await;
-        crate::remote::sign_out(&config, self.credentials.clone()).await?;
-        self.backends.start(config).await;
-        Ok(())
+        let cleanup = crate::remote::sign_out(&config, self.credentials.clone()).await;
+        self.activate_server(signed_out).await;
+        cleanup.map_err(|_| {
+            Error::Gateway("server signed out, but old credentials could not be removed".into())
+        })
     }
 
     pub async fn agents(&self) -> Vec<AgentView> {
@@ -1380,6 +1627,7 @@ impl Gateway {
             .map(|(c, _)| c.id)
             .collect();
         for id in ids {
+            let _mutation = self.server_mutation(&id).await;
             self.backends.stop(&id).await;
         }
         self.audit.close();
@@ -2461,6 +2709,7 @@ mod retained_history_tests {
             calls: std::sync::Mutex::new(HashMap::new()),
             native_budget: std::sync::Mutex::new(Default::default()),
             native_last: std::sync::Mutex::new(HashMap::new()),
+            server_mutations: Default::default(),
             hook_token: std::sync::RwLock::new("test-token".into()),
             hook_token_path: path.with_extension("hook-token"),
         }

@@ -76,13 +76,19 @@ The panel has four tabs. **Now** shows pending approvals and an activity summary
 
 **Command.** Give it a name, the executable, its arguments, and any environment variables. Prism does not install servers; it launches whatever executable you name, wherever your package manager put it.
 
-**URL.** Give it a name and the server's Streamable HTTP endpoint, then say how it authenticates:
+**URL.** Give it a name and the server's Streamable HTTP endpoint. Prism checks the endpoint and suggests an authentication method when it can; your explicit choice takes precedence. A failed check leaves the choice with you. Choose how it authenticates:
 
 - **None.** Public servers such as `https://docs.mcp.cloudflare.com/mcp`.
 - **API key.** A header sent on every request. The key goes in the `Authorization` header as `Bearer …` unless you name another header or give your own prefix. Use this for servers that hand out personal tokens rather than offering OAuth, such as GitHub's `https://api.githubcopilot.com/mcp/`.
 - **OAuth.** Prism signs in through your browser. It reads the server's sign-in settings from its 401 challenge, registers itself as a public client (dynamic client registration), runs the authorization code flow with PKCE, and takes the code back on a loopback listener that exists for that one sign-in. The callback shows progress until the exchange finishes and credentials are saved; only then does it show success. Servers that speak this include Linear, Sentry, Notion and Cloudflare. Servers without registration, such as GitHub, cannot be added this way; use an API key. **Sign out** on the server screen asks the provider to revoke the tokens when it offers revocation, then forgets them here. If the provider cannot be reached or does not support revocation, the local sign-out still completes; revoke the grant at the provider if that matters to you. Removing a server does the same. The server shows *needs sign-in* until you sign in again, which the row also offers.
 
 URLs must be https, except plain http to this machine. Headers and tokens follow the same rule as every other secret below.
+
+**Edit a server.** Open it from **Servers**, then choose **Edit** to change its name, URL and authentication, or its command and launch settings. Save reconnects it in place, preserving its ID, rules and hidden tools. Renaming changes the `{server}__{tool}` names that agents see. An authentication mismatch also offers **Edit** directly on the row.
+
+Stored secrets are never filled into the editor. Leave the API key blank to keep it; enter it again to change its header or move to another origin. Changing an OAuth URL requires signing in again. For commands, untouched arguments and blank environment keep the stored values; clearing edited arguments or choosing **Clear stored environment** removes them. Closing the panel parks an unfinished edit in memory, available from **Now → Resume**; Save, Cancel and Discard clear its secret draft.
+
+If Save reports that the server was saved but old credentials could not be removed, the new configuration is already active. Old entries may remain in the OS credential store; repeating the save is not needed.
 
 Open a server to hide or expose individual tools. Connected agents are told whenever the list changes, whether you hid a tool or the server itself added or changed one, so clients that follow tool-list updates refetch on their own. Prism re-reads only the server that changed and keeps the last good list if the read fails. A server that cannot announce changes needs a restart before new tools appear. Two tools that would share one `{server}__{tool}` name are kept off the list until the clash is resolved.
 

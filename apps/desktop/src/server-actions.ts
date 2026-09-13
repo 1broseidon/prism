@@ -34,12 +34,15 @@ export async function persistExposure(
   await refresh();
 }
 
-export type ServerPrimaryAction = "sign-in" | "retry" | null;
+export type ServerPrimaryAction = "sign-in" | "retry" | "edit" | null;
 
 /** Recovery stays in the row; everything else waits on the server's own screen. */
-export function serverPrimaryAction(auth: ServerView["auth"], statusKind: BackendStatus["kind"]): ServerPrimaryAction {
-  if (statusKind === "sign_in_required") return auth === "oauth" ? "sign-in" : "retry";
-  if (statusKind === "failed") return "retry";
-  if (statusKind === "stopped") return auth === "oauth" ? "sign-in" : "retry";
+export function serverPrimaryAction(auth: ServerView["auth"], status: BackendStatus): ServerPrimaryAction {
+  if (status.kind === "sign_in_required") {
+    if (status.hint === "oauth_available" || status.hint === "bearer_rejected") return "edit";
+    return auth === "oauth" ? "sign-in" : "retry";
+  }
+  if (status.kind === "failed") return "retry";
+  if (status.kind === "stopped") return auth === "oauth" ? "sign-in" : "retry";
   return null;
 }

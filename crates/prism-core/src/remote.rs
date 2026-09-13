@@ -40,7 +40,7 @@ pub const CLIENT_NAME: &str = "Prism";
 pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-use crate::backend::{McpClient, Upstream};
+use crate::backend::{AuthHint, McpClient, Upstream};
 
 fn http_client() -> Result<reqwest::Client> {
     // No global timeout: SSE responses stay open for as long as the session lives.
@@ -73,7 +73,7 @@ pub(crate) fn validate_url(raw: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn transport_config(
+pub(crate) fn transport_config(
     url: &str,
     headers: &std::collections::BTreeMap<String, String>,
 ) -> Result<StreamableHttpClientTransportConfig> {
@@ -95,7 +95,7 @@ fn transport_config(
 fn describe(err: AuthError) -> Error {
     // Never echo the server's text: it may carry URLs with codes or tokens.
     match err {
-        AuthError::AuthorizationRequired => Error::SignInRequired,
+        AuthError::AuthorizationRequired => Error::SignInRequired(AuthHint::SignIn),
         AuthError::NoAuthorizationSupport => {
             Error::Gateway("this server does not offer OAuth sign-in".into())
         }
@@ -118,23 +118,271 @@ fn describe(err: AuthError) -> Error {
     }
 }
 
-async fn handshake<F>(serve: F) -> Result<McpClient>
+const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// An unauthenticated endpoint check. No provider-controlled text leaves this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemoteProbe {
+    Open,
+    OauthReady,
+    BearerLikely { reason: BearerReason },
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BearerReason {
+    NoOauthMetadata,
+    NoClientRegistration,
+    OauthBroken,
+}
+
+fn bearer_reason(error: AuthError) -> BearerReason {
+    match error {
+        AuthError::NoAuthorizationSupport => BearerReason::NoOauthMetadata,
+        AuthError::RegistrationFailed(_) => BearerReason::NoClientRegistration,
+        AuthError::MetadataError(_) | AuthError::PkceUnsupported => BearerReason::OauthBroken,
+        _ => BearerReason::OauthBroken,
+    }
+}
+
+fn auth_hint(readiness: std::result::Result<(), BearerReason>) -> AuthHint {
+    match readiness {
+        Ok(()) => AuthHint::OauthAvailable,
+        Err(BearerReason::OauthBroken) => AuthHint::Unknown,
+        Err(_) => AuthHint::BearerRejected,
+    }
+}
+
+/// Discovery and registration only: no browser, tokens, or persisted probe credentials.
+async fn oauth_readiness(
+    url: &str,
+    challenge: Option<&str>,
+    tokens: Option<Tokens>,
+) -> std::result::Result<(), BearerReason> {
+    let mut manager = AuthorizationManager::new(url)
+        .await
+        .map_err(bearer_reason)?;
+    manager
+        .with_client(http_client().map_err(|_| BearerReason::OauthBroken)?)
+        .map_err(bearer_reason)?;
+    let resolution = manager
+        .resolve_metadata_from_challenge(challenge)
+        .await
+        .map_err(bearer_reason)?;
+    if !resolution.source.is_discovered() {
+        return Err(
+            if challenge.is_some_and(|value| value.contains("resource_metadata=")) {
+                BearerReason::OauthBroken
+            } else {
+                BearerReason::NoOauthMetadata
+            },
+        );
+    }
+    let issuer = resolution.metadata.issuer.clone();
+    manager.set_metadata(resolution.metadata);
+    if let Some(tokens) = tokens {
+        if let Some(stored) = tokens.load().await.map_err(bearer_reason)? {
+            if !stored.client_id.is_empty() && stored.issuer == issuer {
+                manager
+                    .configure_client_id(&stored.client_id)
+                    .map_err(bearer_reason)?;
+                manager
+                    .get_authorization_url(&[])
+                    .await
+                    .map_err(bearer_reason)?;
+                return Ok(());
+            }
+        }
+    }
+    manager
+        .register_client(CLIENT_NAME, "http://127.0.0.1/callback", &[])
+        .await
+        .map_err(bearer_reason)?;
+    manager
+        .get_authorization_url(&[])
+        .await
+        .map_err(bearer_reason)?;
+    Ok(())
+}
+
+/// Validate and classify an endpoint within one eight-second budget.
+pub async fn probe_remote(url: &str) -> Result<RemoteProbe> {
+    probe_with_tokens(url, None).await
+}
+
+pub(crate) async fn probe_configured(
+    url: &str,
+    config: Option<&ServerConfig>,
+    store: Arc<dyn CredentialStore>,
+) -> Result<RemoteProbe> {
+    let tokens = config.and_then(|config| Tokens::new(store, config.oauth_ref.clone()).ok());
+    probe_with_tokens(url, tokens).await
+}
+
+fn initialize_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+    client
+        .post(url)
+        .header(http::header::ACCEPT, "application/json, text/event-stream")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": { "name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION") } }
+        }))
+}
+
+async fn probe_with_tokens(url: &str, tokens: Option<Tokens>) -> Result<RemoteProbe> {
+    let url = validate_url(url)?;
+    let client = http_client()?;
+    let config = transport_config(&url, &Default::default())?;
+    Ok(tokio::time::timeout(PROBE_TIMEOUT, async {
+        // Inspect status and challenge directly, without parsing provider error messages.
+        let response = match initialize_request(&client, &url).send().await {
+            Ok(response) => response,
+            Err(_) => return RemoteProbe::Unreachable,
+        };
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let challenge = response
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok());
+            return match oauth_readiness(&url, challenge, tokens).await {
+                Ok(()) => RemoteProbe::OauthReady,
+                Err(reason) => RemoteProbe::BearerLikely { reason },
+            };
+        }
+        if response.status() != StatusCode::OK {
+            return RemoteProbe::Unreachable;
+        }
+        // Dispose of the preliminary initialize's session before the full lifecycle check.
+        let session = response.headers().get("mcp-session-id").cloned();
+        drop(response);
+        if let Some(session) = session {
+            let _ = client
+                .delete(&url)
+                .header("mcp-session-id", session)
+                .header("mcp-protocol-version", "2025-11-25")
+                .send()
+                .await;
+        }
+        let transport = StreamableHttpClientTransport::with_client(client, config);
+        match Upstream::default()
+            .serve_with_lifecycle(transport, remote_lifecycle())
+            .await
+        {
+            Ok(client) => {
+                client.cancellation_token().cancel();
+                RemoteProbe::Open
+            }
+            Err(_) => RemoteProbe::Unreachable,
+        }
+    })
+    .await
+    .unwrap_or(RemoteProbe::Unreachable))
+}
+
+fn unauthorized(error: &rmcp::service::ClientInitializeError) -> bool {
+    use rmcp::service::ClientInitializeError;
+    use rmcp::transport::streamable_http_client::{AuthRequiredError, StreamableHttpError};
+    match error {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => unauthorized(fallback),
+        ClientInitializeError::TransportError { error, .. } => {
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
+            while let Some(error) = source {
+                if error.is::<AuthRequiredError>() {
+                    return true;
+                }
+                if let Some(StreamableHttpError::Client(error)) =
+                    error.downcast_ref::<StreamableHttpError<reqwest::Error>>()
+                {
+                    return error.status() == Some(StatusCode::UNAUTHORIZED);
+                }
+                source = error.source();
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+async fn handshake<F>(serve: F, auth: HttpAuth, url: &str) -> Result<McpClient>
 where
     F: std::future::Future<
         Output = std::result::Result<McpClient, rmcp::service::ClientInitializeError>,
     >,
 {
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, serve)
-        .await
-        .map_err(|_| Error::Backend("server handshake timed out".into()))?
-        .map_err(|err| {
-            let text = err.to_string();
-            if text.contains("401") || text.contains("Unauthorized") || text.contains("auth") {
-                Error::SignInRequired
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, serve).await {
+        Err(_) => Err(Error::Backend("server handshake timed out".into())),
+        Ok(Ok(client)) => Ok(client),
+        Ok(Err(error))
+            if unauthorized(&error)
+                || (auth == HttpAuth::Oauth && error.is_authorization_required()) =>
+        {
+            let hint = if auth == HttpAuth::Oauth {
+                AuthHint::SignIn
             } else {
-                Error::Backend("server handshake failed; check the URL and its sign-in".into())
+                match tokio::time::timeout(
+                    PROBE_TIMEOUT,
+                    oauth_readiness(url, error.auth_challenge(), None),
+                )
+                .await
+                {
+                    Ok(readiness) => auth_hint(readiness),
+                    Err(_) => AuthHint::Unknown,
+                }
+            };
+            Err(Error::SignInRequired(hint))
+        }
+        Ok(Err(_)) => Err(Error::Backend(
+            "server handshake failed; check the URL and its sign-in".into(),
+        )),
+    }
+}
+
+/// rmcp discards the status of a 401 without a challenge header. After an otherwise
+/// unclassified failure, inspect a real response using the same explicit credentials.
+async fn authentication_after_failure(
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Option<AuthHint> {
+    let client = http_client().ok()?;
+    let custom_headers: HeaderMap = transport_config(url, headers)
+        .ok()?
+        .custom_headers
+        .into_iter()
+        .collect();
+    let mut refused = false;
+    let result = tokio::time::timeout(PROBE_TIMEOUT, async {
+        let response = initialize_request(&client, url)
+            .headers(custom_headers.clone())
+            .send()
+            .await
+            .ok()?;
+        refused = response.status() == StatusCode::UNAUTHORIZED;
+        if !refused {
+            // A transient failure may have recovered; don't retain an orphaned session.
+            let session = response.headers().get("mcp-session-id").cloned();
+            drop(response);
+            if let Some(session) = session {
+                let _ = client
+                    .delete(url)
+                    .headers(custom_headers)
+                    .header("mcp-session-id", session)
+                    .header("mcp-protocol-version", "2025-11-25")
+                    .send()
+                    .await;
             }
-        })
+            return None;
+        }
+        let challenge = response
+            .headers()
+            .get(http::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok());
+        Some(auth_hint(oauth_readiness(url, challenge, None).await))
+    })
+    .await;
+    result.unwrap_or_else(|_| refused.then_some(AuthHint::Unknown))
 }
 
 /// Open a session to a remote server. `SignInRequired` means the operator must sign in first.
@@ -152,13 +400,29 @@ pub(crate) async fn connect(
         HttpAuth::None | HttpAuth::Header => {
             let transport =
                 StreamableHttpClientTransport::with_client(http_client()?, transport_config);
-            handshake(Upstream::default().serve_with_lifecycle(transport, remote_lifecycle())).await
+            let connected = handshake(
+                Upstream::default().serve_with_lifecycle(transport, remote_lifecycle()),
+                config.auth,
+                url,
+            )
+            .await;
+            if matches!(&connected, Err(Error::Backend(_))) {
+                if let Some(hint) = authentication_after_failure(url, &launch.headers).await {
+                    return Err(Error::SignInRequired(hint));
+                }
+            }
+            connected
         }
         HttpAuth::Oauth => {
             let manager = authorized_manager(config, store).await?;
             let client = AuthClient::new(http_client()?, manager);
             let transport = StreamableHttpClientTransport::with_client(client, transport_config);
-            handshake(Upstream::default().serve_with_lifecycle(transport, remote_lifecycle())).await
+            handshake(
+                Upstream::default().serve_with_lifecycle(transport, remote_lifecycle()),
+                config.auth,
+                url,
+            )
+            .await
         }
     }
 }
@@ -189,7 +453,7 @@ async fn authorized_manager(
         .map_err(|_| Error::Backend("server handshake timed out".into()))?
         .map_err(describe)?;
     if !ready {
-        return Err(Error::SignInRequired);
+        return Err(Error::SignInRequired(AuthHint::SignIn));
     }
     Ok(manager)
 }
@@ -761,6 +1025,308 @@ mod tests {
         port
     }
 
+    #[tokio::test]
+    async fn probe_classifies_open_bearer_and_unreachable_without_provider_text() {
+        let service: StreamableHttpService<Pinger, LocalSessionManager> =
+            StreamableHttpService::new(
+                || Ok(Pinger),
+                LocalSessionManager::default().into(),
+                StreamableHttpServerConfig::default().disable_allowed_hosts(),
+            );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, Router::new().nest_service("/mcp", service))
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            probe_remote(&format!("http://127.0.0.1:{port}/mcp"))
+                .await
+                .unwrap(),
+            RemoteProbe::Open
+        );
+        task.abort();
+        let bearer_port = pinger_on_loopback().await;
+        let bearer = probe_remote(&format!("http://127.0.0.1:{bearer_port}/mcp"))
+            .await
+            .unwrap();
+        assert_eq!(
+            bearer,
+            RemoteProbe::BearerLikely {
+                reason: BearerReason::NoOauthMetadata
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(bearer).unwrap(),
+            serde_json::json!({"kind": "bearer_likely", "reason": "no_oauth_metadata"})
+        );
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert_eq!(
+            probe_remote(&format!("http://127.0.0.1:{port}/mcp"))
+                .await
+                .unwrap(),
+            RemoteProbe::Unreachable
+        );
+        assert!(matches!(
+            probe_remote("not a URL").await,
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn authentication_status_uses_http_codes_even_without_a_challenge() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(|| async { StatusCode::UNAUTHORIZED }),
+            )
+            .route(
+                "/fake",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "401 Unauthorized auth secret provider text",
+                    )
+                }),
+            );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (events, _) = crate::events::channel();
+        let manager = BackendManager::new(events, Arc::new(MemoryStore::default()));
+        manager
+            .start(remote(
+                "no-challenge",
+                format!("http://127.0.0.1:{port}/mcp"),
+                HttpAuth::None,
+                BTreeMap::new(),
+            ))
+            .await;
+        let status = status_of(&manager, "no-challenge").await;
+        assert_eq!(
+            status,
+            BackendStatus::SignInRequired {
+                hint: AuthHint::BearerRejected
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({"kind":"sign_in_required", "hint":"bearer_rejected"})
+        );
+        manager
+            .start(remote(
+                "fake",
+                format!("http://127.0.0.1:{port}/fake"),
+                HttpAuth::None,
+                BTreeMap::new(),
+            ))
+            .await;
+        let status = status_of(&manager, "fake").await;
+        assert!(matches!(status, BackendStatus::Failed { .. }));
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("secret provider text"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_recognizes_prism_oauth_without_browser_sign_in() {
+        let (gateway, port, _dir) = gateway_on_loopback().await;
+        let url = format!("http://127.0.0.1:{port}/mcp");
+        assert_eq!(probe_remote(&url).await.unwrap(), RemoteProbe::OauthReady);
+        let (events, _) = crate::events::channel();
+        let manager = BackendManager::new(events, Arc::new(MemoryStore::default()));
+        manager
+            .start(remote(
+                "oauth-offered",
+                url,
+                HttpAuth::None,
+                BTreeMap::new(),
+            ))
+            .await;
+        assert_eq!(
+            status_of(&manager, "oauth-offered").await,
+            BackendStatus::SignInRequired {
+                hint: AuthHint::OauthAvailable
+            }
+        );
+        gateway.shutdown().await;
+    }
+
+    async fn metadata_server(pkce: bool, broken: bool) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let resource = serde_json::json!({"resource": format!("{base}/mcp"), "authorization_servers": [base.clone()]});
+        let metadata = serde_json::json!({
+            "issuer": base, "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"), "response_types_supported": ["code"],
+            "code_challenge_methods_supported": if pkce { vec!["S256"] } else { vec!["plain"] }
+        });
+        let challenge =
+            format!("Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\"");
+        let app = Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(move || {
+                    let challenge = challenge.clone();
+                    async move {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            [(http::header::WWW_AUTHENTICATE, challenge)],
+                            "secret provider text",
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(move || {
+                    let resource = resource.clone();
+                    async move { axum::Json(resource) }
+                }),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(move || {
+                    let metadata = metadata.clone();
+                    async move {
+                        if broken {
+                            (StatusCode::OK, "not json, secret provider text").into_response()
+                        } else {
+                            axum::Json(metadata).into_response()
+                        }
+                    }
+                }),
+            );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, task)
+    }
+
+    #[tokio::test]
+    async fn probe_requires_registration_and_accepts_an_existing_matching_registration() {
+        let (base, task) = metadata_server(true, false).await;
+        let url = format!("{base}/mcp");
+        assert_eq!(
+            probe_remote(&url).await.unwrap(),
+            RemoteProbe::BearerLikely {
+                reason: BearerReason::NoClientRegistration
+            }
+        );
+        let store = Arc::new(MemoryStore::default());
+        let mut config = remote("registered", url.clone(), HttpAuth::Oauth, BTreeMap::new());
+        config.oauth_ref = Some(uuid::Uuid::new_v4().to_string());
+        Tokens::new(store.clone(), config.oauth_ref.clone())
+            .unwrap()
+            .save(
+                StoredCredentials::new("registered-client".into(), None, vec![], None)
+                    .with_issuer(Some(base)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            probe_configured(&url, Some(&config), store).await.unwrap(),
+            RemoteProbe::OauthReady
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_reports_broken_metadata_and_pkce_as_closed_reasons() {
+        let (base, task) = metadata_server(true, true).await;
+        assert_eq!(
+            probe_remote(&format!("{base}/mcp")).await.unwrap(),
+            RemoteProbe::BearerLikely {
+                reason: BearerReason::OauthBroken
+            }
+        );
+        let (events, _) = crate::events::channel();
+        let manager = BackendManager::new(events, Arc::new(MemoryStore::default()));
+        manager
+            .start(remote(
+                "broken",
+                format!("{base}/mcp"),
+                HttpAuth::None,
+                BTreeMap::new(),
+            ))
+            .await;
+        assert_eq!(
+            status_of(&manager, "broken").await,
+            BackendStatus::SignInRequired {
+                hint: AuthHint::Unknown
+            },
+            "broken OAuth discovery is not evidence that an API key was rejected"
+        );
+        task.abort();
+        // A saved registration bypasses DCR, but never bypasses the PKCE readiness check.
+        let (base, task) = metadata_server(false, false).await;
+        let url = format!("{base}/mcp");
+        let store = Arc::new(MemoryStore::default());
+        let mut config = remote("registered", url.clone(), HttpAuth::Oauth, BTreeMap::new());
+        config.oauth_ref = Some(uuid::Uuid::new_v4().to_string());
+        Tokens::new(store.clone(), config.oauth_ref.clone())
+            .unwrap()
+            .save(
+                StoredCredentials::new("registered-client".into(), None, vec![], None)
+                    .with_issuer(Some(base)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            probe_configured(&url, Some(&config), store).await.unwrap(),
+            RemoteProbe::BearerLikely {
+                reason: BearerReason::OauthBroken
+            }
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_timeout_covers_discovery_too() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        [(http::header::WWW_AUTHENTICATE, "Bearer")],
+                    )
+                }),
+            )
+            .fallback(|| async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                StatusCode::OK
+            });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_remote(&format!("http://127.0.0.1:{port}/mcp"))
+                .await
+                .unwrap(),
+            RemoteProbe::Unreachable
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        task.abort();
+    }
+
     fn remote(
         name: &str,
         url: String,
@@ -833,7 +1399,9 @@ mod tests {
         assert!(
             matches!(
                 status_of(&manager, "bad").await,
-                BackendStatus::Failed { .. } | BackendStatus::SignInRequired
+                BackendStatus::SignInRequired {
+                    hint: AuthHint::BearerRejected
+                }
             ),
             "a refused key must not show as running"
         );
@@ -844,6 +1412,75 @@ mod tests {
             status_of(&manager, "none").await,
             BackendStatus::Running { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn editing_auth_recovers_the_same_server_and_preserves_tool_exposure() {
+        use crate::gateway::ServerUpdate;
+
+        let port = pinger_on_loopback().await;
+        let (gateway, _, dir) = gateway_on_loopback().await;
+        let added = gateway
+            .add_server(remote(
+                "editable",
+                format!("http://127.0.0.1:{port}/mcp"),
+                HttpAuth::None,
+                BTreeMap::new(),
+            ))
+            .await
+            .unwrap();
+        wait_for(&gateway, &added.id, "auth needed", |status| {
+            matches!(status, BackendStatus::SignInRequired { .. })
+        })
+        .await;
+        gateway
+            .set_tool_exposed(&added.id, "ping", false)
+            .await
+            .unwrap();
+
+        let updated = gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    name: Some("renamed".into()),
+                    auth: Some(HttpAuth::Header),
+                    headers: Some(BTreeMap::from([("Authorization".into(), TEST_KEY.into())])),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.id, added.id);
+        assert_eq!(updated.name, "renamed");
+        assert!(updated.hidden_tools.contains("ping"));
+        wait_for(&gateway, &added.id, "running", |status| {
+            matches!(status, BackendStatus::Running { tool_count: 1 })
+        })
+        .await;
+        let tools = gateway.server_tools(&added.id).await;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "ping");
+        assert!(!tools[0].exposed);
+        let saved = std::fs::read_to_string(dir.path().join("prism.json")).unwrap();
+        assert!(!saved.contains(TEST_KEY));
+        assert!(!saved.contains("Authorization"));
+
+        gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    auth: Some(HttpAuth::None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        wait_for(&gateway, &added.id, "auth needed again", |status| {
+            matches!(status, BackendStatus::SignInRequired { .. })
+        })
+        .await;
+        assert!(gateway.server_tools(&added.id).await.is_empty());
+        gateway.shutdown().await;
     }
 
     async fn gateway_on_loopback() -> (Arc<Gateway>, u16, tempfile::TempDir) {
@@ -1317,7 +1954,12 @@ mod tests {
             .unwrap();
         assert!(added.oauth_ref.is_some());
         wait_for(&gateway, &added.id, "sign-in required", |s| {
-            matches!(s, BackendStatus::SignInRequired)
+            matches!(
+                s,
+                BackendStatus::SignInRequired {
+                    hint: AuthHint::SignIn
+                }
+            )
         })
         .await;
 
@@ -1405,7 +2047,12 @@ mod tests {
         // Signing out forgets the tokens; the server asks again.
         gateway.sign_out_server(&added.id).await.unwrap();
         wait_for(&gateway, &added.id, "sign-in required again", |s| {
-            matches!(s, BackendStatus::SignInRequired)
+            matches!(
+                s,
+                BackendStatus::SignInRequired {
+                    hint: AuthHint::SignIn
+                }
+            )
         })
         .await;
     }

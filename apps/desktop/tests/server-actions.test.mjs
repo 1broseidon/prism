@@ -52,11 +52,20 @@ test("a failed refresh cannot roll back a committed exposure write", async () =>
 });
 
 test("recovery stays on the row and depends on how the server authenticates", () => {
-  assert.equal(serverPrimaryAction("oauth", "sign_in_required"), "sign-in");
-  assert.equal(serverPrimaryAction("header", "sign_in_required"), "retry");
-  assert.equal(serverPrimaryAction("none", "failed"), "retry");
-  assert.equal(serverPrimaryAction("oauth", "stopped"), "sign-in");
-  assert.equal(serverPrimaryAction("none", "stopped"), "retry");
-  assert.equal(serverPrimaryAction("none", "running"), null);
-  assert.equal(serverPrimaryAction("oauth", "starting"), null);
+  assert.equal(serverPrimaryAction("oauth", { kind: "sign_in_required", hint: "unknown" }), "sign-in");
+  assert.equal(serverPrimaryAction("header", { kind: "sign_in_required", hint: "unknown" }), "retry");
+  assert.equal(serverPrimaryAction("none", { kind: "failed" }), "retry");
+  assert.equal(serverPrimaryAction("oauth", { kind: "stopped" }), "sign-in");
+  assert.equal(serverPrimaryAction("none", { kind: "stopped" }), "retry");
+  assert.equal(serverPrimaryAction("none", { kind: "running" }), null);
+  assert.equal(serverPrimaryAction("oauth", { kind: "starting" }), null);
+});
+
+test("known auth mismatches lead to an edit instead of repeating the same request", () => {
+  for (const auth of ["header", "none"]) {
+    for (const hint of ["bearer_rejected", "oauth_available"]) {
+      assert.equal(serverPrimaryAction(auth, { kind: "sign_in_required", hint }), "edit");
+    }
+  }
+  assert.equal(serverPrimaryAction("oauth", { kind: "sign_in_required", hint: "sign_in" }), "sign-in");
 });

@@ -3,7 +3,14 @@ export type BackendStatus =
   | { kind: "running"; tool_count: number }
   | { kind: "failed"; error: string }
   | { kind: "stopped" }
-  | { kind: "sign_in_required" };
+  | { kind: "sign_in_required"; hint: AuthHint };
+
+export type AuthHint = "sign_in" | "bearer_rejected" | "oauth_available" | "unknown";
+export type RemoteProbe =
+  | { kind: "open" }
+  | { kind: "oauth_ready" }
+  | { kind: "bearer_likely"; reason: "no_oauth_metadata" | "no_client_registration" | "oauth_broken" }
+  | { kind: "unreachable" };
 
 /** How a remote server is authenticated. Secrets live in the keyring, never in prism.json. */
 export type HttpAuth = "none" | "header" | "oauth";

@@ -28,7 +28,17 @@ pub enum BackendStatus {
     Running { tool_count: usize },
     Failed { error: String },
     Stopped,
-    SignInRequired,
+    SignInRequired { hint: AuthHint },
+}
+
+/// Closed guidance for a remote server that requires authentication.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthHint {
+    SignIn,
+    BearerRejected,
+    OauthAvailable,
+    Unknown,
 }
 
 /// Legacy notifications are coalesced before doing any network work.
@@ -180,7 +190,7 @@ impl BackendManager {
             }
             Err(err) => {
                 let status = match err {
-                    Error::SignInRequired => BackendStatus::SignInRequired,
+                    Error::SignInRequired(hint) => BackendStatus::SignInRequired { hint },
                     err => BackendStatus::Failed {
                         error: err.to_string(),
                     },
@@ -254,6 +264,7 @@ impl BackendManager {
         }
     }
 
+    #[cfg(test)]
     pub async fn restart(&self, server_id: &str) -> Result<()> {
         let config = self
             .backends

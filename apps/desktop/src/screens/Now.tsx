@@ -5,7 +5,7 @@ import { signal } from "@preact/signals";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import * as api from "../api";
 import { harnessSetupPending, reconcileQueue } from "../lifecycle";
-import { activity, activityError, agents, connectAgentDraft, discardResumableNavigation, errorMessage, issuingManualTokens, manualTokens, native, pending, push, queueCursor, queuePosition, resumableNavigation, resumeNavigation, signins, status, tab } from "../state";
+import { activity, activityError, agents, connectAgentDraft, discardResumableNavigation, errorMessage, issuingManualTokens, manualTokens, native, pending, push, queueCursor, queuePosition, resumableNavigation, resumeNavigation, savingServerEdits, signins, status, tab } from "../state";
 import { mmss, now, relative, secondsUntil } from "../time";
 import type { ActivitySummary, AgentConfig, DayActivity, Decision, PendingCall, PendingSignIn } from "../types";
 import { Button, ChevronIcon, Chip, Label, Screen, describeError, useCopy } from "../ui";
@@ -396,7 +396,9 @@ function ResumeRow() {
   const token = (top?.kind === "agent-connections" && manualTokens.value[top.agentId] !== undefined)
     || (top?.kind === "connect-agent" && !!connectAgentDraft.value.issuedAgentId);
   const issuing = top?.kind === "agent-connections" && !!issuingManualTokens.value[top.agentId];
+  const saving = top?.kind === "server" && !!savingServerEdits.value[top.serverId];
   const what = token ? "Saved token"
+    : top?.kind === "server" ? "Edit server"
     : top?.kind === "add-server" ? "Add server"
     : top?.kind === "connect-agent" ? "Connect an agent"
     : top?.kind === "harness-setup" ? `Set up ${harness(top.host)?.name ?? "agent"}`
@@ -407,7 +409,7 @@ function ResumeRow() {
         <span class="resume-eyebrow">{token ? "Not yet copied" : "Unfinished"}</span>
         {what}
       </span>
-      <Button variant="quiet" disabled={issuing} title={issuing ? "Token creation is still running" : undefined} onClick={discardResumableNavigation}>
+      <Button variant="quiet" disabled={issuing || saving} title={issuing || saving ? "Saving is still running" : undefined} onClick={discardResumableNavigation}>
         Discard
       </Button>
       <Button variant="quiet" class="resume" onClick={resumeNavigation}>

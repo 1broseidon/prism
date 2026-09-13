@@ -19,9 +19,12 @@ pub enum Error {
     Backend(String),
     #[error("gateway error: {0}")]
     Gateway(String),
-    /// A remote server uses OAuth and holds no usable tokens; the operator must sign in.
+    /// A remote server requires authentication; the hint describes the recovery.
     #[error("sign-in required")]
-    SignInRequired,
+    SignInRequired(crate::backend::AuthHint),
+    /// The edit is durable and active; callers must not offer to repeat the save.
+    #[error("server saved, but old credentials could not be fully removed from the keyring")]
+    ServerUpdatedCleanupFailed,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

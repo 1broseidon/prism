@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import * as api from "../api";
+import { ServerAuthFields } from "../ServerAuthFields";
 import { persistExposure, serverPrimaryAction, toolExposureActions } from "../server-actions";
-import { errorMessage, pop, servers, status, toolRevisions } from "../state";
-import type { ToolInfo } from "../types";
+import { beginServerEdit, discardServerEdit, errorMessage, pop, saveServerEdit, savingServerEdits, serverEditDrafts, servers, status, toolRevisions, updateServerEdit } from "../state";
+import { changedServerOrigin, serverEditArgs } from "../server-edit";
+import type { ServerView, ToolInfo } from "../types";
 import { Button, Chip, ConfirmButton, Label, REVEAL, Screen, ShowMore, StatusText, Switch, describeError, useReveal } from "../ui";
 import { authenticationGuidance, refreshServers, serverWhere, statusChip } from "./Servers";
 
@@ -12,6 +14,7 @@ export function ServerScreen({ serverId }: { serverId: string }) {
   const running = server?.status.kind === "running";
   const [tools, setTools] = useState<ToolInfo[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const editing = serverEditDrafts.value[serverId] !== undefined;
   const [updating, setUpdating] = useState<Set<string>>(new Set());
   const toolsRequest = useRef(0);
   const revision = toolRevisions.value[serverId] ?? 0;
@@ -36,7 +39,7 @@ export function ServerScreen({ serverId }: { serverId: string }) {
   // Removed elsewhere, or removed here: the screen has nothing to show, so it leaves.
   const loaded = status.value !== null;
   useEffect(() => {
-    if (loaded && !server) pop();
+    if (loaded && !server) { discardServerEdit(serverId); pop(); }
   }, [loaded, server]);
 
   const { rows, total, more } = useReveal(tools ?? [], REVEAL, serverId);
@@ -47,10 +50,10 @@ export function ServerScreen({ serverId }: { serverId: string }) {
     setBusy(true);
     try {
       await fn();
-      await refreshServers();
     } catch (err) {
       errorMessage.value = describeError(err);
     } finally {
+      try { await refreshServers(); } catch (err) { errorMessage.value ??= describeError(err); }
       setBusy(false);
     }
   };
@@ -81,7 +84,7 @@ export function ServerScreen({ serverId }: { serverId: string }) {
     });
   };
 
-  const primary = serverPrimaryAction(server.auth, server.status.kind);
+  const primary = serverPrimaryAction(server.auth, server.status);
   const guidance = authenticationGuidance(server);
   const exposed = tools?.filter((t) => t.exposed).length ?? 0;
   const footer = (
@@ -89,6 +92,7 @@ export function ServerScreen({ serverId }: { serverId: string }) {
       <ConfirmButton variant="danger" confirm="Remove?" busy={busy} onConfirm={() => void act(() => api.removeServer(server.id))}>
         Remove
       </ConfirmButton>
+      <Button busy={busy} disabled={editing} onClick={() => beginServerEdit(server)}>Edit</Button>
       {server.auth === "oauth" && running ? (
         <ConfirmButton variant="quiet" confirm="Sign out?" busy={busy} onConfirm={() => void act(() => api.signOutServer(server.id))}>
           Sign out
@@ -98,11 +102,13 @@ export function ServerScreen({ serverId }: { serverId: string }) {
         <Button variant="primary" busy={busy} onClick={() => void act(() => api.signInServer(server.id))}>Sign in</Button>
       ) : primary === "retry" ? (
         <Button variant="primary" busy={busy} onClick={() => void act(() => api.restartServer(server.id))}>Retry</Button>
-      ) : (
+      ) : primary === "edit" ? null : (
         <Button busy={busy} onClick={() => void act(() => api.restartServer(server.id))}>Restart</Button>
       )}
     </>
   );
+
+  if (editing) return <ServerEditor server={server} />;
 
   return (
     <div class="screen pushed">
@@ -145,4 +151,46 @@ export function ServerScreen({ serverId }: { serverId: string }) {
       </Screen>
     </div>
   );
+}
+
+/** Secret values are deliberately blank; omission preserves the stored launch settings. */
+function ServerEditor({ server }: { server: ServerView }) {
+  const draft = serverEditDrafts.value[server.id];
+  const busy = savingServerEdits.value[server.id] ?? false;
+  if (!draft) return null;
+  const patch = (value: Partial<typeof draft>) => updateServerEdit(server.id, value);
+  const requireKey = server.auth !== "header" || changedServerOrigin(server, draft);
+  const save = (event: Event) => {
+    event.preventDefault();
+    if (busy) return;
+    try {
+      const args = serverEditArgs(server, draft);
+      void saveServerEdit(server.id, () => api.updateServer(server.id, args), refreshServers)
+        .catch(err => { errorMessage.value = describeError(err); });
+    } catch (err) { errorMessage.value = describeError(err); }
+  };
+  return <form class="screen pushed" onSubmit={save}>
+    <Screen footer={<>
+      <Button busy={busy} onClick={() => discardServerEdit(server.id)}>Cancel</Button>
+      <Button type="submit" variant="primary" busy={busy}>{busy ? "Saving…" : "Save"}</Button>
+    </>}>
+      <Label>Edit server</Label>
+      <fieldset class="fields" disabled={busy} style={{ border: 0, padding: 0, minWidth: 0 }}>
+        <label class="field"><span>Name</span><input class="input" required autoFocus value={draft.name} onInput={event => patch({ name: event.currentTarget.value })} /></label>
+        {server.url !== null ? <>
+          <label class="field"><span>URL</span><input class="input mono" type="url" required value={draft.url} onInput={event => patch({ url: event.currentTarget.value })} />
+            {changedServerOrigin(server, draft) && draft.auth === "header" ? <small>A different origin needs the API key entered again.</small> : null}
+            {draft.auth === "oauth" && draft.url.trim() !== server.url ? <small>Changing this URL requires signing in again.</small> : null}
+          </label>
+          <ServerAuthFields editing requireKey={requireKey} auth={draft.auth} header={draft.header} secret={draft.secret}
+            onAuth={auth => patch({ auth })} onHeader={header => patch({ header })} onSecret={secret => patch({ secret })} />
+        </> : <>
+          <label class="field"><span>Command</span><input class="input mono" required value={draft.command} onInput={event => patch({ command: event.currentTarget.value })} /></label>
+          <label class="field"><span>Arguments</span><input class="input mono" value={draft.args} placeholder="unchanged" onInput={event => patch({ args: event.currentTarget.value, argsTouched: true })} /><small>Space-separated. Leave untouched to keep stored arguments; clear to remove.</small></label>
+          <label class="field"><span>Environment</span><textarea class="input mono" disabled={draft.clearEnv} value={draft.env} placeholder="unchanged" onInput={event => patch({ env: event.currentTarget.value })} /><small>KEY=value per line replaces the stored environment.</small></label>
+          <label class="field"><span><input type="checkbox" checked={draft.clearEnv} onChange={event => patch({ clearEnv: event.currentTarget.checked })} /> Clear stored environment</span></label>
+        </>}
+      </fieldset>
+    </Screen>
+  </form>;
 }

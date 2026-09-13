@@ -646,6 +646,70 @@ async fn add_server(state: State<'_, AppState>, args: AddServerArgs) -> Result<S
 }
 
 #[tauri::command]
+async fn probe_server_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<prism_core::remote::RemoteProbe, String> {
+    state.gateway.probe_server_url(&url).await.map_err(map_err)
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateServerArgs {
+    name: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<std::collections::BTreeMap<String, String>>,
+    url: Option<String>,
+    auth: Option<prism_core::HttpAuth>,
+    headers: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[tauri::command]
+async fn update_server(
+    state: State<'_, AppState>,
+    server_id: String,
+    args: UpdateServerArgs,
+) -> Result<UpdatedServer, String> {
+    let result = state
+        .gateway
+        .update_server(
+            &server_id,
+            prism_core::ServerUpdate {
+                name: args.name,
+                command: args.command,
+                args: args.args,
+                env: args.env,
+                url: args.url,
+                auth: args.auth,
+                headers: args.headers,
+            },
+        )
+        .await;
+    let warning = match result {
+        Ok(_) => None,
+        Err(prism_core::Error::ServerUpdatedCleanupFailed) => Some(
+            "Server saved, but old credentials could not be fully removed from the keyring."
+                .to_string(),
+        ),
+        Err(err) => return Err(map_err(err)),
+    };
+    let server = state
+        .gateway
+        .servers()
+        .await
+        .into_iter()
+        .find(|server| server.id == server_id)
+        .ok_or_else(|| "server is no longer configured".to_string())?;
+    Ok(UpdatedServer { server, warning })
+}
+
+#[derive(serde::Serialize)]
+struct UpdatedServer {
+    server: ServerView,
+    warning: Option<String>,
+}
+
+#[tauri::command]
 async fn remove_server(state: State<'_, AppState>, server_id: String) -> Result<(), String> {
     state
         .gateway
@@ -1656,6 +1720,8 @@ pub fn run() {
             get_status,
             list_servers,
             add_server,
+            probe_server_url,
+            update_server,
             remove_server,
             restart_server,
             sign_in_server,

@@ -14,7 +14,7 @@ mod listener;
 pub mod native;
 mod oauth;
 pub mod policy;
-mod remote;
+pub mod remote;
 mod shell_path;
 mod storage;
 
@@ -26,7 +26,7 @@ pub use audit::{
     AuditEntry, AuditExport, AuditLog, AuditPage, AuditQuery, AuditSource, AuditVerdict,
     AuditWindow, NativeDetail,
 };
-pub use backend::{BackendStatus, ServerView};
+pub use backend::{AuthHint, BackendStatus, ServerView};
 pub use config::{
     AgentConfig, AgentStatus, Attention, HttpAuth, ListenAddress, PanelAnchor, Posture,
     PrismConfig, Rule, RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
@@ -34,7 +34,9 @@ pub use config::{
 pub use config::{OAuthClient, TokenKind, TokenRecord};
 pub use error::{Error, Result};
 pub use events::{EventReceiver, GatewayEvent};
-pub use gateway::{AgentView, ConnectSnippet, Gateway, GatewayStatus, NewRule, Settings, ToolInfo};
+pub use gateway::{
+    AgentView, ConnectSnippet, Gateway, GatewayStatus, NewRule, ServerUpdate, Settings, ToolInfo,
+};
 pub use listener::{ListenerState, PortHolder};
 pub use native::{NativeStatus, ReasonCount, ShadowRule};
 pub use oauth::{

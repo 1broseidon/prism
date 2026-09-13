@@ -1,3 +1,5 @@
+import type { UpdateServerArgs } from "./api";
+import type { RemoteProbe } from "./types";
 import { HOSTS } from "./hosts";
 /** Fixture backend for `pnpm dev` in a plain browser, where Tauri's invoke is absent. Never used inside the app. */
 import type {
@@ -28,7 +30,7 @@ const servers: ServerView[] = [
   { id: "s1", name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/george/Projects"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 11 }, url: null, auth: "none", hidden_tools: [] },
   { id: "s2", name: "github", command: "docker", args: ["run", "-i", "--rm", "ghcr.io/github/github-mcp-server"], env: {}, credentials_stored: true, enabled: true, status: { kind: "running", tool_count: 42 }, url: null, auth: "none", hidden_tools: [] },
   { id: "s3", name: "postgres", command: "uvx", args: ["mcp-server-postgres", "postgres://localhost/app"], env: {}, credentials_stored: true, enabled: true, status: { kind: "failed", error: "connection refused (127.0.0.1:5432)" }, url: null, auth: "none", hidden_tools: [] },
-  { id: "s4", name: "linear", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "sign_in_required" }, url: "https://mcp.linear.app/mcp", auth: "oauth", hidden_tools: [] },
+  { id: "s4", name: "linear", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "sign_in_required", hint: "sign_in" }, url: "https://mcp.linear.app/mcp", auth: "oauth", hidden_tools: [] },
   { id: "s5", name: "cloudflare docs", command: "", args: [], env: {}, credentials_stored: false, enabled: true, status: { kind: "running", tool_count: 2 }, url: "https://docs.mcp.cloudflare.com/mcp", auth: "none", hidden_tools: [] },
 ];
 const agents: AgentConfig[] = [
@@ -210,19 +212,41 @@ export const mock = {
       env: {},
       credentials_stored: (a.args.args?.length ?? 0) > 0 || Object.keys(a.args.env ?? {}).length > 0 || Object.keys(a.args.headers ?? {}).length > 0,
       enabled: true,
-      status: remote && auth === "oauth" ? { kind: "sign_in_required" } : { kind: "starting" },
+      status: remote && auth === "oauth" ? { kind: "sign_in_required", hint: "sign_in" } : { kind: "starting" },
       url: a.args.url ?? null,
       auth,
     };
     servers.push(s);
     return delay(s);
   },
+  probe_server_url: (a: { url: string }): Promise<RemoteProbe> => {
+    // Browser fixtures never send credentials or probes to real providers.
+    const url = new URL(a.url);
+    const scenario = url.searchParams.get("probe");
+    return delay(scenario === "open" ? { kind: "open" }
+      : scenario === "bearer" ? { kind: "bearer_likely", reason: "no_client_registration" }
+      : scenario === "broken" ? { kind: "bearer_likely", reason: "oauth_broken" }
+      : scenario === "unreachable" ? { kind: "unreachable" } : { kind: "oauth_ready" });
+  },
+  update_server: (a: { serverId: string; args: UpdateServerArgs }) => {
+    const server = servers.find((s) => s.id === a.serverId)!;
+    if (servers.some((s) => s.id !== server.id && s.name === a.args.name)) return Promise.reject(new Error("A server already uses this name."));
+    if (a.args.name !== undefined) server.name = a.args.name;
+    if (a.args.url !== undefined) server.url = a.args.url;
+    if (a.args.command !== undefined) server.command = a.args.command;
+    if (a.args.auth !== undefined) server.auth = a.args.auth;
+    if (a.args.headers !== undefined) server.credentials_stored = Object.keys(a.args.headers).length > 0;
+    if (a.args.args !== undefined || a.args.env !== undefined) server.credentials_stored = true;
+    if (server.url && server.auth === "none") server.credentials_stored = false;
+    server.status = !server.enabled ? { kind: "stopped" } : server.auth === "oauth" ? { kind: "sign_in_required", hint: "sign_in" } : { kind: "starting" };
+    return delay({ server, warning: null });
+  },
   sign_in_server: (a: { serverId: string }) => {
     const s = servers.find((x) => x.id === a.serverId)!;
     window.setTimeout(() => { s.status = { kind: "running", tool_count: 9 }; }, 1500);
     return delay("https://mcp.example.com/authorize?client_id=prism");
   },
-  sign_out_server: (a: { serverId: string }) => { servers.find((x) => x.id === a.serverId)!.status = { kind: "sign_in_required" }; return delay(undefined); },
+  sign_out_server: (a: { serverId: string }) => { servers.find((x) => x.id === a.serverId)!.status = { kind: "sign_in_required", hint: "sign_in" }; return delay(undefined); },
   remove_server: (a: { serverId: string }) => { servers.splice(servers.findIndex((s) => s.id === a.serverId), 1); return delay(undefined); },
   restart_server: () => delay(undefined),
   list_agents: () => delay(agents),

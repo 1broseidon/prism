@@ -420,6 +420,260 @@ pub(crate) mod tests {
         gateway.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn server_updates_preserve_identity_and_replace_credentials_after_save() {
+        use crate::{Gateway, HttpAuth, ServerUpdate};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prism.json");
+        PrismConfig {
+            listen_port: 0,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let gateway = Gateway::start_with_credentials(
+            path.clone(),
+            dir.path().join("audit.jsonl"),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let mut config = server();
+        config.command.clear();
+        config.args.clear();
+        config.env.clear();
+        config.url = Some("http://127.0.0.1:1/mcp".into());
+        config.auth = HttpAuth::Header;
+        config
+            .headers
+            .insert("Authorization".into(), "Bearer old-secret".into());
+        config.hidden_tools.insert("private_tool".into());
+        let added = gateway.add_server(config).await.unwrap();
+        let rule = gateway
+            .add_rule(crate::NewRule {
+                server_id: Some(added.id.clone()),
+                agent_id: None,
+                tool: Some("private_tool".into()),
+                decision: crate::RuleDecision::Deny,
+                attention: None,
+                scope: crate::RuleScope::Always,
+                minutes: None,
+            })
+            .await
+            .unwrap();
+        let original_ref = added.credential_ref.clone().unwrap();
+        let renamed = gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    name: Some("renamed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.credential_ref, added.credential_ref);
+        let oauth = gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    auth: Some(HttpAuth::Oauth),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(oauth.credential_ref.is_none());
+        assert!(resolve(store.as_ref(), &oauth).unwrap().headers.is_empty());
+        assert!(get_blob(store.as_ref(), &original_ref).is_err());
+        let oauth_ref = oauth.oauth_ref.clone().unwrap();
+        put_blob(
+            store.as_ref(),
+            &oauth_ref,
+            br#"{"client_id":"saved-registration"}"#,
+        )
+        .unwrap();
+        let still_oauth = gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    name: Some("renamed-again".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(still_oauth.oauth_ref, oauth.oauth_ref);
+        let headers = BTreeMap::from([("Authorization".into(), "Bearer new-secret".into())]);
+        let edited = gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    auth: Some(HttpAuth::Header),
+                    headers: Some(headers.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.id, added.id);
+        assert_eq!(edited.hidden_tools, added.hidden_tools);
+        assert_eq!(edited.enabled, added.enabled);
+        let rules = gateway.rules().await;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, rule.id);
+        assert_eq!(rules[0].server_id.as_deref(), Some(added.id.as_str()));
+        assert!(edited.oauth_ref.is_none());
+        assert!(get_blob(store.as_ref(), &oauth_ref).is_err());
+        assert!(get_blob(store.as_ref(), &original_ref).is_err());
+        assert_ne!(edited.credential_ref, added.credential_ref);
+        assert_eq!(resolve(store.as_ref(), &edited).unwrap().headers, headers);
+        assert_eq!(PrismConfig::load(&path).unwrap().servers[0], edited);
+        let mut other = server();
+        other.id = "other".into();
+        other.name = "taken".into();
+        gateway.add_server(other).await.unwrap();
+        assert!(matches!(
+            gateway
+                .update_server(
+                    &added.id,
+                    ServerUpdate {
+                        name: Some("taken".into()),
+                        ..Default::default()
+                    }
+                )
+                .await,
+            Err(Error::AlreadyExists(_))
+        ));
+        let cleared = gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    auth: Some(HttpAuth::None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(resolve(store.as_ref(), &cleared)
+            .unwrap()
+            .headers
+            .is_empty());
+        assert!(cleared.credential_ref.is_none());
+        assert!(get_blob(store.as_ref(), edited.credential_ref.as_ref().unwrap()).is_err());
+        assert!(matches!(
+            gateway
+                .update_server(
+                    &added.id,
+                    ServerUpdate {
+                        auth: Some(HttpAuth::Header),
+                        ..Default::default()
+                    }
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            gateway
+                .update_server(
+                    &added.id,
+                    ServerUpdate {
+                        command: Some("echo".into()),
+                        ..Default::default()
+                    }
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        let disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!disk.contains("old-secret") && !disk.contains("new-secret"));
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stdio_updates_overlay_launch_values_and_failed_save_retains_old_blob() {
+        use crate::{Gateway, ServerUpdate};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prism.json");
+        PrismConfig {
+            listen_port: 0,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let gateway = Gateway::start_with_credentials(
+            path.clone(),
+            dir.path().join("audit.jsonl"),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let original = server();
+        let added = gateway.add_server(original.clone()).await.unwrap();
+        assert!(matches!(
+            gateway
+                .update_server(
+                    &added.id,
+                    ServerUpdate {
+                        auth: Some(crate::HttpAuth::None),
+                        headers: Some(BTreeMap::from([(
+                            "Authorization".into(),
+                            "invalid for stdio".into()
+                        )])),
+                        ..Default::default()
+                    }
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            gateway
+                .update_server(
+                    &added.id,
+                    ServerUpdate {
+                        url: Some("http://127.0.0.1/mcp".into()),
+                        ..Default::default()
+                    }
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        let edited = gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    command: Some("printf".into()),
+                    args: Some(vec!["new-argument".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let launch = resolve(store.as_ref(), &edited).unwrap();
+        assert_eq!(launch.args, vec!["new-argument"]);
+        assert_eq!(launch.env, original.env);
+        assert!(get_blob(store.as_ref(), added.credential_ref.as_ref().unwrap()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(gateway
+            .update_server(
+                &added.id,
+                ServerUpdate {
+                    args: Some(vec!["unsaved-argument".into()]),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err());
+        assert!(resolve(store.as_ref(), &edited).unwrap() == launch);
+        assert_eq!(gateway.servers().await[0].command, "printf");
+        gateway.shutdown().await;
+    }
+
     #[test]
     #[ignore = "requires an unlocked native OS credential store"]
     fn native_store_round_trip() {

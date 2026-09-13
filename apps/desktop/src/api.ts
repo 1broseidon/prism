@@ -31,6 +31,7 @@ import type {
   Posture,
   Rule,
   ServerView,
+  RemoteProbe,
   Settings,
   ToolInfo,
   UpdateInfo,
@@ -58,6 +59,16 @@ export interface AddServerArgs {
 
 export function addServer(args: AddServerArgs) {
   return invoke<ServerView>("add_server", { args });
+}
+
+export type UpdateServerArgs = Partial<AddServerArgs>;
+
+export function probeServerUrl(url: string) {
+  return invoke<RemoteProbe>("probe_server_url", { url });
+}
+
+export function updateServer(serverId: string, args: UpdateServerArgs) {
+  return invoke<{ server: ServerView; warning: string | null }>("update_server", { serverId, args });
 }
 
 export function removeServer(serverId: string) {

@@ -1,4 +1,5 @@
 import { signal } from "@preact/signals";
+import { newServerEdit, type ServerEditDraft } from "./server-edit";
 import { hostSetup } from "./hosts";
 import { discardVolatile, harnessSetupPending, preserveRecoverable, rememberVolatile } from "./lifecycle";
 import type {
@@ -14,6 +15,7 @@ import type {
   PendingSignIn,
   Rule,
   ServerView,
+  RemoteProbe,
   UpdateEvent,
   UpdateInfo,
 } from "./types";
@@ -42,6 +44,8 @@ export const updateProgress = signal<UpdateEvent | null>(null);
 export interface AddServerDraft {
   kind: "command" | "url";
   auth: HttpAuth;
+  authTouched: boolean;
+  probedUrl: string | null;
   name: string;
   url: string;
   header: string;
@@ -54,6 +58,8 @@ export interface AddServerDraft {
 const emptyAddServerDraft = (): AddServerDraft => ({
   kind: "command",
   auth: "none",
+  authTouched: false,
+  probedUrl: null,
   name: "",
   url: "",
   header: "",
@@ -64,10 +70,63 @@ const emptyAddServerDraft = (): AddServerDraft => ({
 });
 export const addServerDraft = signal<AddServerDraft>(emptyAddServerDraft());
 export function updateAddServerDraft(patch: Partial<AddServerDraft>): void {
-  addServerDraft.value = { ...addServerDraft.value, ...patch };
+  const draft = addServerDraft.value;
+  const changedUrl = patch.url !== undefined && patch.url !== draft.url;
+  addServerDraft.value = { ...draft, ...patch, ...(changedUrl ? { authTouched: false, probedUrl: null } : {}) };
 }
+/** Late probes and explicit choices must never change the current URL's auth selection. */
+export function applyAddServerProbe(url: string, probe: RemoteProbe): boolean {
+  const draft = addServerDraft.value;
+  if (draft.kind !== "url" || draft.url !== url) return false;
+  const suggested = probe.kind === "open" ? "none" : probe.kind === "oauth_ready" ? "oauth" : probe.kind === "bearer_likely" && probe.reason !== "oauth_broken" ? "header" : null;
+  updateAddServerDraft({ probedUrl: url, ...(!draft.authTouched && suggested ? { auth: suggested } : {}) });
+  return !draft.authTouched && suggested === "header";
+}
+
 export function clearAddServerDraft(): void {
   addServerDraft.value = emptyAddServerDraft();
+}
+
+/** Edits (including replacement secrets) survive hides only in webview memory. */
+export const serverEditDrafts = signal<Record<string, ServerEditDraft>>({});
+export const savingServerEdits = signal<Record<string, boolean>>({});
+export function beginServerEdit(server: ServerView): void {
+  if (!serverEditDrafts.value[server.id] && !savingServerEdits.value[server.id]) {
+    serverEditDrafts.value = { ...serverEditDrafts.value, [server.id]: newServerEdit(server) };
+  }
+}
+export function updateServerEdit(id: string, patch: Partial<ServerEditDraft>): void {
+  const draft = serverEditDrafts.value[id];
+  if (draft && !savingServerEdits.value[id]) serverEditDrafts.value = { ...serverEditDrafts.value, [id]: { ...draft, ...patch } };
+}
+export function discardServerEdit(id: string): void {
+  if (savingServerEdits.value[id]) return;
+  serverEditDrafts.value = discardVolatile(serverEditDrafts.value, id);
+  clearResumableNavigation({ kind: "server", serverId: id });
+}
+export async function saveServerEdit(
+  id: string,
+  save: () => Promise<{ server: ServerView; warning: string | null }>,
+  refresh: () => Promise<void>,
+): Promise<void> {
+  if (savingServerEdits.value[id]) return;
+  savingServerEdits.value = { ...savingServerEdits.value, [id]: true };
+  preserveNavigation();
+  try {
+    const result = await save();
+    servers.value = servers.value.map(server => server.id === id ? result.server : server);
+    serverEditDrafts.value = discardVolatile(serverEditDrafts.value, id);
+    clearResumableNavigation({ kind: "server", serverId: id });
+    errorMessage.value = result.warning;
+    try {
+      await refresh();
+    } catch {
+      errorMessage.value = result.warning ?? "Server saved, but the panel could not refresh. Reopen it to check the connection.";
+    }
+  } finally {
+    savingServerEdits.value = discardVolatile(savingServerEdits.value, id);
+    if (!servers.value.some(server => server.id === id)) discardServerEdit(id);
+  }
 }
 
 export interface ConnectAgentDraft {
@@ -176,6 +235,7 @@ export function isSetupScreen(screen: Screen): boolean {
 }
 
 function isRecoverableScreen(screen: Screen): boolean {
+  if (screen.kind === "server") return serverEditDrafts.value[screen.serverId] !== undefined;
   if (screen.kind === "harness-setup") return harnessSetupPending(hostSetup(native.value, screen.host));
   return isSetupScreen(screen) || (screen.kind === "agent-connections" &&
     (manualTokens.value[screen.agentId] !== undefined || issuingManualTokens.value[screen.agentId]));
@@ -212,6 +272,7 @@ export function resumeNavigation(): void {
 function sameScreen(left: Screen, right: Screen): boolean {
   if (left.kind !== right.kind) return false;
   if (left.kind === "add-server" || left.kind === "connect-agent") return true;
+  if (left.kind === "server" && right.kind === "server") return left.serverId === right.serverId;
   if (left.kind === "agent-connections" && right.kind === "agent-connections") return left.agentId === right.agentId;
   return false;
 }
@@ -227,7 +288,9 @@ export function discardResumableNavigation(): void {
   const saved = resumableNavigation.value;
   if (!saved) return;
   if (saved.stack.some(screen => screen.kind === "agent-connections" && issuingManualTokens.value[screen.agentId])) return;
+  if (saved.stack.some(screen => screen.kind === "server" && savingServerEdits.value[screen.serverId])) return;
   for (const screen of saved.stack) {
+    if (screen.kind === "server") discardServerEdit(screen.serverId);
     if (screen.kind === "add-server") clearAddServerDraft();
     if (screen.kind === "connect-agent") {
       if (connectAgentDraft.value.issuedAgentId) discardManualToken(connectAgentDraft.value.issuedAgentId);

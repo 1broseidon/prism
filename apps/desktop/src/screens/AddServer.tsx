@@ -1,7 +1,10 @@
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import * as api from "../api";
+import { ServerAuthFields } from "../ServerAuthFields";
+import type { RemoteProbe } from "../types";
 import {
   addServerDraft,
+  applyAddServerProbe,
   clearAddServerDraft,
   completeScreen,
   errorMessage,
@@ -16,6 +19,52 @@ export function AddServerScreen() {
   const [busy, setBusy] = useState(false);
   const draft = addServerDraft.value;
   const { kind, auth } = draft;
+
+  const urlInput = useRef<HTMLInputElement>(null);
+  const keyInput = useRef<HTMLInputElement>(null);
+  const request = useRef(0);
+  const pendingUrl = useRef<string | null>(null);
+  const [probe, setProbe] = useState<{ url: string; result: RemoteProbe | "checking" } | null>(null);
+
+  const checkUrl = async () => {
+    const current = addServerDraft.value;
+    const url = current.url;
+    if (busy || current.kind !== "url" || !url || !urlInput.current?.validity.valid
+      || pendingUrl.current === url || current.probedUrl === url) return;
+    const version = ++request.current;
+    pendingUrl.current = url;
+    setProbe({ url, result: "checking" });
+    try {
+      const result = await api.probeServerUrl(url.trim());
+      if (request.current !== version || addServerDraft.value.url !== url) return;
+      const focusKey = applyAddServerProbe(url, result);
+      setProbe({ url, result });
+      if (focusKey) window.setTimeout(() => {
+        if (request.current === version && !addServerDraft.value.authTouched) keyInput.current?.focus();
+      }, 0);
+    } catch {
+      if (request.current === version) setProbe(null);
+    } finally {
+      if (request.current === version) pendingUrl.current = null;
+    }
+  };
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void checkUrl(), 600);
+    return () => {
+      window.clearTimeout(timer);
+      request.current += 1;
+      pendingUrl.current = null;
+    };
+  }, [kind, draft.url, busy]);
+
+  const result = probe?.url === draft.url && kind === "url" ? probe.result : null;
+  const probeText = result === "checking" ? "Checking…"
+    : result?.kind === "open" ? "No sign-in needed."
+    : result?.kind === "oauth_ready" ? "Signs you in through your browser."
+    : result?.kind === "bearer_likely" && result.reason === "oauth_broken" ? "Couldn't verify browser sign-in. Check the server, or choose auth yourself."
+    : result?.kind === "bearer_likely" ? "No supported browser sign-in found. Check whether this server needs an API key."
+    : result?.kind === "unreachable" ? "Couldn't reach this URL. Check it, or pick the auth method yourself." : null;
 
   const onSubmit = async (event: Event) => {
     event.preventDefault();
@@ -84,37 +133,15 @@ export function AddServerScreen() {
             <>
               <label class="field">
                 <span>URL</span>
-                <input class="input mono" name="url" type="url" required value={draft.url} onInput={(event) => updateAddServerDraft({ url: event.currentTarget.value })} placeholder="https://mcp.example.com/mcp" />
+                <input ref={urlInput} onBlur={() => void checkUrl()} class="input mono" name="url" type="url" required value={draft.url} onInput={(event) => updateAddServerDraft({ url: event.currentTarget.value })} placeholder="https://mcp.example.com/mcp" />
                 <small>https, or http on this machine.</small>
+                {/* A blur starts the probe: keep its message from moving the auth button being clicked. */}
+                <small role="status" style={{ minHeight: "2lh" }}>{probeText ?? "\u00a0"}</small>
               </label>
-              <div class="field">
-                <span>Auth</span>
-                <Segmented
-                  small
-                  label="Authentication"
-                  value={auth}
-                  options={[
-                    { value: "none", label: "None" },
-                    { value: "header", label: "API key" },
-                    { value: "oauth", label: "OAuth" },
-                  ]}
-                  onChange={(next) => updateAddServerDraft({ auth: next })}
-                />
-                {auth === "oauth" ? <small>Signs in through your browser. Tokens stay in your keyring.</small> : null}
-              </div>
-              {auth === "header" ? (
-                <>
-                  <label class="field">
-                    <span>Header</span>
-                    <input class="input mono" name="header" value={draft.header} onInput={(event) => updateAddServerDraft({ header: event.currentTarget.value })} placeholder="Authorization" />
-                  </label>
-                  <label class="field">
-                    <span>Key</span>
-                    <input class="input mono" name="key" type="password" required autoComplete="off" value={draft.key} onInput={(event) => updateAddServerDraft({ key: event.currentTarget.value })} placeholder="ghp_…" />
-                    <small>Sent as Bearer unless you give a prefix. Stored in your keyring.</small>
-                  </label>
-                </>
-              ) : null}
+              <ServerAuthFields auth={auth} header={draft.header} secret={draft.key} keyRef={keyInput}
+                onAuth={(next) => updateAddServerDraft({ auth: next, authTouched: true })}
+                onHeader={(header) => updateAddServerDraft({ header })}
+                onSecret={(key) => updateAddServerDraft({ key })} />
             </>
           ) : (
             <>

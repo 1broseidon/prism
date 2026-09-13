@@ -4,8 +4,14 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+- URL servers suggest an authentication method after checking the endpoint. Explicit choices are preserved, and unreachable endpoints or broken OAuth discovery leave the method undecided.
+- **Edit** updates a server in place, including its authentication or command settings, while preserving rules and hidden tools. Unfinished edits can be resumed after closing the panel. Stored keys remain private; changing a key's header or destination origin requires entering it again.
+
 ### Fixed
 - Rules containing unavailable tag predicates are marked Inert, including inside `not`, `all` and `any`. Negating an unsupported tag can no longer turn an allow rule into a match for every action.
+- Authentication failures use HTTP status and discovery results to offer useful recovery without exposing provider error text. A refused key can be replaced without removing the server.
+- Concurrent edits, restarts and removals cannot restore an obsolete server. Changing an OAuth URL or signing out invalidates late sign-in completions. A credential cleanup failure after Save is reported as a saved change.
 
 ## [0.7.3] - 2026-09-09
 

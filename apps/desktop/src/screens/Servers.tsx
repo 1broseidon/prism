@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import * as api from "../api";
 import { serverPrimaryAction } from "../server-actions";
-import { errorMessage, push, servers, status } from "../state";
+import { beginServerEdit, errorMessage, push, servers, status } from "../state";
 import type { ServerView } from "../types";
 import { Button, ChevronIcon, Chip, Empty, Label, REVEAL, Screen, ShowMore, StatusText, describeError, useReveal } from "../ui";
 
@@ -15,6 +15,7 @@ export function statusChip(server: ServerView) {
     case "starting":
       return <Chip tone="warn">Starting</Chip>;
     case "sign_in_required":
+      if (s.hint === "oauth_available" || s.hint === "bearer_rejected") return <Chip tone="danger">Needs auth change</Chip>;
       return server.auth === "oauth" ? <Chip tone="warn">Needs sign-in</Chip> : <Chip tone="danger">Authentication failed</Chip>;
     default:
       return <StatusText>Stopped</StatusText>;
@@ -23,7 +24,16 @@ export function statusChip(server: ServerView) {
 
 export function authenticationGuidance(server: ServerView): string | null {
   if (server.status.kind !== "sign_in_required" || server.auth === "oauth") return null;
-  return server.auth === "header" ? "Check the API key, then retry." : "The server returned 401. Check its setup, then retry.";
+  switch (server.status.hint) {
+    case "bearer_rejected":
+      return server.auth === "header"
+        ? "The server rejected the API key. Edit the server and check it."
+        : "Authentication is required. Edit the server and check whether it needs an API key.";
+    case "oauth_available":
+      return "This server offers browser sign-in. Edit the server and choose OAuth.";
+    default:
+      return server.auth === "header" ? "Check the API key, then retry." : "The server returned 401. Check its setup, then retry.";
+  }
 }
 
 /** The URL without its scheme: the host is what tells servers apart, the scheme is always https. */
@@ -45,7 +55,7 @@ export async function refreshServers() {
 /** One row per server. The row is the door; only recovery stays on it, because that is the one thing worth a tap here. */
 function ServerRow({ server }: { server: ServerView }) {
   const [busy, setBusy] = useState(false);
-  const primary = serverPrimaryAction(server.auth, server.status.kind);
+  const primary = serverPrimaryAction(server.auth, server.status);
   const guidance = authenticationGuidance(server);
   const hidden = server.hidden_tools.length;
   const run = async (fn: () => Promise<unknown>) => {
@@ -68,7 +78,9 @@ function ServerRow({ server }: { server: ServerView }) {
         {hidden > 0 ? <StatusText>{hidden} hidden</StatusText> : null}
         <span class="chev"><ChevronIcon /></span>
       </button>
-      {primary === "sign-in" ? (
+      {primary === "edit" ? (
+        <div class="side"><Button variant="quiet" onClick={() => { beginServerEdit(server); push({ kind: "server", serverId: server.id }); }}>Edit</Button></div>
+      ) : primary === "sign-in" ? (
         <div class="side">
           <Button variant="quiet" busy={busy} onClick={() => void run(() => api.signInServer(server.id))}>Sign in</Button>
         </div>
