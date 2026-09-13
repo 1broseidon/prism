@@ -9,6 +9,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - **Edit** updates a server in place, including its authentication or command settings, while preserving rules and hidden tools. Unfinished edits can be resumed after closing the panel. Stored keys remain private; changing a key's header or destination origin requires entering it again.
 
 ### Fixed
+- Failed server initialization reports safe HTTP and JSON-RPC codes with actionable explanations for protocol, Host, access, response and timeout failures. HTTP 403 stays an access refusal, including when it carries an OAuth challenge; provider text and command stderr stay out of diagnostics.
 - Rules containing unavailable tag predicates are marked Inert, including inside `not`, `all` and `any`. Negating an unsupported tag can no longer turn an allow rule into a match for every action.
 - Authentication failures use HTTP status and discovery results to offer useful recovery without exposing provider error text. A refused key can be replaced without removing the server.
 - Concurrent edits, restarts and removals cannot restore an obsolete server. Changing an OAuth URL or signing out invalidates late sign-in completions. A credential cleanup failure after Save is reported as a saved change.

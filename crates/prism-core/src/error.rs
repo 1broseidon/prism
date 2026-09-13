@@ -17,6 +17,8 @@ pub enum Error {
     RateLimited(&'static str),
     #[error("backend error: {0}")]
     Backend(String),
+    #[error("{0}")]
+    Connection(#[from] crate::diagnostics::ConnectionFailure),
     #[error("gateway error: {0}")]
     Gateway(String),
     /// A remote server requires authentication; the hint describes the recovery.

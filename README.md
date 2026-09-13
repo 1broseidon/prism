@@ -190,6 +190,7 @@ Prism does not sandbox the servers it launches. A server necessarily receives it
 
 ## Troubleshooting
 
+- **A server fails to connect.** Its row shows the HTTP status or JSON-RPC code when available. HTTP 421 points to the endpoint or the upstream Host allowlist; HTTP 403 points to credential permissions or server access policy. An initialization rejection such as JSON-RPC -32600 calls for checking protocol compatibility and server versions. A sign-in is offered for authentication failures, not every connection error. Provider messages, response bodies and command stderr are omitted to keep credentials out of diagnostics.
 - **Port already in use.** Set `listen_port` in `prism.json` and restart. Update the URL in your clients.
 - **No tray icon on GNOME.** Install an AppIndicator extension, then log out and back in.
 - **Servers show "failed" on Linux at login.** The keyring was still locked when Prism started. Unlock it and restart the server from the Servers tab.

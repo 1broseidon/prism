@@ -6,6 +6,7 @@ mod audit;
 mod backend;
 mod config;
 mod credentials;
+mod diagnostics;
 mod error;
 mod events;
 mod gateway;
@@ -32,6 +33,7 @@ pub use config::{
     PrismConfig, Rule, RuleDecision, RuleScope, ServerConfig, TimeoutBehavior,
 };
 pub use config::{OAuthClient, TokenKind, TokenRecord};
+pub use diagnostics::{ConnectionFailure, ConnectionFailureKind};
 pub use error::{Error, Result};
 pub use events::{EventReceiver, GatewayEvent};
 pub use gateway::{

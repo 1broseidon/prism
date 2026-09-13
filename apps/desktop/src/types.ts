@@ -1,11 +1,16 @@
 export type BackendStatus =
   | { kind: "starting" }
   | { kind: "running"; tool_count: number }
-  | { kind: "failed"; error: string }
+  | { kind: "failed"; error: string; diagnostic?: ConnectionFailure }
   | { kind: "stopped" }
   | { kind: "sign_in_required"; hint: AuthHint };
 
 export type AuthHint = "sign_in" | "bearer_rejected" | "oauth_available" | "unknown";
+export interface ConnectionFailure {
+  category: "protocol" | "host_rejected" | "forbidden" | "http" | "rpc" | "invalid_response" | "timeout" | "unreachable" | "closed" | "launch";
+  http_status?: number;
+  rpc_code?: number;
+}
 export type RemoteProbe =
   | { kind: "open" }
   | { kind: "oauth_ready" }

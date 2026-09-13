@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::ServerConfig;
+use crate::diagnostics::{ConnectionFailure, ConnectionFailureKind};
 use crate::error::{Error, Result};
 use crate::events::{EventSender, GatewayEvent};
 
@@ -25,10 +26,18 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendStatus {
     Starting,
-    Running { tool_count: usize },
-    Failed { error: String },
+    Running {
+        tool_count: usize,
+    },
+    Failed {
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<ConnectionFailure>,
+    },
     Stopped,
-    SignInRequired { hint: AuthHint },
+    SignInRequired {
+        hint: AuthHint,
+    },
 }
 
 /// Closed guidance for a remote server that requires authentication.
@@ -191,8 +200,13 @@ impl BackendManager {
             Err(err) => {
                 let status = match err {
                     Error::SignInRequired(hint) => BackendStatus::SignInRequired { hint },
+                    Error::Connection(diagnostic) => BackendStatus::Failed {
+                        error: diagnostic.to_string(),
+                        diagnostic: Some(diagnostic),
+                    },
                     err => BackendStatus::Failed {
                         error: err.to_string(),
+                        diagnostic: None,
                     },
                 };
                 backend.status = status.clone();
@@ -258,7 +272,10 @@ impl BackendManager {
             }
             backend.client = None;
             backend.tools.clear();
-            backend.status = BackendStatus::Failed { error };
+            backend.status = BackendStatus::Failed {
+                error,
+                diagnostic: None,
+            };
             self.status(server_id, backend.status.clone());
             catalog.reindex();
         }
@@ -564,18 +581,11 @@ async fn connect(
         let (transport, _) = TokioChildProcess::builder(command)
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|err| {
-                Error::Backend(format!(
-                    "could not spawn server ({:?}); check its executable",
-                    err.kind()
-                ))
-            })?;
+            .map_err(|_| ConnectionFailure::new(ConnectionFailureKind::Launch))?;
         tokio::time::timeout(REFRESH_TIMEOUT, Upstream::default().serve(transport))
             .await
-            .map_err(|_| Error::Backend("server handshake timed out".into()))?
-            .map_err(|_| {
-                Error::Backend("server handshake failed; check its launch settings".into())
-            })?
+            .map_err(|_| ConnectionFailure::new(ConnectionFailureKind::Timeout))?
+            .map_err(|error| ConnectionFailure::initialize(&error))?
     };
     let tools = list_peer_tools(client.peer()).await?;
     Ok((client, tools))

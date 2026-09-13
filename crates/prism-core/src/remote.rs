@@ -28,11 +28,16 @@ use tracing::warn;
 
 use crate::config::{HttpAuth, ServerConfig};
 use crate::credentials::{self, CredentialStore, LaunchSettings};
+use crate::diagnostics::{ConnectionFailure, ConnectionFailureKind};
 use crate::error::{Error, Result};
 
 #[path = "remote_revoke.rs"]
 mod revocation;
 pub(crate) use revocation::sign_out;
+
+#[cfg(test)]
+#[path = "remote_diagnostics_tests.rs"]
+mod diagnostic_tests;
 
 /// Name registered with the authorization server; it is what the consent page shows.
 pub const CLIENT_NAME: &str = "Prism";
@@ -306,15 +311,18 @@ fn unauthorized(error: &rmcp::service::ClientInitializeError) -> bool {
     }
 }
 
-async fn handshake<F>(serve: F, auth: HttpAuth, url: &str) -> Result<McpClient>
+async fn handshake<F>(serve: F, auth: HttpAuth, url: &str, budget: Duration) -> Result<McpClient>
 where
     F: std::future::Future<
         Output = std::result::Result<McpClient, rmcp::service::ClientInitializeError>,
     >,
 {
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT, serve).await {
-        Err(_) => Err(Error::Backend("server handshake timed out".into())),
+    match tokio::time::timeout(budget, serve).await {
+        Err(_) => Err(ConnectionFailure::new(ConnectionFailureKind::Timeout).into()),
         Ok(Ok(client)) => Ok(client),
+        Ok(Err(error)) if ConnectionFailure::initialize(&error).http_status == Some(403) => {
+            Err(ConnectionFailure::http(403).into())
+        }
         Ok(Err(error))
             if unauthorized(&error)
                 || (auth == HttpAuth::Oauth && error.is_authorization_required()) =>
@@ -334,37 +342,63 @@ where
             };
             Err(Error::SignInRequired(hint))
         }
-        Ok(Err(_)) => Err(Error::Backend(
-            "server handshake failed; check the URL and its sign-in".into(),
-        )),
+        Ok(Err(error)) => Err(ConnectionFailure::initialize(&error).into()),
     }
 }
 
-/// rmcp discards the status of a 401 without a challenge header. After an otherwise
-/// unclassified failure, inspect a real response using the same explicit credentials.
-async fn authentication_after_failure(
+/// rmcp loses some HTTP statuses in its error text. Inspect a bounded response after
+/// an unclassified failure, using the same credentials; never parse human-readable errors.
+async fn diagnose_after_failure(
     url: &str,
     headers: &std::collections::BTreeMap<String, String>,
-) -> Option<AuthHint> {
+    auth: HttpAuth,
+    oauth_client: Option<&AuthClient<reqwest::Client>>,
+) -> Option<Error> {
     let client = http_client().ok()?;
-    let custom_headers: HeaderMap = transport_config(url, headers)
-        .ok()?
-        .custom_headers
-        .into_iter()
-        .collect();
-    let mut refused = false;
+    let mut observed = None;
     let result = tokio::time::timeout(PROBE_TIMEOUT, async {
-        let response = initialize_request(&client, url)
+        let mut custom_headers: HeaderMap = transport_config(url, headers)
+            .ok()?
+            .custom_headers
+            .into_iter()
+            .collect();
+        if let Some(oauth) = oauth_client {
+            let token = oauth.get_access_token().await.ok()?;
+            custom_headers.insert(
+                http::header::AUTHORIZATION,
+                http::HeaderValue::from_str(&format!("Bearer {token}")).ok()?,
+            );
+        }
+        let mut response = match initialize_request(&client, url)
             .headers(custom_headers.clone())
             .send()
             .await
-            .ok()?;
-        refused = response.status() == StatusCode::UNAUTHORIZED;
-        if !refused {
-            // A transient failure may have recovered; don't retain an orphaned session.
-            let session = response.headers().get("mcp-session-id").cloned();
-            drop(response);
-            if let Some(session) = session {
+        {
+            Ok(response) => response,
+            Err(error) => return Some(ConnectionFailure::request(&error).into()),
+        };
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED {
+            // Preserve an observed 401 even if discovery subsequently times out.
+            observed = Some(Error::SignInRequired(AuthHint::Unknown));
+            let hint = if auth == HttpAuth::Oauth {
+                AuthHint::SignIn
+            } else {
+                let challenge = response
+                    .headers()
+                    .get(http::header::WWW_AUTHENTICATE)
+                    .and_then(|v| v.to_str().ok());
+                auth_hint(oauth_readiness(url, challenge, None).await)
+            };
+            return Some(Error::SignInRequired(hint));
+        }
+        if !status.is_success() {
+            observed = Some(ConnectionFailure::http(status.as_u16()).into());
+        }
+        // A recovered initialize may create a session. Dispose of it without retaining its response.
+        if status.is_success() {
+            if let Some(session) = response.headers().get("mcp-session-id").cloned() {
+                drop(response);
                 let _ = client
                     .delete(url)
                     .headers(custom_headers)
@@ -372,17 +406,53 @@ async fn authentication_after_failure(
                     .header("mcp-protocol-version", "2025-11-25")
                     .send()
                     .await;
+                return None;
             }
-            return None;
         }
-        let challenge = response
-            .headers()
-            .get(http::header::WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok());
-        Some(auth_hint(oauth_readiness(url, challenge, None).await))
+        // This diagnostic request is never a second unbounded JSON/SSE consumer.
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if bytes.len() + chunk.len() > 16 * 1024 {
+                return observed.take();
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let rpc_code = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|value| {
+                (value.get("jsonrpc")?.as_str()? == "2.0" && value.get("id")?.as_i64()? == 1)
+                    .then(|| value.get("error")?.get("code")?.as_i64()?.try_into().ok())
+                    .flatten()
+            });
+        if let Some(code) = rpc_code {
+            let mut failure = match status.as_u16() {
+                403 | 421 => ConnectionFailure::http(status.as_u16()),
+                _ => ConnectionFailure::rpc(code),
+            };
+            failure.http_status = (!status.is_success()).then_some(status.as_u16());
+            failure.rpc_code = Some(code);
+            return Some(failure.into());
+        }
+        observed.take()
     })
     .await;
-    result.unwrap_or_else(|_| refused.then_some(AuthHint::Unknown))
+    result.ok().flatten().or(observed)
+}
+
+async fn diagnose_connection(
+    connected: Result<McpClient>,
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+    auth: HttpAuth,
+    oauth_client: Option<&AuthClient<reqwest::Client>>,
+) -> Result<McpClient> {
+    if matches!(&connected, Err(Error::Connection(failure)) if failure.http_status.is_none() && failure.category != ConnectionFailureKind::Timeout)
+    {
+        if let Some(error) = diagnose_after_failure(url, headers, auth, oauth_client).await {
+            return Err(error);
+        }
+    }
+    connected
 }
 
 /// Open a session to a remote server. `SignInRequired` means the operator must sign in first.
@@ -404,25 +474,24 @@ pub(crate) async fn connect(
                 Upstream::default().serve_with_lifecycle(transport, remote_lifecycle()),
                 config.auth,
                 url,
+                HANDSHAKE_TIMEOUT,
             )
             .await;
-            if matches!(&connected, Err(Error::Backend(_))) {
-                if let Some(hint) = authentication_after_failure(url, &launch.headers).await {
-                    return Err(Error::SignInRequired(hint));
-                }
-            }
-            connected
+            diagnose_connection(connected, url, &launch.headers, config.auth, None).await
         }
         HttpAuth::Oauth => {
             let manager = authorized_manager(config, store).await?;
             let client = AuthClient::new(http_client()?, manager);
-            let transport = StreamableHttpClientTransport::with_client(client, transport_config);
-            handshake(
+            let transport =
+                StreamableHttpClientTransport::with_client(client.clone(), transport_config);
+            let connected = handshake(
                 Upstream::default().serve_with_lifecycle(transport, remote_lifecycle()),
                 config.auth,
                 url,
+                HANDSHAKE_TIMEOUT,
             )
-            .await
+            .await;
+            diagnose_connection(connected, url, &launch.headers, config.auth, Some(&client)).await
         }
     }
 }
@@ -450,7 +519,7 @@ async fn authorized_manager(
     manager.set_credential_store(Tokens::new(store, config.oauth_ref.clone())?);
     let ready = tokio::time::timeout(HANDSHAKE_TIMEOUT, manager.initialize_from_store())
         .await
-        .map_err(|_| Error::Backend("server handshake timed out".into()))?
+        .map_err(|_| ConnectionFailure::new(ConnectionFailureKind::Timeout))?
         .map_err(describe)?;
     if !ready {
         return Err(Error::SignInRequired(AuthHint::SignIn));

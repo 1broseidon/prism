@@ -69,3 +69,15 @@ test("known auth mismatches lead to an edit instead of repeating the same reques
   }
   assert.equal(serverPrimaryAction("oauth", { kind: "sign_in_required", hint: "sign_in" }), "sign-in");
 });
+
+test("structured protocol, Host and permission failures do not offer OAuth sign-in", () => {
+  for (const diagnostic of [
+    { category: "protocol", rpc_code: -32600 },
+    { category: "host_rejected", http_status: 421 },
+    { category: "forbidden", http_status: 403 },
+    { category: "invalid_response" },
+    { category: "timeout" },
+  ]) {
+    assert.equal(serverPrimaryAction("oauth", { kind: "failed", error: "Safe explanation", diagnostic }), "retry");
+  }
+});
