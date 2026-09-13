@@ -212,6 +212,18 @@ const networkUrl = () => (listenAddress === "network" && listener.kind === "list
 let listener: ListenerState = portScenario ? { kind: "port_in_use", port: 9086, holder: portScenario === "prism" ? "prism" : null } : { kind: "listening" };
 
 export const mock = {
+  rename_agent: async (args: { agentId: string; name: string }) => {
+    await delay(null);
+    const agent = agents.find(agent => agent.id === args.agentId);
+    if (!agent) throw Error("Agent was removed.");
+    const name = args.name.trim();
+    if (!name || [...name].length > 80 || /\p{Cc}/u.test(name)) throw Error("Choose a name with 1 to 80 characters and no control characters.");
+    if (agents.some(other => other.id !== agent.id && other.name.toLowerCase() === name.toLowerCase())) throw Error("An agent already uses that name.");
+    if (new URLSearchParams(location.search).get("rename") === "fail") throw Error("The name could not be saved. Try again.");
+    agent.name = name;
+    signins = signins.map(signin => signin.agent_id === agent.id ? { ...signin, agent_name: name } : signin);
+    return { id: agent.id, name };
+  },
   get_gateway_startup: () => delay(gatewayStartupError),
   retry_gateway_startup: () => { gatewayStartupError = null; return delay(undefined); },
   get_startup: () => delay(startupState),

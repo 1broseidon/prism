@@ -475,12 +475,7 @@ impl Gateway {
 
     /// Panel-only provisioning: one token, using the agent's ordinary tool permissions.
     pub async fn create_manual_agent(&self, name: &str) -> Result<ManualToken> {
-        let name = name.trim();
-        if name.is_empty() || name.chars().count() > 80 {
-            return Err(Error::Invalid(
-                "choose a client name between 1 and 80 characters".into(),
-            ));
-        }
+        let name = crate::names::display(name)?;
         let now = Utc::now();
         let agent = AgentConfig {
             id: uuid::Uuid::new_v4().to_string(),
@@ -496,6 +491,7 @@ impl Gateway {
             attention: Default::default(),
         };
         let mut config = self.config.write().await;
+        crate::names::agent(&name, &config.agents, None)?;
         let mut updated = config.clone();
         updated.agents.push(agent.clone());
         let issued = install_manual_token(&mut updated, &agent.id);
@@ -883,6 +879,17 @@ impl Gateway {
     pub async fn decide_signin(&self, id: &str, approve: bool) -> Result<()> {
         self.decide_signin_with_choice(id, approve, SignInChoice::Add)
             .await
+    }
+
+    pub(crate) fn rename_pending_signins(&self, agent_id: &str, name: &str) {
+        if let Ok(mut signins) = self.oauth.signins.lock() {
+            for entry in signins
+                .values_mut()
+                .filter(|entry| entry.view.agent_id == agent_id)
+            {
+                entry.view.agent_name = name.to_string();
+            }
+        }
     }
 
     /// Who opened an MCP session, once known.

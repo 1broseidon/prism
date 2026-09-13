@@ -489,6 +489,110 @@ async fn conditioned_mcp_calls_hold_outside_prefix_and_audit_facets() {
 }
 
 #[tokio::test]
+async fn server_rename_notifies_both_protocols_and_replaces_only_the_tool_namespace() {
+    let mut fixture = Fixture::new(ProtocolVersion::V_2026_07_28, true).await;
+    fixture.config.auth = crate::HttpAuth::Header;
+    fixture
+        .config
+        .headers
+        .insert("Authorization".into(), "Bearer fixture-secret".into());
+    fixture.config.hidden_tools.insert("two".into());
+    let (gateway, dir, port) = gateway().await;
+    let added = gateway.add_server(fixture.config.clone()).await.unwrap();
+    let token = gateway.create_manual_agent("fixture-client").await.unwrap();
+    gateway
+        .set_agent_policy(&token.agent_id, Some(crate::Posture::Trusted), None)
+        .await
+        .unwrap();
+    gateway
+        .add_rule(crate::NewRule {
+            agent_id: Some(token.agent_id.clone()),
+            server_id: Some(added.id.clone()),
+            tool: Some("two".into()),
+            decision: crate::RuleDecision::Deny,
+            attention: None,
+            scope: crate::RuleScope::Always,
+            minutes: None,
+        })
+        .await
+        .unwrap();
+    let legacy = downstream(port, &token.token, false).await;
+    let modern = downstream(port, &token.token, true).await;
+    let mut subscription = modern
+        .listen(SubscriptionFilter::builder().tools_list_changed().build())
+        .await
+        .unwrap();
+    assert_eq!(
+        modern.list_all_tools().await.unwrap()[0].name,
+        "fixture__one"
+    );
+    // Initialization updates the live client version without an immediate config write.
+    let before = serde_json::to_value(&*gateway.config.read().await).unwrap();
+    gateway
+        .update_server(
+            "fixture",
+            crate::ServerUpdate {
+                name: Some("  Renamed server  ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), subscription.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), legacy.service().changed.notified())
+        .await
+        .unwrap();
+    for client in [&legacy, &modern] {
+        let tools = client.list_all_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "Renamed server__one");
+        assert!(client
+            .call_tool(CallToolRequestParams::new("fixture__one"))
+            .await
+            .is_err());
+        assert!(client
+            .call_tool(CallToolRequestParams::new("Renamed server__two"))
+            .await
+            .is_err());
+        assert!(client
+            .call_tool(CallToolRequestParams::new("Renamed server__one"))
+            .await
+            .is_ok());
+    }
+    assert_eq!(fixture.server.calls.load(Ordering::SeqCst), 2);
+    let mut expected = before;
+    expected["servers"][0]["name"] = "Renamed server".into();
+    assert_eq!(
+        serde_json::to_value(PrismConfig::load(dir.path().join("prism.json")).unwrap()).unwrap(),
+        expected
+    );
+    for invalid in ["Renamed__server", "Renamed_", "\n", "a\nb"] {
+        assert!(gateway
+            .update_server(
+                "fixture",
+                crate::ServerUpdate {
+                    name: Some(invalid.into()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            modern.list_all_tools().await.unwrap()[0].name,
+            "Renamed server__one"
+        );
+    }
+    drop(subscription);
+    legacy.cancel().await.unwrap();
+    modern.cancel().await.unwrap();
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn upstream_changes_reach_legacy_and_modern_agents_and_exposure_is_enforced() {
     for modern_upstream in [false, true] {
         let version = if modern_upstream {

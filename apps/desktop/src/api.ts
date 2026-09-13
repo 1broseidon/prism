@@ -45,6 +45,7 @@ export function getStatus() {
 }
 
 export function getStartup() { return invoke<StartupStatus>("get_startup"); }
+export function renameAgent(agentId: string, name: string) { return invoke<Pick<AgentConfig, "id" | "name">>("rename_agent", { agentId, name }); }
 export function setStartup(enabled: boolean) { return invoke<StartupStatus>("set_startup", { enabled }); }
 export function getGatewayStartup() { return invoke<string | null>("get_gateway_startup"); }
 export function retryGatewayStartup() { return invoke<void>("retry_gateway_startup"); }

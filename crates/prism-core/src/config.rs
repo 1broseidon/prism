@@ -513,12 +513,14 @@ impl PrismConfig {
                     false
                 }
                 None => {
-                    self.agents.push(AgentConfig::harness(
+                    let mut agent = AgentConfig::harness(
                         host,
                         client.origin.as_deref(),
                         AgentStatus::Pending,
                         Utc::now(),
-                    ));
+                    );
+                    agent.name = crate::names::unique(&agent.name, &self.agents, None);
+                    self.agents.push(agent);
                     true
                 }
             };
@@ -533,16 +535,7 @@ impl PrismConfig {
         }
         let base = client.client_name.trim();
         let base = if base.is_empty() { "unknown" } else { base };
-        let mut name = base.to_string();
-        let mut n = 2;
-        while self
-            .agents
-            .iter()
-            .any(|a| a.name.eq_ignore_ascii_case(&name))
-        {
-            name = format!("{base} ({n})");
-            n += 1;
-        }
+        let name = crate::names::unique(base, &self.agents, None);
         let agent = AgentConfig {
             id: uuid::Uuid::new_v4().to_string(),
             name,
@@ -617,6 +610,7 @@ impl PrismConfig {
                     moved.posture = agent.posture;
                     moved.attention = agent.attention;
                     moved.client_version = agent.client_version.clone();
+                    moved.name = crate::names::unique(&moved.name, &self.agents, Some(&agent.id));
                     self.agents.push(moved);
                 }
             }

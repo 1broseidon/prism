@@ -3,6 +3,96 @@ use crate::credentials::tests::MemoryStore;
 
 const VERIFIER: &str = "fixture-code-verifier-long-enough-for-pkce-and-reproducible";
 
+#[tokio::test]
+async fn display_rename_preserves_oauth_binding_and_pending_consent() {
+    let (dir, gateway) = gateway().await;
+    let (client, agent, token) = signed(&gateway, 4431).await;
+    let new_client = gateway.register_client(request(4432)).await.unwrap();
+    let wait = gateway
+        .start_authorization(params(&new_client))
+        .await
+        .unwrap();
+    assert_eq!(wait.signin.agent_id, agent);
+    let before = gateway
+        .pending_signins()
+        .into_iter()
+        .find(|s| s.id == wait.signin.id)
+        .unwrap();
+    gateway
+        .rename_agent(&agent, "Personal workspace")
+        .await
+        .unwrap();
+    let renamed = gateway
+        .pending_signins()
+        .into_iter()
+        .find(|s| s.id == wait.signin.id)
+        .unwrap();
+    let mut expected = before.clone();
+    expected.agent_name = "Personal workspace".into();
+    assert_eq!(
+        serde_json::to_value(renamed).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    // An uncommitted label must not leak into the consent card.
+    let path = dir.path().join("prism.json");
+    let saved = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(gateway.rename_agent(&agent, "Failed draft").await.is_err());
+    assert_eq!(
+        gateway
+            .pending_signins()
+            .into_iter()
+            .find(|s| s.id == wait.signin.id)
+            .unwrap()
+            .agent_name,
+        "Personal workspace"
+    );
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, saved).unwrap();
+    assert_eq!(
+        gateway.authenticate(&token.access_token).await.as_deref(),
+        Some(agent.as_str())
+    );
+    assert_eq!(
+        gateway
+            .config
+            .read()
+            .await
+            .client_agent_id(&client.client_id)
+            .as_deref(),
+        Some(agent.as_str())
+    );
+    gateway.decide_signin(&wait.signin.id, true).await.unwrap();
+    let added = redeem(&gateway, &new_client, code(&gateway, wait).await)
+        .await
+        .unwrap();
+    assert_eq!(
+        gateway.authenticate(&added.access_token).await.as_deref(),
+        Some(agent.as_str())
+    );
+    let another = gateway.start_authorization(params(&client)).await.unwrap();
+    assert_eq!(another.signin.agent_id, agent);
+    assert_eq!(another.signin.agent_name, "Personal workspace");
+    gateway
+        .decide_signin(&another.signin.id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        gateway
+            .config
+            .read()
+            .await
+            .agents
+            .iter()
+            .find(|a| a.id == agent)
+            .unwrap()
+            .client_name,
+        "Workbench"
+    );
+    gateway.shutdown().await;
+}
+
 async fn gateway() -> (tempfile::TempDir, Arc<Gateway>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prism.json");

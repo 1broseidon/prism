@@ -165,11 +165,15 @@ export async function subscribeEvents(): Promise<() => void> {
         signins.value = (await api.listSignins()).filter((s) => s.needs_consent);
         status.value = await api.getStatus();
         break;
+      case "agent_updated":
+        agents.value = await api.listAgents();
+        signins.value = (await api.listSignins()).filter((s) => s.needs_consent);
+        status.value = await api.getStatus();
+        break;
       case "agent_requested":
       case "agent_decided":
       case "agent_connected":
       case "agent_disconnected":
-      case "agent_updated":
         agents.value = await api.listAgents();
         status.value = await api.getStatus();
         break;

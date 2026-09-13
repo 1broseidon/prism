@@ -911,8 +911,9 @@ async fn sessions_are_bound_to_the_identity_that_opened_them() {
 async fn manual_tokens_replace_anonymous_access_and_revoke_live_sessions() {
     let (gateway, port, dir) = start().await;
     let (oauth_id, oauth_token) = signed_in_agent(&gateway, port, "same-name").await;
-    let issued = gateway.create_manual_agent("same-name").await.unwrap();
-    let other = gateway.create_manual_agent("same-name").await.unwrap();
+    assert!(gateway.create_manual_agent("SAME-NAME").await.is_err());
+    let issued = gateway.create_manual_agent("manual-one").await.unwrap();
+    let other = gateway.create_manual_agent("manual-two").await.unwrap();
     assert_ne!(issued.agent_id, oauth_id);
     assert_ne!(issued.agent_id, other.agent_id);
     assert_eq!(

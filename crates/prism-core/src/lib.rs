@@ -12,6 +12,7 @@ mod events;
 mod gateway;
 mod http_security;
 mod listener;
+mod names;
 pub mod native;
 mod oauth;
 pub mod policy;

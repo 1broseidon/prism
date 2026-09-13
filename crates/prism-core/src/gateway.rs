@@ -43,6 +43,10 @@ use crate::policy::{self, Decider, ToolAnnotations, Verdict};
 #[path = "server_edit_tests.rs"]
 mod server_edit_tests;
 
+#[cfg(test)]
+#[path = "agent_name_tests.rs"]
+mod agent_name_tests;
+
 /// Fields supplied by an in-place server edit. Secret values are plaintext only until saved.
 #[derive(Default)]
 pub struct ServerUpdate {
@@ -61,10 +65,7 @@ pub(crate) fn validate_server(
     servers: &[ServerConfig],
     replacing: Option<&str>,
 ) -> Result<()> {
-    server.name = server.name.trim().to_string();
-    if server.name.trim().is_empty() {
-        return Err(Error::Invalid("server name is required".into()));
-    }
+    server.name = crate::names::server(&server.name)?;
     match server.url.as_deref() {
         Some(url) => {
             server.url = Some(crate::remote::validate_url(url)?);
@@ -95,7 +96,7 @@ pub(crate) fn validate_server(
     }
     if servers.iter().any(|existing| {
         Some(existing.id.as_str()) != replacing
-            && (existing.id == server.id || existing.name == server.name)
+            && (existing.id == server.id || crate::names::same(&existing.name, &server.name))
     }) {
         return Err(Error::AlreadyExists(format!("server {}", server.name)));
     }
@@ -267,6 +268,33 @@ pub struct Gateway {
 }
 
 impl Gateway {
+    /// Change a label without changing the principal or rewriting retained audit history.
+    pub async fn rename_agent(&self, agent_id: &str, raw: &str) -> Result<AgentConfig> {
+        let renamed = {
+            let mut config = self.config.write().await;
+            let index = config
+                .agents
+                .iter()
+                .position(|agent| agent.id == agent_id)
+                .ok_or_else(|| Error::NotFound("agent was removed".into()))?;
+            let name = crate::names::agent(raw, &config.agents, Some(agent_id))?;
+            if config.agents[index].name == name {
+                return Ok(config.agents[index].clone());
+            }
+            let mut updated = config.clone();
+            updated.agents[index].name = name;
+            updated.save(&self.config_path)?;
+            let renamed = updated.agents[index].clone();
+            *config = updated;
+            self.rename_pending_signins(agent_id, &renamed.name);
+            renamed
+        };
+        let _ = self.events.send(GatewayEvent::AgentUpdated {
+            agent_id: agent_id.into(),
+        });
+        Ok(renamed)
+    }
+
     /// Load config, start backends, bind Streamable HTTP on the loopback port. A port that
     /// cannot be bound does not stop the app: the gateway comes up with the clash in its
     /// status so the panel can show it, and `retry_listener` tries again.
@@ -1389,13 +1417,12 @@ impl Gateway {
             if config.agents.iter().any(|a| a.id == agent_id) {
                 return Ok(());
             }
-            config.agents.push(AgentConfig::harness(
-                host,
-                None,
-                AgentStatus::Approved,
-                Utc::now(),
-            ));
-            config.save(&self.config_path)?;
+            let mut updated = config.clone();
+            let mut agent = AgentConfig::harness(host, None, AgentStatus::Approved, Utc::now());
+            agent.name = crate::names::unique(&agent.name, &updated.agents, None);
+            updated.agents.push(agent);
+            updated.save(&self.config_path)?;
+            *config = updated;
         }
         let _ = self.events.send(GatewayEvent::AgentUpdated { agent_id });
         Ok(())
@@ -1530,13 +1557,12 @@ impl Gateway {
                 }
                 Some(_) => false,
                 None => {
-                    config.agents.push(AgentConfig::harness(
-                        host,
-                        None,
-                        AgentStatus::Approved,
-                        now,
-                    ));
-                    config.save(&self.config_path)?;
+                    let mut updated = config.clone();
+                    let mut agent = AgentConfig::harness(host, None, AgentStatus::Approved, now);
+                    agent.name = crate::names::unique(&agent.name, &updated.agents, None);
+                    updated.agents.push(agent);
+                    updated.save(&self.config_path)?;
+                    *config = updated;
                     true
                 }
             };

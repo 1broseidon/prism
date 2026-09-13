@@ -1,4 +1,5 @@
 import * as api from "../api";
+import { AgentName } from "../AgentName";
 import { hostSetup, hostStatus } from "../hosts";
 import { ATTENTIONS, POSTURES } from "../policy";
 import { native, pop, push, rules, servers } from "../state";
@@ -97,6 +98,8 @@ export function AgentScreen({ agentId }: { agentId: string }) {
             </span>
           )}
         </div>
+
+        <AgentName key={agent.id} agent={agent} />
 
         <section class="section">
           <Label>Posture</Label>

@@ -5,6 +5,7 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 ## [Unreleased]
 
 ### Added
+- Agent cards can rename the display label while preserving client identity, tokens, connections and permissions. Save/Cancel and Enter/Escape work in the tray panel. Names are bounded and case-insensitively unique; server names reject ambiguous tool namespace separators.
 - Start at login uses per-user macOS, Windows and Linux startup registration, reads the OS state and preserves disabled preferences. Automatic launches stay in the tray; manual relaunches open the existing instance. A startup error leaves the tray available with recovery and Retry. Packaged login and upgrade acceptance remains pending on all three platforms.
 - `prism-provision apply` imports versioned server manifests into a stopped profile, resolves credential environment references into the OS store, and updates stable server IDs without losing rules or hidden tools. A shared profile lock prevents concurrent gateway/import writes. Explicit header auth connects on startup even when OAuth metadata is advertised.
 - Generic OAuth clients whose name, registration origin and loopback callback match can join an existing agent after fresh consent. The panel offers adding a connection, keeping a separate agent, or explicitly replacing one old connection. Replacement takes effect only after a successful save; matching metadata grants no access by itself.

@@ -834,6 +834,19 @@ async fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentView>, Strin
 }
 
 #[tauri::command]
+async fn rename_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+    name: String,
+) -> Result<AgentConfig, String> {
+    state
+        .gateway
+        .rename_agent(&agent_id, &name)
+        .await
+        .map_err(map_err)
+}
+
+#[tauri::command]
 async fn create_manual_agent(
     state: State<'_, AppState>,
     name: String,
@@ -1808,6 +1821,7 @@ pub fn run() {
             sign_in_server,
             sign_out_server,
             list_agents,
+            rename_agent,
             create_manual_agent,
             replace_manual_token,
             decide_agent,
