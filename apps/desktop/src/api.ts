@@ -37,11 +37,17 @@ import type {
   ToolInfo,
   UpdateInfo,
   UpdateStatus,
+  StartupStatus,
 } from "./types";
 
 export function getStatus() {
   return invoke<GatewayStatus>("get_status");
 }
+
+export function getStartup() { return invoke<StartupStatus>("get_startup"); }
+export function setStartup(enabled: boolean) { return invoke<StartupStatus>("set_startup", { enabled }); }
+export function getGatewayStartup() { return invoke<string | null>("get_gateway_startup"); }
+export function retryGatewayStartup() { return invoke<void>("retry_gateway_startup"); }
 
 export function listServers() {
   return invoke<ServerView[]>("list_servers");

@@ -7,7 +7,8 @@
 #   make stop       kill a dev run that outlived its terminal
 #
 # The dev build shares ~/.config/dev.prism.gateway with the installed app, so with
-# the installed Prism running you get the real "port in use" notice on 9086.
+# the installed Prism running, a second launch opens that existing instance.
+# Quit the installed app before starting a separate development run.
 
 SHELL := /bin/bash
 DESKTOP := apps/desktop

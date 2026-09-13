@@ -70,6 +70,24 @@ Linux honours `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. Directories are `0700` and 
 
 The panel has four tabs. **Now** shows pending approvals and an activity summary. Click a count to open its filtered log. **Servers**, **Agents** and **Rules** are the three things you configure. The sliders icon opens operator settings.
 
+### Start at login
+
+In an installed release build, **Settings → Start at login** starts Prism quietly in the tray after you sign in. It is off until you enable it. Automatic launch does not open a panel or browser; requests still follow your attention settings. Launching Prism again opens the existing instance, with one gateway per profile.
+
+The switch reads the OS registration, including disabled entries; an unreadable state shows **Unknown** and **Retry**. Failed changes show the observed state instead of an optimistic enabled switch. If gateway startup fails, the tray remains available with **Retry startup** after you unlock the credential store or fix the reported configuration problem. An individual server with unavailable credentials can be restarted from its server screen after unlocking.
+
+| OS | Per-user registration |
+| --- | --- |
+| macOS | `~/Library/LaunchAgents/dev.prism.gateway.plist` |
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `dev.prism.gateway`; Task Manager's disabled state is respected |
+| Linux | `$XDG_CONFIG_HOME/autostart/dev.prism.gateway.desktop`, or `~/.config/autostart/…` |
+
+In-place updates preserve the OS setting. If you move the app, open the new copy and use **Repair** when startup points elsewhere. Keep AppImages in a permanent location; Prism registers the AppImage itself. Paths with spaces are supported. Linux paths containing percent or equals signs, control characters, and Windows startup commands longer than 260 UTF-16 code units are rejected. Development builds can inspect or disable startup but cannot register a development executable.
+
+Turn startup off before uninstalling. Removing the app alone can leave its per-user entry; remove the named entry above if needed. This is desktop-session startup, after login. A service that starts before login belongs to headless daemon support. Linux still requires a working desktop session, tray support and D-Bus. Externally customized startup entries may require turning the setting off and enabling it again.
+
+Implementation checks cover registration state, failures, quoting, repeated changes and the Linux desktop launcher. Packaged login/reboot and upgrade acceptance on native macOS, Windows and Linux is still pending; those results must be recorded before task-76 closes.
+
 ## Add a server
 
 **Servers → Add server.** A server is either a command Prism runs or a URL it connects to.

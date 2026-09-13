@@ -30,6 +30,13 @@ export type ListenerState =
 /** Loopback is this machine only; network is every interface. */
 export type ListenAddress = "loopback" | "network";
 
+export interface StartupStatus {
+  enabled: boolean | null;
+  needs_repair: boolean;
+  can_enable: boolean;
+  error: string | null;
+}
+
 export interface GatewayStatus {
   /** The port agents dial: the bound one while listening, otherwise the configured one. */
   listen_port: number;

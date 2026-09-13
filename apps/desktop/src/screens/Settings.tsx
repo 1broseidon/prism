@@ -1,9 +1,10 @@
 import type * as preact from "preact";
 import { signal } from "@preact/signals";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { changeStartup } from "../startup-state";
 import * as api from "../api";
 import { errorMessage, push, status, update, updateProgress } from "../state";
-import type { ListenAddress, ListenerState, PanelAnchor, Settings, UpdateStatus } from "../types";
+import type { ListenAddress, ListenerState, PanelAnchor, Settings, StartupStatus, UpdateStatus } from "../types";
 import { Button, HubRow, Label, Screen, Segmented, StatusText, Switch, describeError } from "../ui";
 import { native } from "../state";
 import { loadNativeStatus } from "../events";
@@ -348,6 +349,42 @@ function NetworkSection() {
 /** The installed version, learned once from the updater for the Updates row. */
 const currentVersion = signal<string | null>(null);
 
+function StartupSetting() {
+  const [startup, setStartup] = useState<StartupStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const active = useRef(false);
+  const mounted = useRef(true);
+  const refresh = async () => {
+    if (active.current) return;
+    active.current = true; setBusy(true);
+    try { const state = await api.getStartup(); if (mounted.current) setStartup(state); }
+    catch { if (mounted.current) setStartup({ enabled: null, needs_repair: false, can_enable: false, error: "Startup state is unavailable. Retry after login has finished." }); }
+    finally { active.current = false; if (mounted.current) setBusy(false); }
+  };
+  useEffect(() => {
+    mounted.current = true;
+    void refresh();
+    const visible = () => { if (!document.hidden) void refresh(); };
+    window.addEventListener("focus", visible); document.addEventListener("visibilitychange", visible);
+    return () => { mounted.current = false; window.removeEventListener("focus", visible); document.removeEventListener("visibilitychange", visible); };
+  }, []);
+  const change = async (enabled: boolean) => {
+    if (active.current) return;
+    active.current = true; setBusy(true);
+    try { const state = await changeStartup(enabled, api.setStartup, api.getStartup); if (mounted.current) setStartup(state); }
+    finally { active.current = false; if (mounted.current) setBusy(false); }
+  };
+  return <>
+    <div class="setting">
+      <div><div class="setting-title">Start at login</div><div class="hint">{!startup ? "Checking OS settings…" : startup.error ? "Check OS startup settings." : !startup.can_enable ? "Enable from an installed release build." : "Starts quietly in the tray."}</div></div>
+      {startup?.enabled === null ? <span class="hint">Unknown</span> : <Switch label="Start Prism at login" checked={startup?.enabled === true} disabled={busy || !startup || (!startup.can_enable && !startup.enabled)} onChange={value => void change(value)} />}
+    </div>
+    {startup?.needs_repair ? <div class="setting"><div class="hint">Startup points to a different installation.</div><Button busy={busy} disabled={!startup.can_enable} onClick={() => void change(true)}>Repair</Button></div> : null}
+    {startup?.error ? <div class="setting"><div class="hint danger" role="status">{startup.error}</div><Button busy={busy} onClick={() => void refresh()}>Retry</Button></div> : null}
+    {startup?.enabled === null ? <div class="actions"><Button busy={busy} onClick={() => void change(false)}>Turn off startup</Button></div> : null}
+  </>;
+}
+
 export function SettingsScreen() {
   const [settings, setSettings] = useState<Settings | null>(null);
 
@@ -377,6 +414,7 @@ export function SettingsScreen() {
         <section class="section">
           <Label>Panel</Label>
           <div class="list">
+            <StartupSetting />
             <label class="setting">
               <div>
                 <div class="setting-title">Opens at</div>

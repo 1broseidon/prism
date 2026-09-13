@@ -1,4 +1,4 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import * as api from "./api";
 import { loadAll, loadUpdateStatus, subscribeEvents } from "./events";
 import { AddServerScreen } from "./screens/AddServer";
@@ -16,10 +16,10 @@ import { RulesScreen } from "./screens/Rules";
 import { ServerScreen } from "./screens/Server";
 import { ServersScreen } from "./screens/Servers";
 import { ObserveScreen, SettingsScreen, UpdatesScreen } from "./screens/Settings";
-import { agents, errorMessage, pending, pop, push, resetNavigation, servers, signins, stack, status, tab, update } from "./state";
+import { agents, errorMessage, gatewayStartupError, pending, pop, push, resetNavigation, servers, signins, stack, status, tab, update } from "./state";
 import type { Screen } from "./state";
 import { ListenerNotice } from "./screens/Settings";
-import { BackIcon, Button, CloseIcon, Notice, SettingsIcon } from "./ui";
+import { BackIcon, Button, CloseIcon, Notice, Screen as ScreenLayout, SettingsIcon } from "./ui";
 
 const TABS = [
   { id: "now", label: "Now" },
@@ -80,6 +80,7 @@ const Mark = () => (
 );
 
 export function App() {
+  const [retrying, setRetrying] = useState(false);
   useEffect(() => {
     void loadAll();
     void loadUpdateStatus();
@@ -103,6 +104,26 @@ export function App() {
   const st = status.value;
   const waiting = pending.value.length + agents.value.filter((agent) => agent.status === "pending").length + signins.value.length;
   const top = stack.value[stack.value.length - 1];
+
+  if (gatewayStartupError.value) {
+    const retry = async () => {
+      if (retrying) return;
+      setRetrying(true);
+      try { await api.retryGatewayStartup(); await loadAll(); }
+      catch (error) { gatewayStartupError.value = error instanceof Error ? error.message : String(error); }
+      finally { setRetrying(false); }
+    };
+    return <>
+      <header class="header"><Mark /><h1 class="wordmark">Prism</h1><span class="spacer" /><Button variant="icon" aria-label="Hide panel" onClick={() => void api.hidePanel()}><CloseIcon /></Button></header>
+      <main class="body"><div class="screen"><ScreenLayout><section class="hold">
+        <div class="top"><span class="eyebrow">Startup</span></div>
+        <div class="ask">Gateway needs attention</div>
+        <p class="note">{gatewayStartupError.value}</p>
+        <p class="note">Unlock your credential store or fix the reported configuration problem, then retry. Your configuration is kept.</p>
+        <div class="actions"><Button variant="primary" busy={retrying} onClick={() => void retry()}>Retry startup</Button></div>
+      </section></ScreenLayout></div></main>
+    </>;
+  }
 
   return (
     <>

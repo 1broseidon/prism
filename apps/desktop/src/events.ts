@@ -7,6 +7,7 @@ import {
   agents,
   audit,
   errorMessage,
+  gatewayStartupError,
   native,
   pending,
   resetNavigation,
@@ -22,6 +23,8 @@ import type { GatewayEvent, UpdateEvent } from "./types";
 
 export async function loadAll(): Promise<void> {
   try {
+    gatewayStartupError.value = await api.getGatewayStartup();
+    if (gatewayStartupError.value) return;
     const [st, srv, ag, pend, si, ru] = await Promise.all([
       api.getStatus(),
       api.listServers(),

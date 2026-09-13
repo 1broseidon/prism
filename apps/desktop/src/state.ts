@@ -21,6 +21,7 @@ import type {
 } from "./types";
 
 export const status = signal<GatewayStatus | null>(null);
+export const gatewayStartupError = signal<string | null>(null);
 export const servers = signal<ServerView[]>([]);
 export const toolRevisions = signal<Record<string, number>>({});
 export const agents = signal<AgentConfig[]>([]);

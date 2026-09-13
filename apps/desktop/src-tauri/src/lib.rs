@@ -1,5 +1,6 @@
 //! Prism desktop tray app: hosts `prism-core`, tray panel, and Tauri commands.
 mod harness;
+mod startup;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -44,6 +45,64 @@ fn DEFAULT_SHORTCUT() -> Shortcut {
 
 struct AppState {
     gateway: Arc<Gateway>,
+}
+
+#[derive(Default)]
+struct GatewayStartup {
+    error: Mutex<Option<String>>,
+    retrying: AtomicBool,
+}
+
+struct StartupRetry<'a>(&'a AtomicBool);
+impl Drop for StartupRetry<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[tauri::command]
+fn get_gateway_startup(state: State<'_, GatewayStartup>) -> Option<String> {
+    state
+        .error
+        .lock()
+        .expect("startup error lock poisoned")
+        .clone()
+}
+
+#[tauri::command]
+async fn retry_gateway_startup(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<GatewayStartup>();
+    if state
+        .retrying
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A startup retry is already running.".into());
+    }
+    let _retry = StartupRetry(&state.retrying);
+    if app.try_state::<AppState>().is_some() {
+        return Ok(());
+    }
+    let result = async {
+        let (config, audit) = config_paths(&app)?;
+        Gateway::start(config, audit).await.map_err(map_err)
+    }
+    .await;
+    match result {
+        Ok(gateway) => {
+            app.manage(AppState {
+                gateway: gateway.clone(),
+            });
+            *state.error.lock().expect("startup error lock poisoned") = None;
+            forward_events(app.clone(), gateway);
+            set_tray_icon(&app, false);
+            Ok(())
+        }
+        Err(error) => {
+            *state.error.lock().expect("startup error lock poisoned") = Some(error.clone());
+            Err(error)
+        }
+    }
 }
 
 /// What the panel needs to know about a newer release. `installable` is false on Linux outside an
@@ -450,7 +509,7 @@ fn remember_tray_rect(app: &AppHandle, rect: &tauri::Rect) {
 /// Development only: the panel stays on screen across focus changes so edits can be watched live.
 /// Set through the environment at launch; release builds never read it from anywhere else.
 fn panel_pinned() -> bool {
-    std::env::var_os("PRISM_PIN_PANEL").is_some()
+    !startup::is_automatic(std::env::args_os()) && std::env::var_os("PRISM_PIN_PANEL").is_some()
 }
 
 fn show_panel(app: &AppHandle, reason: &'static str) {
@@ -589,6 +648,20 @@ fn map_err(err: prism_core::Error) -> String {
         prism_core::Error::Invalid(message) => message,
         other => other.to_string(),
     }
+}
+
+#[tauri::command]
+async fn get_startup(app: AppHandle) -> Result<startup::StartupStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<startup::Startup>().status())
+        .await
+        .map_err(|_| "Could not read startup settings.".into())
+}
+
+#[tauri::command]
+async fn set_startup(app: AppHandle, enabled: bool) -> Result<startup::StartupStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<startup::Startup>().set(enabled))
+        .await
+        .map_err(|_| "Could not change startup settings. Recheck the OS state.".into())
 }
 
 #[tauri::command]
@@ -1586,12 +1659,17 @@ pub fn run() {
     prism_core::adopt_login_shell_path();
 
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !startup::is_automatic(args) { show_panel(app, "app"); }
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(UpdateState::default())
+        .manage(GatewayStartup::default())
         .setup(|app| {
+            app.manage(startup::Startup::new(app.handle()));
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -1614,17 +1692,20 @@ pub fn run() {
                 let _ = window.set_size(LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1));
             }
 
-            let (config_path, audit_path) = config_paths(app.handle())?;
-
-            let gateway = tauri::async_runtime::block_on(Gateway::start(config_path, audit_path))
-                .map_err(|err| {
-                error!(%err, "failed to start gateway");
-                err
-            })?;
-
-            app.manage(AppState {
-                gateway: gateway.clone(),
+            let started = config_paths(app.handle()).and_then(|(config_path, audit_path)| {
+                tauri::async_runtime::block_on(Gateway::start(config_path, audit_path)).map_err(map_err)
             });
+            let gateway = match started {
+                Ok(gateway) => {
+                    app.manage(AppState { gateway: gateway.clone() });
+                    Some(gateway)
+                }
+                Err(error) => {
+                    error!(%error, "gateway startup needs attention");
+                    *app.state::<GatewayStartup>().error.lock().expect("startup error lock poisoned") = Some(error);
+                    None
+                }
+            };
 
             recall_tray_hint(app.handle());
             build_tray(app.handle())?;
@@ -1637,12 +1718,13 @@ pub fn run() {
                     let _ = handle.run_on_main_thread(refresh_tray_icon);
                 });
             }
-            forward_events(app.handle().clone(), gateway);
+            if let Some(gateway) = gateway { forward_events(app.handle().clone(), gateway); }
+            else { set_tray_icon(app.handle(), true); }
             start_update_checks(app.handle().clone());
 
             // Dev affordances: `PRISM_SHOW_PANEL=1 cargo tauri dev` opens the panel without a tray
             // click; `PRISM_PIN_PANEL=1` also keeps it open when focus moves to the editor.
-            if std::env::var_os("PRISM_SHOW_PANEL").is_some() || panel_pinned() {
+            if !startup::is_automatic(std::env::args_os()) && (std::env::var_os("PRISM_SHOW_PANEL").is_some() || panel_pinned()) {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -1712,6 +1794,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_gateway_startup,
+            retry_gateway_startup,
+            get_startup,
+            set_startup,
             get_status,
             list_servers,
             add_server,

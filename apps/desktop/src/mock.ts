@@ -200,6 +200,9 @@ const tools: Record<string, ToolInfo[]> = {
 };
 
 const delay = <T,>(v: T) => new Promise<T>((r) => setTimeout(() => r(v), 60));
+const startupScenario = new URLSearchParams(location.search).get("startup");
+let startupState: import("./types").StartupStatus = { enabled: startupScenario === "unknown" ? null : false, needs_repair: false, can_enable: true, error: startupScenario === "unknown" ? "Startup state is unavailable." : null };
+let gatewayStartupError = startupScenario === "locked" ? "Credential store unavailable." : null;
 
 /** `?port=busy` in the browser shows the clash notice; `?port=prism` names the other copy. */
 const portScenario = new URLSearchParams(location.search).get("port");
@@ -209,6 +212,15 @@ const networkUrl = () => (listenAddress === "network" && listener.kind === "list
 let listener: ListenerState = portScenario ? { kind: "port_in_use", port: 9086, holder: portScenario === "prism" ? "prism" : null } : { kind: "listening" };
 
 export const mock = {
+  get_gateway_startup: () => delay(gatewayStartupError),
+  retry_gateway_startup: () => { gatewayStartupError = null; return delay(undefined); },
+  get_startup: () => delay(startupState),
+  set_startup: async (args: { enabled: boolean }) => {
+    await delay(null);
+    if (startupScenario === "fail") return { ...startupState, error: "Could not save the startup entry. Check directory permissions and retry." };
+    startupState = { enabled: args.enabled, needs_repair: false, can_enable: true, error: null };
+    return startupState;
+  },
   get_status: (): Promise<GatewayStatus> =>
     delay({ listen_port: listenPort, listening: listener.kind === "listening", listener, listen_address: listenAddress, network_url: networkUrl(), servers_running: servers.filter((s) => s.status.kind === "running").length, servers_total: servers.length, agent_count: agents.length, pending_count: pending.length, pending_agents: agents.filter((a) => a.status === "pending").length, pending_signins: signins.length, auto_open_on_pending: settings.auto_open_on_pending, do_not_disturb: settings.do_not_disturb }),
   list_servers: () => delay(servers),
