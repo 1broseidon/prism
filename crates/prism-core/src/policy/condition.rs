@@ -103,7 +103,7 @@ impl Condition {
         let parsed: Self = serde_json::from_value(value.clone())
             .map_err(|_| "Unknown or malformed condition".to_string())?;
         if !parsed.valid() {
-            return Err("Malformed condition predicate".into());
+            return Err("Unsupported or malformed condition predicate".into());
         }
         Ok(parsed)
     }
@@ -112,7 +112,10 @@ impl Condition {
         match self {
             Self::All(c) | Self::Any(c) => c.iter().all(Self::valid),
             Self::Not(c) => c.valid(),
-            Self::Tag(_) | Self::Command(_) => true,
+            // Tags have no classifier yet. Reject the entire tree, so negation or a
+            // matching sibling cannot turn an unavailable predicate into an allow.
+            Self::Tag(_) => false,
+            Self::Command(_) => true,
             Self::Path(p) => {
                 p.under.as_ref().is_none_or(|p| !p.is_empty())
                     && (p.under.is_some() || p.outside_cwd.is_some() || p.access.is_some())
@@ -133,10 +136,15 @@ impl Condition {
     }
 
     pub fn matches(&self, action: &Action) -> bool {
+        // Also protect callers constructing/deserializing Condition without parse().
+        self.valid() && self.matches_validated(action)
+    }
+
+    fn matches_validated(&self, action: &Action) -> bool {
         match self {
-            Self::All(c) => c.iter().all(|c| c.matches(action)),
-            Self::Any(c) => c.iter().any(|c| c.matches(action)),
-            Self::Not(c) => !c.matches(action),
+            Self::All(c) => c.iter().all(|c| c.matches_validated(action)),
+            Self::Any(c) => c.iter().any(|c| c.matches_validated(action)),
+            Self::Not(c) => !c.matches_validated(action),
             Self::Tag(_) => false,
             Self::Path(p) => {
                 let prefix = p

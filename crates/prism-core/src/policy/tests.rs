@@ -297,7 +297,6 @@ fn arguments_commands_and_boolean_predicates() {
         json!({"arg":{"pointer":"/repo","matches":"release-*"}}),
         json!({"arg":{"pointer":"/repo","equals":"x"}}),
         json!({"command":{"program_in":["rm"]}}),
-        json!({"tag":"write_outside_cwd"}),
     ] {
         assert!(!check(c, &a));
     }
@@ -316,7 +315,7 @@ fn arguments_commands_and_boolean_predicates() {
         &action("run", json!({"args":["git", "rm"]}))
     ));
     let yes = json!({"command":{"program_in":["git"]}});
-    let no = json!({"tag":"future"});
+    let no = json!({"command":{"program_in":["rm"]}});
     assert!(check(json!({"all":[yes.clone(), {"not":no.clone()}]}), &a));
     assert!(!check(json!({"all":[yes.clone(), no.clone()]}), &a));
     assert!(check(json!({"any":[no.clone(), yes.clone()]}), &a));
@@ -325,6 +324,95 @@ fn arguments_commands_and_boolean_predicates() {
     assert!(check(json!({"not":no}), &a));
     assert!(check(json!({"all":[]}), &a));
     assert!(!check(json!({"any":[]}), &a));
+}
+
+#[test]
+fn unsupported_tags_never_select_a_rule_even_under_boolean_composition() {
+    let a = action("tool", json!({"path":"/repo/a"}));
+    let yes = json!({"path":{"under":"/repo"}});
+    for tag in ["secret_read", "write_outside_cwd", "future", ""] {
+        let tag = json!({"tag":tag});
+        for value in [
+            tag.clone(),
+            json!({"not":tag.clone()}),
+            json!({"all":[yes.clone(), {"not":tag.clone()}]}),
+            json!({"any":[yes.clone(), tag.clone()]}),
+            json!({"any":[tag.clone(), yes.clone()]}),
+            json!({"not":{"all":[tag.clone(), {"not":yes.clone()}]}}),
+            json!({"not":{"any":[{"not":tag}]}}),
+        ] {
+            assert!(Condition::parse(&value).is_err(), "{value}");
+            let unchecked: Condition = serde_json::from_value(value.clone()).unwrap();
+            assert!(!unchecked.matches(&a), "{value}");
+            let mut allow = rule("unsupported", None, None, None, RuleDecision::Allow);
+            allow.condition = Some(value.clone());
+            let deny = rule("deny", None, None, None, RuleDecision::Deny);
+            // Exercise both the first parse and the cached result, and ensure the
+            // invalid conditioned allow cannot outrank an unconditioned deny.
+            for _ in 0..2 {
+                assert_eq!(
+                    evaluate(
+                        &[allow.clone()],
+                        &agent(Posture::Supervised),
+                        &a,
+                        Utc::now()
+                    )
+                    .verdict,
+                    Verdict::Ask,
+                    "{value}"
+                );
+                assert_eq!(
+                    evaluate(
+                        &[allow.clone(), deny.clone()],
+                        &agent(Posture::Supervised),
+                        &a,
+                        Utc::now()
+                    )
+                    .verdict,
+                    Verdict::Deny,
+                    "{value}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn loaded_tag_rules_keep_their_condition_and_report_inert_to_the_panel() {
+    use crate::credentials::tests::MemoryStore;
+    use crate::{Gateway, PrismConfig};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prism.json");
+    let condition = json!({"not":{"tag":"secret_read"}});
+    let mut allow = rule("unsupported", None, None, None, RuleDecision::Allow);
+    allow.condition = Some(condition.clone());
+    PrismConfig {
+        listen_port: 0,
+        rules: vec![allow],
+        ..Default::default()
+    }
+    .save(&path)
+    .unwrap();
+    let gateway = Gateway::start_with_credentials(
+        path.clone(),
+        dir.path().join("audit.jsonl"),
+        Arc::new(MemoryStore::default()),
+    )
+    .await
+    .unwrap();
+    let listed = gateway.rules().await;
+    assert_eq!(listed[0].condition.as_ref(), Some(&condition));
+    assert!(listed[0].condition_error.is_some());
+    assert!(serde_json::to_value(&listed).unwrap()[0]["condition_error"].is_string());
+    assert_eq!(
+        PrismConfig::load(&path).unwrap().rules[0]
+            .condition
+            .as_ref(),
+        Some(&condition)
+    );
+    gateway.shutdown().await;
 }
 
 #[test]

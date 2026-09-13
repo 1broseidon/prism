@@ -4,6 +4,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Fixed
+- Rules containing unavailable tag predicates are marked Inert, including inside `not`, `all` and `any`. Negating an unsupported tag can no longer turn an allow rule into a match for every action.
+
 ## [0.7.3] - 2026-09-09
 
 ### Added
