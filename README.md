@@ -86,7 +86,7 @@ In-place updates preserve the OS setting. If you move the app, open the new copy
 
 Turn startup off before uninstalling. Removing the app alone can leave its per-user entry; remove the named entry above if needed. This is desktop-session startup, after login. A service that starts before login belongs to headless daemon support. Linux still requires a working desktop session, tray support and D-Bus. Externally customized startup entries may require turning the setting off and enabling it again.
 
-Implementation checks cover registration state, failures, quoting, repeated changes and the Linux desktop launcher. Packaged login/reboot and upgrade acceptance on native macOS, Windows and Linux is still pending; those results must be recorded before task-76 closes.
+Implementation checks cover registration state, failures, quoting, repeated changes and the Linux desktop launcher. Packaged login/reboot and upgrade acceptance on native macOS, Windows and Linux is still pending; record the [startup acceptance checklist](docs/startup-acceptance.md) before task-76 closes.
 
 ## Add a server
 

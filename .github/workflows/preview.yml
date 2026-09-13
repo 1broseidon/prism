@@ -45,6 +45,15 @@ jobs:
       - name: Frontend deps
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
+      - name: Frontend checks
+        working-directory: apps/desktop
+        run: |
+          pnpm test
+          pnpm build
+      - name: Core and desktop tests
+        run: |
+          cargo test -p prism-core --locked
+          cargo test -p prism-desktop --lib --locked
       # Use the same Apple identity and notarization as tagged releases when configured.
       - name: Apple signing secrets
         if: runner.os == 'macOS'
