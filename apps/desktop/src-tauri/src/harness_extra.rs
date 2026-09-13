@@ -1609,12 +1609,18 @@ mod tests {
                     .stderr(Stdio::piped())
                     .spawn()
                     .unwrap();
-                child
-                    .stdin
-                    .take()
-                    .unwrap()
-                    .write_all(br#"{"tool_output":"nonempty\n$(never execute)","decision":"deny"}"#)
-                    .unwrap();
+                if let Err(error) =
+                    child.stdin.take().unwrap().write_all(
+                        br#"{"tool_output":"nonempty\n$(never execute)","decision":"deny"}"#,
+                    )
+                {
+                    // With curl absent, the neutral wrapper may exit before consuming stdin.
+                    // The exit status and exact stdout/stderr below still define success.
+                    assert!(
+                        missing && error.kind() == std::io::ErrorKind::BrokenPipe,
+                        "{error}"
+                    );
+                }
                 let output = child.wait_with_output().unwrap();
                 assert!(output.status.success());
                 assert_eq!(output.stdout, b"{}\n");

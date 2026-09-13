@@ -116,6 +116,7 @@ pub struct BackendManager {
     backends: Arc<RwLock<Catalog>>,
     events: EventSender,
     credentials: Arc<dyn crate::credentials::CredentialStore>,
+    shutdown: CancellationToken,
 }
 
 impl BackendManager {
@@ -127,13 +128,14 @@ impl BackendManager {
             backends: Arc::new(RwLock::new(Catalog::default())),
             events,
             credentials,
+            shutdown: CancellationToken::new(),
         }
     }
 
     pub async fn start(&self, config: ServerConfig) {
         let id = config.id.clone();
         let generation = uuid::Uuid::new_v4();
-        let stop = CancellationToken::new();
+        let stop = self.shutdown.child_token();
         let status = if config.enabled {
             BackendStatus::Starting
         } else {
@@ -141,6 +143,10 @@ impl BackendManager {
         };
         {
             let mut catalog = self.backends.write().await;
+            // Check under the catalog lock so shutdown's snapshot cannot miss a late start.
+            if stop.is_cancelled() {
+                return;
+            }
             catalog.entries.insert(
                 id.clone(),
                 Backend {
@@ -154,8 +160,8 @@ impl BackendManager {
                 },
             );
             catalog.reindex();
+            self.status(&id, status);
         }
-        self.status(&id, status);
         if !config.enabled {
             return;
         }
@@ -240,20 +246,33 @@ impl BackendManager {
         };
         // A stalled peer must not hold the catalog lock for other servers.
         if let Some(client) = client {
-            client.cancellation_token().cancel();
-            if let Ok(mut client) = Arc::try_unwrap(client) {
-                if client
-                    .close_with_timeout(Duration::from_secs(3))
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        server_id,
-                        "backend close failed; details omitted to protect credentials"
-                    );
+            close_client(server_id, client).await;
+        }
+    }
+
+    /// Terminal shutdown: interrupt connection work before waiting for peer teardown.
+    /// No server mutation lock is needed, and queued starts cannot revive the catalog.
+    pub(crate) async fn shutdown(&self) {
+        self.shutdown.cancel();
+        let mut closing = tokio::task::JoinSet::new();
+        {
+            let mut catalog = self.backends.write().await;
+            for (id, backend) in &mut catalog.entries {
+                backend.stop.cancel();
+                backend.generation = uuid::Uuid::new_v4();
+                backend.tools.clear();
+                backend.status = BackendStatus::Stopped;
+                self.status(id, BackendStatus::Stopped);
+                if let Some(client) = backend.client.take() {
+                    let id = id.clone();
+                    client.cancellation_token().cancel();
+                    closing.spawn(async move { close_client(&id, client).await });
                 }
             }
+            catalog.reindex();
         }
+        // Peer close budgets run concurrently rather than accumulating per server.
+        while closing.join_next().await.is_some() {}
     }
 
     pub async fn remove(&self, server_id: &str) {
@@ -557,6 +576,22 @@ async fn watch_tools(
         biased;
         _ = stop.cancelled() => {},
         _ = work => {},
+    }
+}
+
+async fn close_client(server_id: &str, client: Arc<McpClient>) {
+    client.cancellation_token().cancel();
+    if let Ok(mut client) = Arc::try_unwrap(client) {
+        if client
+            .close_with_timeout(Duration::from_secs(3))
+            .await
+            .is_err()
+        {
+            warn!(
+                server_id,
+                "backend close failed; details omitted to protect credentials"
+            );
+        }
     }
 }
 

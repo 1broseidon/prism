@@ -197,6 +197,38 @@ async fn eventually(mut condition: impl AsyncFnMut() -> bool) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn shutdown_prevents_queued_and_late_starts_from_reviving_the_catalog() {
+    let (events, mut receiver) = crate::events::channel();
+    let manager = Arc::new(BackendManager::new(
+        events,
+        Arc::new(MemoryStore::default()),
+    ));
+    let config: ServerConfig = serde_json::from_value(serde_json::json!({"id":"late", "name":"Late", "url":"http://127.0.0.1:1/mcp", "enabled":false})).unwrap();
+    let catalog = manager.backends.write().await;
+    let starting = manager.clone();
+    let queued_config = config.clone();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let start = tokio::spawn(async move {
+        entered.send(()).unwrap();
+        starting.start(queued_config).await
+    });
+    waiting.await.unwrap();
+    let stopping = manager.clone();
+    let shutdown = tokio::spawn(async move { stopping.shutdown().await });
+    manager.shutdown.cancelled().await;
+    drop(catalog);
+    start.await.unwrap();
+    shutdown.await.unwrap();
+    manager.start(config).await;
+    assert!(manager.snapshot().await.is_empty());
+    assert!(manager.list_tools(false).await.is_empty());
+    assert!(
+        receiver.try_recv().is_err(),
+        "no starting or running event after terminal shutdown"
+    );
+}
+
 async fn gateway() -> (Arc<Gateway>, tempfile::TempDir, u16) {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))

@@ -1662,17 +1662,7 @@ impl Gateway {
 
     pub async fn shutdown(&self) {
         self.shutdown.cancel();
-        let ids: Vec<String> = self
-            .backends
-            .snapshot()
-            .await
-            .into_iter()
-            .map(|(c, _)| c.id)
-            .collect();
-        for id in ids {
-            let _mutation = self.server_mutation(&id).await;
-            self.backends.stop(&id).await;
-        }
+        self.backends.shutdown().await;
         self.audit.close();
     }
 

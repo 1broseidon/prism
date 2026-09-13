@@ -375,9 +375,50 @@ fn launchctl(args: &[&str]) -> Result<String> {
 fn macos_disabled() -> Result<bool> {
     let domain = format!("gui/{}", unsafe { libc::geteuid() });
     let output = launchctl(&["print-disabled", &domain])?;
-    Ok(output
+    macos_disabled_state(&output)
+}
+
+/// launchctl changed booleans to enabled/disabled in Ventura. Its human-readable output
+/// is not a stable API: reject unfamiliar or incomplete output rather than assume enabled.
+#[cfg(any(target_os = "macos", test))]
+fn macos_disabled_state(output: &str) -> Result<bool> {
+    let invalid = || {
+        "The login service returned an unrecognized startup state. Check System Settings and retry."
+            .to_string()
+    };
+    let mut lines = output
         .lines()
-        .any(|line| line.trim().trim_end_matches(';') == format!("\"{ID}\" => true")))
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    if lines.next() != Some("disabled services = {") {
+        return Err(invalid());
+    }
+    let mut disabled = None;
+    while let Some(line) = lines.next() {
+        if line == "}" {
+            return if lines.next().is_none() {
+                Ok(disabled.unwrap_or(false))
+            } else {
+                Err(invalid())
+            };
+        }
+        let (label, value) = line.split_once("=>").ok_or_else(invalid)?;
+        let label = label
+            .trim()
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .filter(|s| !s.is_empty())
+            .ok_or_else(invalid)?;
+        let value = match value.trim().trim_end_matches([';', ',']).trim() {
+            "true" | "disabled" => true,
+            "false" | "enabled" => false,
+            _ => return Err(invalid()),
+        };
+        if label == ID && disabled.replace(value).is_some() {
+            return Err(invalid());
+        }
+    }
+    Err(invalid())
 }
 
 #[cfg(target_os = "macos")]

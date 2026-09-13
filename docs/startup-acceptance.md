@@ -21,7 +21,7 @@ Run these on the Windows VM, Mac mini and a Linux desktop. Record pass/fail and 
 | Login | Quit Prism, log out and sign in again. | Exactly one Prism instance runs in the tray. No panel or browser opens solely because Prism launched. |
 | Reboot | Reboot, then sign in. | The same single, quiet startup occurs. |
 | Gateway | After automatic startup, connect a configured client and list tools from an enabled server. | The configured endpoint works with existing credentials and permissions. A pending approval still follows its configured attention setting. |
-| Manual relaunch | Launch Prism again while its automatic instance is running. | The existing panel opens; no duplicate gateway or port-conflict notice appears. |
+| Manual relaunch | Launch Prism again while its automatic instance is running. On macOS, test Finder or `open -a Prism` as well as launching the executable directly. | The existing panel opens for both LaunchServices reopen and a second-process launch; no duplicate gateway or port-conflict notice appears. |
 | Disable | Turn startup off, reopen Settings, then log out/in and repeat after a reboot. | The switch stays off and Prism stays stopped. |
 | OS override | Enable in Prism, disable the entry using the OS startup controls where available, and reopen/focus Settings. | Settings reads the disabled state. Merely opening or updating Prism does not re-enable it. Explicitly enabling in Prism can enable it again. |
 | Repeated changes | Toggle on/off several times and inspect the OS entry. | At most one owned entry exists; disabling leaves no active entry. |
@@ -29,6 +29,7 @@ Run these on the Windows VM, Mac mini and a Linux desktop. Record pass/fail and 
 | Upgrade while on | Enable startup, replace the installation with the next candidate through the same package path, and log out/in. | One instance of the replacement starts quietly. If its path changed, Settings reports Repair instead of claiming the old target is correct. |
 | Credential recovery | In a test account where supported, start with the credential store locked or unavailable, then unlock it. | The tray and Settings remain usable. A gateway startup failure offers Retry; an affected server offers recovery/restart. Recovery restores tool access without adding the server again. If this condition cannot be induced, record it as untested. |
 | Removal | Turn startup off before uninstalling or removing the test app. | No active Prism startup entry remains. |
+| Quit during connection | Restart a slow/unresponsive server, then choose Quit while it is connecting. | Prism exits promptly rather than waiting for its connection timeout. |
 
 ## OS registration
 

@@ -88,6 +88,90 @@ fn headers(key: &str) -> BTreeMap<String, String> {
 }
 
 #[tokio::test]
+async fn shutdown_cancels_a_stalled_restart_without_waiting_for_its_mutation_lock() {
+    let (_dir, gateway, _store) = gateway().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let request_reached = reached.clone();
+    let app = axum::Router::new().fallback(move || {
+        request_reached.notify_one();
+        std::future::pending::<http::StatusCode>()
+    });
+    let serving = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut config = server("slow");
+    config.url = Some(url);
+    gateway.add_server(config).await.unwrap();
+    // Prepare an enabled restart without connecting in the setup step.
+    gateway.config.write().await.servers[0].enabled = true;
+    let restarting = gateway.clone();
+    let restart = tokio::spawn(async move { restarting.restart_server("slow").await });
+    tokio::time::timeout(Duration::from_secs(2), reached.notified())
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(1), gateway.shutdown())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), restart)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(gateway
+        .backends
+        .snapshot()
+        .await
+        .iter()
+        .all(|(_, status)| matches!(status, BackendStatus::Stopped)));
+    assert!(gateway.backends.list_tools(false).await.is_empty());
+    serving.abort();
+}
+
+#[tokio::test]
+async fn shutdown_does_not_wait_for_credential_cleanup_or_allow_its_late_activation() {
+    let (_dir, gateway, store) = gateway().await;
+    let added = gateway.add_server(server("one")).await.unwrap();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, receive) = std::sync::mpsc::channel();
+    *store.gate.lock().unwrap() = Some(DeleteGate {
+        id: added.credential_ref.unwrap(),
+        entered,
+        release: receive,
+    });
+    let updating = gateway.clone();
+    let edit = tokio::spawn(async move {
+        updating
+            .update_server(
+                "one",
+                ServerUpdate {
+                    headers: Some(headers("new-key")),
+                    ..Default::default()
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(1), gateway.shutdown()).await;
+    // Release even on regression so the test never strands a blocking keyring thread.
+    release.send(()).unwrap();
+    stopped.unwrap();
+    edit.await.unwrap().unwrap();
+    assert!(gateway
+        .backends
+        .snapshot()
+        .await
+        .iter()
+        .all(|(_, status)| matches!(status, BackendStatus::Stopped)));
+}
+
+#[tokio::test]
 async fn edits_serialize_with_remove_newer_edit_and_restart_through_cleanup() {
     for operation in ["remove", "edit", "restart"] {
         let (_dir, gateway, store) = gateway().await;

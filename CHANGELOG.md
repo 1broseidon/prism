@@ -13,6 +13,9 @@ All notable changes to Prism are recorded here. The format follows [Keep a Chang
 - **Edit** updates a server in place, including its authentication or command settings, while preserving rules and hidden tools. Unfinished edits can be resumed after closing the panel. Stored keys remain private; changing a key's header or destination origin requires entering it again.
 
 ### Fixed
+- Remote HTTP requests no longer follow redirects that could forward custom API-key headers or request bodies. OAuth readiness and 401 diagnosis inspect metadata without creating throwaway client registrations; explicit sign-in performs registration.
+- Quit cancels backend connection work without waiting on server edits or credential cleanup, and queued operations cannot restart backends after shutdown.
+- macOS startup recognizes both boolean and enabled/disabled override values, reporting unknown output as an error. Reopening Prism through LaunchServices opens the existing panel.
 - Abandoned OAuth registrations and never-approved requests expire after 24 hours at startup or the next registration. Cleanup preserves decisions, operator rules and policy changes, token history, manual agents, harness records and active consent or sessions. Registration origin comes from the socket peer, not client-supplied metadata or forwarding headers.
 - Failed server initialization reports safe HTTP and JSON-RPC codes with actionable explanations for protocol, Host, access, response and timeout failures. HTTP 403 stays an access refusal, including when it carries an OAuth challenge; provider text and command stderr stay out of diagnostics.
 - Rules containing unavailable tag predicates are marked Inert, including inside `not`, `all` and `any`. Negating an unsupported tag can no longer turn an allow rule into a match for every action.

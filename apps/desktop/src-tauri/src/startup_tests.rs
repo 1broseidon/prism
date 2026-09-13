@@ -39,6 +39,50 @@ fn macos_xml_round_trips_paths_and_disabled_registrations() {
 }
 
 #[test]
+fn macos_disabled_overrides_accept_boolean_and_ventura_output() {
+    for (value, expected) in [
+        ("true", true),
+        ("disabled", true),
+        ("false", false),
+        ("enabled", false),
+    ] {
+        for suffix in ["", ";", ","] {
+            let output = format!("disabled services = {{\n\t\"other.service\" => disabled\n \"{ID}\"  =>  {value}{suffix}\n}}\n");
+            assert_eq!(macos_disabled_state(&output).unwrap(), expected);
+        }
+    }
+    assert!(!macos_disabled_state("disabled services = {\n}\n").unwrap());
+    assert!(!macos_disabled_state(&format!(
+        "disabled services = {{\n \"{ID}.other\" => disabled\n}}\n"
+    ))
+    .unwrap());
+}
+
+#[test]
+fn macos_unrecognized_or_incomplete_output_is_unknown_instead_of_enabled() {
+    for output in [
+        String::new(),
+        "new launchctl format".into(),
+        "disabled services = {\n".into(),
+        format!("disabled services = {{\n \"{ID}\" => pending\n}}"),
+        format!("disabled services = {{\n \"{ID}\" => disabled\n \"{ID}\" => enabled\n}}"),
+        format!("disabled services = {{\n {ID} => disabled\n}}"),
+        "disabled services = {\n}\ntrailing output".into(),
+    ] {
+        assert!(macos_disabled_state(&output).is_err(), "{output:?}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_launchctl_disabled_output_matches_a_supported_format() {
+    // Read only; do not alter a login item on the test host. Also exercises actual
+    // launchctl output on macOS CI, beyond the old/new-format regression fixtures.
+    let output = launchctl(&["print-disabled", "system"]).unwrap();
+    macos_disabled_state(&output).unwrap();
+}
+
+#[test]
 fn linux_disabled_custom_and_stale_entries_report_truthfully() {
     let path = Path::new("/opt/Prism/prism-desktop");
     let entry = linux_entry(path).unwrap();

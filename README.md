@@ -104,6 +104,8 @@ URLs must be https, except plain http to this machine. Headers and tokens follow
 
 **Edit a server.** Open it from **Servers**, then choose **Edit** to change its name, URL and authentication, or its command and launch settings. Save reconnects it in place, preserving its ID, rules and hidden tools. Renaming changes the `{server}__{tool}` names that agents see. An authentication mismatch also offers **Edit** directly on the row.
 
+Authentication checks read the server's published capabilities; they do not register OAuth clients or start sign-in. Registration happens when you explicitly choose **Sign in**, and a provider can still refuse it. Remote HTTP requests do not follow redirects, so custom API keys and request contents stay at the requested endpoint. If a server redirects, configure its final MCP URL directly.
+
 Names are trimmed to 1–80 characters and must be unique without regard to case. Server names cannot contain `__` or end with `_`, because those would make tool namespaces ambiguous. Connected clients receive a tool-list update after a rename; calls using the old namespace are refused.
 
 Stored secrets are never filled into the editor. Leave the API key blank to keep it; enter it again to change its header or move to another origin. Changing an OAuth URL requires signing in again. For commands, untouched arguments and blank environment keep the stored values; clearing edited arguments or choosing **Clear stored environment** removes them. Closing the panel parks an unfinished edit in memory, available from **Now → Resume**; Save, Cancel and Discard clear its secret draft.

@@ -39,6 +39,10 @@ pub(crate) use revocation::sign_out;
 #[path = "remote_diagnostics_tests.rs"]
 mod diagnostic_tests;
 
+#[cfg(test)]
+#[path = "remote_safety_tests.rs"]
+mod safety_tests;
+
 /// Name registered with the authorization server; it is what the consent page shows.
 pub const CLIENT_NAME: &str = "Prism";
 /// How long a browser sign-in may stay open before the loopback listener gives up.
@@ -50,6 +54,9 @@ use crate::backend::{AuthHint, McpClient, Upstream};
 fn http_client() -> Result<reqwest::Client> {
     // No global timeout: SSE responses stay open for as long as the session lives.
     reqwest::Client::builder()
+        // Custom API-key headers are not stripped by reqwest on cross-origin redirects.
+        // Require configured MCP and discovered OAuth endpoints to answer directly.
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .user_agent(format!("Prism/{}", env!("CARGO_PKG_VERSION")))
         .build()
@@ -160,7 +167,7 @@ fn auth_hint(readiness: std::result::Result<(), BearerReason>) -> AuthHint {
     }
 }
 
-/// Discovery and registration only: no browser, tokens, or persisted probe credentials.
+/// Read published capabilities without creating a registration or authorization state.
 async fn oauth_readiness(
     url: &str,
     challenge: Option<&str>,
@@ -185,30 +192,34 @@ async fn oauth_readiness(
             },
         );
     }
-    let issuer = resolution.metadata.issuer.clone();
-    manager.set_metadata(resolution.metadata);
+    let metadata = resolution.metadata;
+    validate_url(&metadata.authorization_endpoint).map_err(|_| BearerReason::OauthBroken)?;
+    validate_url(&metadata.token_endpoint).map_err(|_| BearerReason::OauthBroken)?;
+    // Match the authorization flow's capability checks. Omitted PKCE metadata is tolerated
+    // by rmcp, but an explicit list excluding S256 cannot support the flow we will request.
+    if metadata
+        .response_types_supported
+        .as_ref()
+        .is_some_and(|types| !types.iter().any(|t| t == "code"))
+        || metadata
+            .code_challenge_methods_supported
+            .as_ref()
+            .is_some_and(|methods| !methods.iter().any(|m| m == "S256"))
+    {
+        return Err(BearerReason::OauthBroken);
+    }
     if let Some(tokens) = tokens {
         if let Some(stored) = tokens.load().await.map_err(bearer_reason)? {
-            if !stored.client_id.is_empty() && stored.issuer == issuer {
-                manager
-                    .configure_client_id(&stored.client_id)
-                    .map_err(bearer_reason)?;
-                manager
-                    .get_authorization_url(&[])
-                    .await
-                    .map_err(bearer_reason)?;
+            if !stored.client_id.is_empty() && stored.issuer == metadata.issuer {
                 return Ok(());
             }
         }
     }
-    manager
-        .register_client(CLIENT_NAME, "http://127.0.0.1/callback", &[])
-        .await
-        .map_err(bearer_reason)?;
-    manager
-        .get_authorization_url(&[])
-        .await
-        .map_err(bearer_reason)?;
+    let registration = metadata
+        .registration_endpoint
+        .as_deref()
+        .ok_or(BearerReason::NoClientRegistration)?;
+    validate_url(registration).map_err(|_| BearerReason::OauthBroken)?;
     Ok(())
 }
 
@@ -1228,6 +1239,10 @@ mod tests {
                 hint: AuthHint::OauthAvailable
             }
         );
+        assert!(
+            gateway.config.read().await.clients.is_empty(),
+            "probing and 401 diagnosis must not register an OAuth client"
+        );
         gateway.shutdown().await;
     }
 
@@ -1285,7 +1300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_requires_registration_and_accepts_an_existing_matching_registration() {
+    async fn probe_requires_advertised_registration_or_an_existing_matching_client() {
         let (base, task) = metadata_server(true, false).await;
         let url = format!("{base}/mcp");
         assert_eq!(

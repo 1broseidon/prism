@@ -1874,6 +1874,12 @@ pub fn run() {
     };
 
     app.run(|app, event| {
+        // LaunchServices reopens the existing macOS process without starting another
+        // executable, so the single-instance plugin cannot surface the panel for us.
+        #[cfg(target_os = "macos")]
+        if let RunEvent::Reopen { .. } = &event {
+            show_panel(app, "app");
+        }
         if let RunEvent::Exit = event {
             if let Some(state) = app.try_state::<AppState>() {
                 let gateway = state.gateway.clone();
